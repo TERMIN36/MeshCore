@@ -100,9 +100,6 @@ public:
 
   void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override {
     translateUtf8KeepCyrillic(dest, src, dest_size);
-    for (char* p = dest; *p; p++) {
-      if (*p == '\xDB') *p = '?';  // no block glyph in the U8g2 Cyrillic fonts
-    }
   }
 
   void fillRect(int x, int y, int w, int h) override {

@@ -18,6 +18,11 @@
 
 struct CyrBitmapFont;
 
+// Logical grid height the UI lays out against; EINK_SCALE_Y maps it onto the panel.
+#ifndef EINK_LOGICAL_HEIGHT
+  #define EINK_LOGICAL_HEIGHT 128
+#endif
+
 class GxEPDDisplay : public DisplayDriver {
 
 #if defined(EINK_DISPLAY_MODEL)
@@ -44,12 +49,15 @@ class GxEPDDisplay : public DisplayDriver {
   void printSpan(const char* begin, const char* end);
   int codepointWidthPx(uint32_t cp) const;
   int textLineStep() const;
+  int baselinePx(int y) const;
+  void cleanScreen();
   CRC32 display_crc;
   int last_display_crc_value = 0;
+  uint16_t _partial_updates = 0;   // since the last full refresh
 
 public:
 #if defined(EINK_DISPLAY_MODEL)
-  GxEPDDisplay() : DisplayDriver(128, 128), display(EINK_DISPLAY_MODEL(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_BUSY)) {}
+  GxEPDDisplay() : DisplayDriver(128, EINK_LOGICAL_HEIGHT), display(EINK_DISPLAY_MODEL(PIN_DISPLAY_CS, PIN_DISPLAY_DC, PIN_DISPLAY_RST, PIN_DISPLAY_BUSY)) {}
 #else
   GxEPDDisplay() : DisplayDriver(128, 128), display(GxEPD2_150_BN(DISP_CS, DISP_DC, DISP_RST, DISP_BUSY)) {}
 #endif
@@ -66,7 +74,7 @@ public:
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;
-  void printWordWrap(const char* str, int max_width) override;
+  const char* printWordWrap(const char* str, int max_width) override;
   void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override;
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;

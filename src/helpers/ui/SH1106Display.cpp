@@ -110,14 +110,15 @@ void SH1106Display::print(const char *str)
   display.setCursor(pen_x, pen_y);
 }
 
-void SH1106Display::printWordWrap(const char *str, int max_width)
+const char* SH1106Display::printWordWrap(const char *str, int max_width)
 {
   pen_x = display.getCursorX();
   pen_y = display.getCursorY();
   wrap_px = 0;
   int limit = display.width() - pen_x;
-  cyrWordWrap(str, max_width < limit ? max_width : limit, display.height());
+  const char* rest = cyrWordWrap(str, max_width < limit ? max_width : limit, display.height());
   display.setCursor(pen_x, pen_y);
+  return rest;
 }
 
 void SH1106Display::translateUTF8ToBlocks(char *dest, const char *src, size_t dest_size)

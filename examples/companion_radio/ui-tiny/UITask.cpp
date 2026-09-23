@@ -35,19 +35,11 @@ class SplashScreen : public UIScreen {
   UITask* _task;
   unsigned long dismiss_after;
   unsigned long version_after;
-  char _version_info[12];
+  char _version_info[24];
 
 public:
   SplashScreen(UITask* task) : _task(task) {
-    // strip off dash and commit hash by changing dash to null terminator
-    // e.g: v1.2.3-abcdef -> v1.2.3
-    const char *ver = FIRMWARE_VERSION;
-    const char *dash = strchr(ver, '-');
-
-    int len = dash ? dash - ver : strlen(ver);
-    if (len >= sizeof(_version_info)) len = sizeof(_version_info) - 1;
-    memcpy(_version_info, ver, len);
-    _version_info[len] = 0;
+    firmwareVersionNoHash(_version_info, sizeof(_version_info), FIRMWARE_VERSION);
 
     version_after = millis() + BOOT_SCREEN_MILLIS / 2;
     dismiss_after = millis() + BOOT_SCREEN_MILLIS;

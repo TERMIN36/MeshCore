@@ -72,7 +72,7 @@ public:
   void cyrPrint(const char* str) { cyrPrint(str, str + strlen(str)); }
 
   // Breaks at spaces, '-' and '/', like SSD1306Display::printWordWrap().
-  void cyrWordWrap(const char* str, int max_px, int bottom_px) {
+  const char* cyrWordWrap(const char* str, int max_px, int bottom_px) {
     int origin = pen_x;
     if (max_px < 1) max_px = 1;
     const char* p = str;
@@ -98,11 +98,12 @@ public:
       p = cut;
       if (*p) {
         int next_y = pen_y + cyrLineStep();
-        if (next_y >= bottom_px) break;
+        if (next_y + 8 * scale_y > bottom_px) break;
         pen_x = origin;
         pen_y = next_y;
       }
     }
+    return p;
   }
 
 private:

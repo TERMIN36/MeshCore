@@ -37,9 +37,7 @@
   #define FIRMWARE_BUILD_DATE   "14 Aug 2026"
 #endif
 
-#ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.17.1"
-#endif
+#include <helpers/FirmwareVersion.h>
 
 #define FIRMWARE_ROLE "sensor"
 

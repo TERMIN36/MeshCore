@@ -79,7 +79,20 @@ inline const char* utf8Next(const char* s, uint32_t& cp) {
   return s + 1;
 }
 
+// Collapses runs of spaces into one and trims them at both ends, in place.
+inline void squeezeSpaces(char* s) {
+  char* out = s;
+  for (const char* p = s; *p; p++) {
+    if (*p == ' ' && (out == s || out[-1] == ' ')) continue;
+    *out++ = *p;
+  }
+  while (out > s && out[-1] == ' ') out--;
+  *out = 0;
+}
+
+// Keeps printable ASCII and Cyrillic; emoji, symbols and control chars become spaces.
 inline void translateUtf8KeepCyrillic(char* dest, const char* src, size_t dest_size) {
+  if (dest_size == 0) return;
   size_t j = 0;
   const char* p = src;
   while (*p && j + 1 < dest_size) {
@@ -93,9 +106,10 @@ inline void translateUtf8KeepCyrillic(char* dest, const char* src, size_t dest_s
       if (j + n >= dest_size) break;
       memcpy(dest + j, start, n);
       j += n;
-    } else if (cp >= 0x80) {
-      dest[j++] = '\xDB';
+    } else {
+      dest[j++] = ' ';
     }
   }
   dest[j] = 0;
+  squeezeSpaces(dest);
 }

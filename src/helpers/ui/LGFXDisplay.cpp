@@ -90,13 +90,14 @@ void LGFXDisplay::print(const char* str) {
 //  Serial.println(str);
 }
 
-void LGFXDisplay::printWordWrap(const char* str, int max_width) {
+const char* LGFXDisplay::printWordWrap(const char* str, int max_width) {
   pen_x = buffer.getCursorX();
   pen_y = buffer.getCursorY();
   wrap_px = 0;
   int limit = buffer.width() - pen_x;
-  cyrWordWrap(str, max_width < limit ? max_width : limit, buffer.height());
+  const char* rest = cyrWordWrap(str, max_width < limit ? max_width : limit, buffer.height());
   buffer.setCursor(pen_x, pen_y);
+  return rest;
 }
 
 void LGFXDisplay::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {

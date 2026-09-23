@@ -11,6 +11,13 @@
   #define DISPLAY_ROTATION 3
 #endif
 
+#ifndef EINK_FULL_REFRESH_EVERY
+  #define EINK_FULL_REFRESH_EVERY 20   // partial updates leave ghosting, a full refresh clears it
+#endif
+#ifndef EINK_CLEAN_BLACK_FIRST
+  #define EINK_CLEAN_BLACK_FIRST 0
+#endif
+
 #ifdef ESP32
   SPIClass SPI1 = SPIClass(FSPI);
 #endif
@@ -40,13 +47,26 @@ bool GxEPDDisplay::begin() {
   display.setPartialWindow(0, 0, display.width(), display.height());
 
   display.fillScreen(GxEPD_WHITE);
-  display.display(true);
+  cleanScreen();   // wipes the image left from before power-up
   #if DISP_BACKLIGHT
   digitalWrite(DISP_BACKLIGHT, LOW);
   pinMode(DISP_BACKLIGHT, OUTPUT);
   #endif
   _init = true;
   return true;
+}
+
+// Full white fill (~3.5 s per full refresh on SSD1680 panels). Unlike
+// display(false), which drives the panel through the inverse of the current
+// image, this leaves both controller buffers white, so the next partial update
+// redraws the whole frame instead of only the pixels that changed.
+// EINK_CLEAN_BLACK_FIRST adds a black fill before it: cleaner, twice as slow.
+void GxEPDDisplay::cleanScreen() {
+#if EINK_CLEAN_BLACK_FIRST
+  display.clearScreen(0x00);
+#endif
+  display.clearScreen(0xFF);
+  _partial_updates = 0;
 }
 
 void GxEPDDisplay::turnOn() {
@@ -130,20 +150,34 @@ void GxEPDDisplay::setColor(ColorVal c) {
   display.setTextColor(_curr_color = c);
 }
 
-void GxEPDDisplay::setCursor(int x, int y) {
-  _lx = x;
-  _ly = y;
-  display_crc.update<int>(x);
-  display_crc.update<int>(y);
-  display.setCursor((x+offset_x)*scale_x, (y+offset_y)*scale_y);
-}
-
 static const GFXfont* latinFace(int textSize) {
   switch (textSize) {
     case 2: return &FreeSansBold12pt7b;
     case 3: return &FreeSans18pt7b;
     default: return &FreeSans9pt7b;
   }
+}
+
+static int capHeightPx(const GFXfont* font) {
+  GFXfont face;
+  memcpy_P(&face, font, sizeof(face));
+  GFXglyph glyph;
+  memcpy_P(&glyph, face.glyph + ('H' - face.first), sizeof(glyph));
+  return -glyph.yOffset;
+}
+
+// EINK_Y_OFFSET places the size 1 baseline; larger faces drop by their extra cap
+// height so that y stays the top of the text for every size.
+int GxEPDDisplay::baselinePx(int y) const {
+  return (int)((y + offset_y) * scale_y) + capHeightPx(latinFace(_textSize)) - capHeightPx(&FreeSans9pt7b);
+}
+
+void GxEPDDisplay::setCursor(int x, int y) {
+  _lx = x;
+  _ly = y;
+  display_crc.update<int>(x);
+  display_crc.update<int>(y);
+  display.setCursor((x+offset_x)*scale_x, baselinePx(y));
 }
 
 static int latinAdvance(const GFXfont* font, uint32_t cp) {
@@ -209,7 +243,7 @@ void GxEPDDisplay::print(const char* str) {
   printSpan(str, str + strlen(str));
 }
 
-void GxEPDDisplay::printWordWrap(const char* str, int max_width) {
+const char* GxEPDDisplay::printWordWrap(const char* str, int max_width) {
   int origin = _lx;
   int y = _ly;
   int origin_px = (int)((origin + offset_x) * scale_x);
@@ -228,7 +262,7 @@ void GxEPDDisplay::printWordWrap(const char* str, int max_width) {
   bool first = true;
   const char* p = str;
   while (*p) {
-    int baseline = (int)((y + offset_y) * scale_y);
+    int baseline = baselinePx(y);
     if (!first && (baseline < 0 || baseline + descent >= display.height())) break;
 
     const char* line = p;
@@ -257,6 +291,7 @@ void GxEPDDisplay::printWordWrap(const char* str, int max_width) {
   display.setTextWrap(true);
   _lx = origin;
   _ly = y;
+  return p;
 }
 
 void GxEPDDisplay::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {
@@ -325,30 +360,19 @@ uint16_t GxEPDDisplay::getTextWidth(const char* str) {
   for (const char* q = str; *q; q++) {
     if ((uint8_t)*q >= 0x80) { utf8 = true; break; }
   }
-  int16_t x1, y1;
-  uint16_t w, h;
   if (!utf8) {
+    int16_t x1, y1;
+    uint16_t w, h;
     display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
     return ceil((w + 1) / scale_x);
   }
+  // Ink bounds of Latin runs would drop spaces; sum advances as printSpan() moves the cursor.
   int px = 0;
   const char* p = str;
   while (*p) {
-    if ((uint8_t)*p < 0x80) {
-      char buf[64];
-      int n = 0;
-      while (*p && (uint8_t)*p < 0x80 && n < (int)sizeof(buf) - 1) {
-        buf[n++] = *p++;
-      }
-      buf[n] = 0;
-      display.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
-      px += w;
-    } else {
-      uint32_t cp = 0;
-      p = utf8Next(p, cp);
-      int idx = cyrillicGlyphIndex(cp);
-      px += idx >= 0 ? cyrAdvance(cyrFace(), idx) : (cyrFace().height * 2) / 3;
-    }
+    uint32_t cp = 0;
+    p = utf8Next(p, cp);
+    px += codepointWidthPx(cp);
   }
   return ceil((px + 1) / scale_x);
 }
@@ -356,6 +380,7 @@ uint16_t GxEPDDisplay::getTextWidth(const char* str) {
 void GxEPDDisplay::endFrame() {
   uint32_t crc = display_crc.finalize();
   if (crc != last_display_crc_value) {
+    if (++_partial_updates >= EINK_FULL_REFRESH_EVERY) cleanScreen();
     display.display(true);
     last_display_crc_value = crc;
   }

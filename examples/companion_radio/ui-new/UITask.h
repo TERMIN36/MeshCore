@@ -75,6 +75,7 @@ public:
 
   void gotoHomeScreen() { setCurrScreen(home); }
   void keepDisplayAwake();
+  void requestRefresh() { _next_refresh = 0; }
   void showAlert(const char* text, int duration_millis);
   int  getMsgCount() const { return _msgcount; }
   bool hasDisplay() const { return _display != NULL; }

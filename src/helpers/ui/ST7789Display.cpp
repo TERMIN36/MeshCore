@@ -200,7 +200,7 @@ void ST7789Display::print(const char* str) {
   printSpan(str, str + strlen(str));
 }
 
-void ST7789Display::printWordWrap(const char* str, int max_width) {
+const char* ST7789Display::printWordWrap(const char* str, int max_width) {
   int origin = _lx;
   int y = _ly;
   int origin_px = (int)(origin * SCALE_X + X_OFFSET);
@@ -236,12 +236,13 @@ void ST7789Display::printWordWrap(const char* str, int max_width) {
     p = cut;
     if (*p) {
       int next_y = y + step;
-      if (next_y >= height()) break;
+      if (next_y + step - 1 > height()) break;
       y = next_y;
     }
   }
   _lx = origin;
   _ly = y;
+  return p;
 }
 
 void ST7789Display::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {

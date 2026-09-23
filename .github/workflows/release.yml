@@ -27,6 +27,19 @@ jobs:
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
 
+      - name: Check Tag Matches Source Version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          SOURCE_VERSION=$(/usr/bin/env bash build.sh get-version)
+          TAG="${{ github.ref_name }}"
+          case "$TAG" in
+            "$SOURCE_VERSION"|"$SOURCE_VERSION"-rc*|"$SOURCE_VERSION"-beta*|"$SOURCE_VERSION"-alpha*) ;;
+            *)
+              echo "::error::Tag $TAG does not match $SOURCE_VERSION from src/helpers/FirmwareVersion.h"
+              exit 1
+              ;;
+          esac
+
       - name: Get Build Targets
         id: get-build-targets
         run: |
@@ -57,7 +70,8 @@ jobs:
 
       - name: Build Firmware
         env:
-          FIRMWARE_VERSION: ${{ github.ref_name }}
+          # tag builds embed the tag, manual runs fall back to the version in the source
+          FIRMWARE_VERSION: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || '' }}
         run: |
           /usr/bin/env bash build.sh build-firmware ${{ matrix.target }}
           ls out/* > /dev/null # fail the job when the board produced no files
@@ -91,7 +105,8 @@ jobs:
           body_path: .github/release-notes.md
           generate_release_notes: true
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ !contains(github.ref_name, '-') }}
+          # every tag has a dash (v1.17.1-0.1.1), only -rc/-beta/-alpha suffixes mark a prerelease
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+          make_latest: ${{ !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
           files: out/*
           fail_on_unmatched_files: true

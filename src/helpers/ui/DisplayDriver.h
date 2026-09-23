@@ -31,7 +31,8 @@ public:
   virtual void setColor(ColorVal c) = 0;
   virtual void setCursor(int x, int y) = 0;
   virtual void print(const char* str) = 0;
-  virtual void printWordWrap(const char* str, int max_width) { print(str); }   // fallback to basic print() if no override
+  // returns the first char that did not fit on screen (points at '\0' if everything was drawn)
+  virtual const char* printWordWrap(const char* str, int max_width) { print(str); return str + strlen(str); }   // fallback to basic print() if no override
   virtual void fillRect(int x, int y, int w, int h) = 0;
   virtual void drawRect(int x, int y, int w, int h) = 0;
   virtual void drawXbm(int x, int y, const uint8_t* bits, int w, int h) = 0;
@@ -51,19 +52,23 @@ public:
     print(str);
   }
   
-  // convert UTF-8 characters to displayable block characters for compatibility
+  // keep printable ASCII; any other UTF-8 char becomes a space, runs of spaces collapse to one
   virtual void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {
+    if (dest_size == 0) return;
     size_t j = 0;
     for (size_t i = 0; src[i] != 0 && j < dest_size - 1; i++) {
       unsigned char c = (unsigned char)src[i];
-      if (c >= 32 && c <= 126) {
-        dest[j++] = c;  // ASCII printable
-      } else if (c >= 0x80) {
-        dest[j++] = '\xDB';  // CP437 full block █
-        while (src[i+1] && (src[i+1] & 0xC0) == 0x80) 
+      if (c > 32 && c <= 126) {
+        dest[j++] = c;
+      } else if (j > 0 && dest[j-1] != ' ') {
+        dest[j++] = ' ';
+      }
+      if (c >= 0x80) {
+        while (src[i+1] && (src[i+1] & 0xC0) == 0x80)
           i++;  // skip UTF-8 continuation bytes
       }
     }
+    while (j > 0 && dest[j-1] == ' ') j--;
     dest[j] = 0;
   }
   

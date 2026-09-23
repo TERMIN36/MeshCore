@@ -504,16 +504,18 @@ void NV3001BDisplay::cyrFill(int x, int y, int w, int h) {
   fillPhysicalRect(x, y, w, h);
 }
 
-void NV3001BDisplay::printWordWrap(const char* str, int max_width) {
-  if (!str || !is_on) return;
+const char* NV3001BDisplay::printWordWrap(const char* str, int max_width) {
+  if (!str) return str;
+  if (!is_on) return str + strlen(str);
   syncCyrScale();
   pen_x = cursor_x;
   pen_y = cursor_y;
   int max_px = max_width * DISPLAY_SCALE_X;
   int limit = NV3001B_SCREEN_WIDTH - pen_x;
-  cyrWordWrap(str, max_px < limit ? max_px : limit, NV3001B_SCREEN_HEIGHT);
+  const char* rest = cyrWordWrap(str, max_px < limit ? max_px : limit, NV3001B_SCREEN_HEIGHT);
   cursor_x = pen_x;
   cursor_y = pen_y;
+  return rest;
 }
 
 void NV3001BDisplay::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {

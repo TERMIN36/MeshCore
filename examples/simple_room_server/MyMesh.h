@@ -31,9 +31,7 @@
   #define FIRMWARE_BUILD_DATE   "14 Aug 2026"
 #endif
 
-#ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION   "v1.17.1"
-#endif
+#include <helpers/FirmwareVersion.h>
 
 #ifndef LORA_FREQ
   #define LORA_FREQ   915.0

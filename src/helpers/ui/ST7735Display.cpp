@@ -582,14 +582,15 @@ void ST7735Display::print(const char* str) {
   sprite->setCursor(pen_x, pen_y);
 }
 
-void ST7735Display::printWordWrap(const char* str, int max_width) {
+const char* ST7735Display::printWordWrap(const char* str, int max_width) {
   pen_x = sprite->getCursorX();
   pen_y = sprite->getCursorY();
   wrap_px = 0;
   int max_px = max_width * SCALE_X;
   int limit = sprite->width() - pen_x;
-  cyrWordWrap(str, max_px < limit ? max_px : limit, sprite->height());
+  const char* rest = cyrWordWrap(str, max_px < limit ? max_px : limit, sprite->height());
   sprite->setCursor(pen_x, pen_y);
+  return rest;
 }
 
 void ST7735Display::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {

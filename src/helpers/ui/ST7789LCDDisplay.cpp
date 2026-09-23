@@ -135,14 +135,15 @@ void ST7789LCDDisplay::print(const char* str) {
   display.setCursor(pen_x, pen_y);
 }
 
-void ST7789LCDDisplay::printWordWrap(const char* str, int max_width) {
+const char* ST7789LCDDisplay::printWordWrap(const char* str, int max_width) {
   pen_x = display.getCursorX();
   pen_y = display.getCursorY();
   wrap_px = 0;
   int max_px = max_width * DISPLAY_SCALE_X;
   int limit = display.width() - pen_x;
-  cyrWordWrap(str, max_px < limit ? max_px : limit, display.height());
+  const char* rest = cyrWordWrap(str, max_px < limit ? max_px : limit, display.height());
   display.setCursor(pen_x, pen_y);
+  return rest;
 }
 
 void ST7789LCDDisplay::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {

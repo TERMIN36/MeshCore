@@ -50,16 +50,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     _display->turnOn();
   }
 
-  // strip off dash and commit hash by changing dash to null terminator
-  // e.g: v1.2.3-abcdef -> v1.2.3
-  char *version = strdup(FIRMWARE_VERSION);
-  char *dash = strchr(version, '-');
-  if (dash) {
-    *dash = 0;
-  }
-
-  // v1.2.3 (1 Jan 2025)
-  sprintf(_version_info, "%s (%s)", version, FIRMWARE_BUILD_DATE);
+  // "v1.17.1-0.1.1 (date)" is wider than a 128px screen, so the splash shows the version only
+  firmwareVersionNoHash(_version_info, sizeof(_version_info), FIRMWARE_VERSION);
 
 #ifdef PIN_BUZZER
   buzzer.begin();

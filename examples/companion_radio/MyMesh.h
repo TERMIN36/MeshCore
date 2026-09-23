@@ -11,9 +11,7 @@
 #define FIRMWARE_BUILD_DATE "14 Aug 2026"
 #endif
 
-#ifndef FIRMWARE_VERSION
-#define FIRMWARE_VERSION "v1.17.1"
-#endif
+#include <helpers/FirmwareVersion.h>
 
 #if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
 #include <InternalFileSystem.h>

@@ -17,6 +17,7 @@ Commands:
   build-companion-firmwares: Build all companion firmwares for all build targets.
   build-repeater-firmwares: Build all repeater firmwares for all build targets.
   build-room-server-firmwares: Build all chat room server firmwares for all build targets.
+  get-version: Print the firmware version from src/helpers/FirmwareVersion.h (e.g. v1.17.1-0.1.1).
 
 Examples:
 Build firmware for the "RAK_4631_repeater" device target
@@ -42,15 +43,14 @@ Environment Variables:
                    If not set, debug flags from variant platformio.ini files are used.
   DISPLAY_ENVS_ONLY=0: Include boards without a display in build-*-firmwares and release builds.
                    By default only envs with a DISPLAY_CLASS (other than NullDisplayDriver) are built.
+  FIRMWARE_VERSION: Version to embed. Defaults to the version in src/helpers/FirmwareVersion.h.
 
 Examples:
 Build without debug logging:
-$ export FIRMWARE_VERSION=v1.0.0
 $ export DISABLE_DEBUG=1
 $ sh build.sh build-firmware RAK_4631_repeater
 
 Build with debug logging (default, uses flags from variant files):
-$ export FIRMWARE_VERSION=v1.0.0
 $ sh build.sh build-firmware RAK_4631_repeater
 EOF
 }
@@ -151,6 +151,14 @@ for section, options in data:
 "
 }
 
+# firmware version from source: "<upstream version>-<fork version>", e.g. v1.17.1-0.1.1
+get_source_version() {
+  local header="src/helpers/FirmwareVersion.h"
+  local base=$(sed -n 's/^#define MESHCORE_BASE_VERSION *"\([^"]*\)".*/\1/p' "$header")
+  local fork=$(sed -n 's/^#define FORK_VERSION *"\([^"]*\)".*/\1/p' "$header")
+  echo "${base}-${fork}"
+}
+
 # disable all debug logging flags if DISABLE_DEBUG=1 is set
 disable_debug_flags() {
   if [ "$DISABLE_DEBUG" == "1" ]; then
@@ -169,14 +177,13 @@ build_firmware() {
   # set firmware build date
   FIRMWARE_BUILD_DATE=$(date '+%d-%b-%Y')
 
-  # get FIRMWARE_VERSION, which should be provided by the environment
+  # FIRMWARE_VERSION from the environment (release tag), otherwise from src/helpers/FirmwareVersion.h
   if [ -z "$FIRMWARE_VERSION" ]; then
-    echo "FIRMWARE_VERSION must be set in environment"
-    exit 1
+    FIRMWARE_VERSION=$(get_source_version)
   fi
 
   # set firmware version string
-  # e.g: v1.0.0-abcdef
+  # e.g: v1.17.1-0.1.1-abcdef
   FIRMWARE_VERSION_STRING="${FIRMWARE_VERSION}-${COMMIT_HASH}"
 
   # craft filename
@@ -338,4 +345,6 @@ elif [[ $1 == "get-repeater-firmwares-to-build" ]]; then
   get_pio_envs_ending_with_string "_repeater"
 elif [[ $1 == "get-room-server-firmwares-to-build" ]]; then
   get_pio_envs_ending_with_string "_room_server"
+elif [[ $1 == "get-version" ]]; then
+  get_source_version
 fi

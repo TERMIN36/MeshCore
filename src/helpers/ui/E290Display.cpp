@@ -127,15 +127,16 @@ void E290Display::print(const char *str) {
   display.setCursor(pen_x, pen_y);
 }
 
-void E290Display::printWordWrap(const char *str, int max_width) {
+const char* E290Display::printWordWrap(const char *str, int max_width) {
   display_crc.update<char>(str, strlen(str));
   display_crc.update<int>(max_width);
   pen_x = display.getCursorX();
   pen_y = display.getCursorY();
   wrap_px = 0;
   int limit = width() - pen_x;
-  cyrWordWrap(str, max_width < limit ? max_width : limit, height());
+  const char* rest = cyrWordWrap(str, max_width < limit ? max_width : limit, height());
   display.setCursor(pen_x, pen_y);
+  return rest;
 }
 
 void E290Display::translateUTF8ToBlocks(char *dest, const char *src, size_t dest_size) {

@@ -25,6 +25,23 @@
 #endif
 #define NEIGHBOR_SCROLL_MS  2000
 
+#define SCAN_SAMPLE_MILLIS    50   // noise scan RSSI sampling, independent of the frame rate
+#ifndef SCAN_REFRESH_MILLIS
+  #define SCAN_REFRESH_MILLIS       200
+#endif
+#ifndef SCAN_REFRESH_MILLIS_EINK
+  #define SCAN_REFRESH_MILLIS_EINK 3000   // each e-ink update blocks the loop
+#endif
+#define FSCAN_REFRESH_MILLIS  250   // progress bar while the freq scan runs
+
+#ifndef MSG_PAGE_MILLIS
+  #if AUTO_OFF_MILLIS==0   // e-ink: every page flip is a full refresh
+    #define MSG_PAGE_MILLIS 10000
+  #else
+    #define MSG_PAGE_MILLIS  4000
+  #endif
+#endif
+
 #ifndef FSCAN_MAX
   #define FSCAN_MAX 17
 #endif
@@ -72,19 +89,11 @@ static int buildPowerChoices(bool fem, bool cpu_ok, PowerChoice* out) {
 class SplashScreen : public UIScreen {
   UITask* _task;
   unsigned long dismiss_after;
-  char _version_info[12];
+  char _version_info[24];
 
 public:
   SplashScreen(UITask* task) : _task(task) {
-    // strip off dash and commit hash by changing dash to null terminator
-    // e.g: v1.2.3-abcdef -> v1.2.3
-    const char *ver = FIRMWARE_VERSION;
-    const char *dash = strchr(ver, '-');
-
-    int len = dash ? dash - ver : strlen(ver);
-    if (len >= sizeof(_version_info)) len = sizeof(_version_info) - 1;
-    memcpy(_version_info, ver, len);
-    _version_info[len] = 0;
+    firmwareVersionNoHash(_version_info, sizeof(_version_info), FIRMWARE_VERSION);
 
     dismiss_after = millis() + BOOT_SCREEN_MILLIS;
   }
@@ -155,6 +164,23 @@ class HomeScreen : public UIScreen {
   int neighbors_scroll_offset = 0;
   unsigned long neighbors_next_scroll = 0;
   int16_t scan_peak;
+  int16_t scan_live = -127;
+  int32_t scan_sum = 0;       // RSSI samples collected since the last frame
+  uint16_t scan_cnt = 0;
+  bool scan_pkt = false;
+  unsigned long scan_next_sample = 0;
+
+  void sampleNoise() {
+    float rssi = radio_driver.getCurrentRSSI();
+    int v = (int)(rssi + (rssi < 0 ? -0.5f : 0.5f));
+    if (radio_driver.isReceivingPacket()) {
+      scan_pkt = true;
+      return;
+    }
+    scan_sum += v;
+    scan_cnt++;
+    if (scan_peak < -120 || v > scan_peak) scan_peak = (int16_t)v;
+  }
 
   struct FreqScanBin {
     float freq;
@@ -235,6 +261,27 @@ class HomeScreen : public UIScreen {
       fscan_best[out++] = sorted[i];
     }
     fscan_state = FSCAN_DONE;
+  }
+
+  void stepFreqScan() {
+    if (millis() < fscan_ready_at || fscan_i >= fscan_n) return;
+    int sum = 0, n = 0;
+    for (int s = 0; s < 8; s++) {
+      if (!radio_driver.isReceivingPacket()) {
+        sum += (int)radio_driver.getCurrentRSSI();
+        n++;
+      }
+      delay(2);
+    }
+    fscan[fscan_i].rssi = (int16_t)(n > 0 ? (sum / n) : (int)radio_driver.getCurrentRSSI());
+    fscan_i++;
+    if (fscan_i >= fscan_n) {
+      finishFreqScan();
+      _task->requestRefresh();
+    } else {
+      applyScanFreq(fscan[fscan_i].freq);
+      fscan_ready_at = millis() + 35;
+    }
   }
 
 
@@ -335,6 +382,13 @@ public:
   void poll() override {
     if (_page == HomePage::SCAN || _page == HomePage::FSCAN) {
       _task->keepDisplayAwake();
+    }
+    if (_page == HomePage::SCAN && (long)(millis() - scan_next_sample) >= 0) {
+      scan_next_sample = millis() + SCAN_SAMPLE_MILLIS;
+      sampleNoise();
+    }
+    if (_page == HomePage::FSCAN && fscan_state == FSCAN_RUN) {
+      stepFreqScan();
     }
     if (_shutdown_init && !_task->isButtonPressed()) {  // must wait for USR button to be released
       _task->shutdown();
@@ -544,13 +598,15 @@ public:
         display.drawTextCentered(display.width() / 2, y, hint);
       }
     } else if (_page == HomePage::SCAN) {
-      _task->keepDisplayAwake();
-      float rssi = radio_driver.getCurrentRSSI();
-      int live = (int)(rssi + (rssi < 0 ? -0.5f : 0.5f));
-      bool pkt = radio_driver.isReceivingPacket();
-      if (!pkt && (scan_peak < -120 || live > scan_peak)) {
-        scan_peak = (int16_t)live;
+      if (scan_cnt == 0) sampleNoise();
+      if (scan_cnt > 0) {
+        scan_live = (int16_t)((scan_sum - (int32_t)scan_cnt / 2) / (int32_t)scan_cnt);
       }
+      int live = scan_live;
+      bool pkt = scan_pkt;
+      scan_sum = 0;
+      scan_cnt = 0;
+      scan_pkt = false;
       int nl = radio_driver.getNoiseFloor();
 
       display.setColor(UIColor::primary_txt);
@@ -596,27 +652,8 @@ public:
         display.fillRect(bar_x + 1, bar_y + 1, fill - 2, bar_h - 2);
       }
     } else if (_page == HomePage::FSCAN) {
-      _task->keepDisplayAwake();
       display.setTextSize(1);
       if (fscan_state == FSCAN_RUN) {
-        if (millis() >= fscan_ready_at && fscan_i < fscan_n) {
-          int sum = 0, n = 0;
-          for (int s = 0; s < 8; s++) {
-            if (!radio_driver.isReceivingPacket()) {
-              sum += (int)radio_driver.getCurrentRSSI();
-              n++;
-            }
-            delay(2);
-          }
-          fscan[fscan_i].rssi = (int16_t)(n > 0 ? (sum / n) : (int)radio_driver.getCurrentRSSI());
-          fscan_i++;
-          if (fscan_i >= fscan_n) {
-            finishFreqScan();
-          } else {
-            applyScanFreq(fscan[fscan_i].freq);
-            fscan_ready_at = millis() + 35;
-          }
-        }
         display.setColor(UIColor::primary_txt);
         if (fscan_n > 0) {
           sprintf(tmp, "scan %d/%d", (int)fscan_i, (int)fscan_n);
@@ -847,7 +884,13 @@ public:
         display.drawTextCentered(display.width() / 2, 64 - 11, "hibernate:" PRESS_LABEL);
       }
     }
-    if (_page == HomePage::SCAN || _page == HomePage::FSCAN) return 80;
+    if (_page == HomePage::SCAN) {
+      return display.isEink() ? SCAN_REFRESH_MILLIS_EINK : SCAN_REFRESH_MILLIS;
+    }
+    if (_page == HomePage::FSCAN && fscan_state == FSCAN_RUN) {
+      // e-ink skips the progress bar, finishing the scan requests a redraw
+      return display.isEink() ? 5000 : FSCAN_REFRESH_MILLIS;
+    }
     if (_page == HomePage::NEIGHBORS) return 1000;
 #if ENV_INCLUDE_GPS == 1
     if (_page == HomePage::BEACON) return 1000;
@@ -935,6 +978,8 @@ public:
     }
     if (c == KEY_ENTER && _page == HomePage::SCAN) {
       scan_peak = -127;
+      scan_sum = 0;
+      scan_cnt = 0;
       _task->showAlert("Peak reset", 600);
       return true;
     }
@@ -1038,12 +1083,33 @@ class MsgPreviewScreen : public UIScreen {
   struct MsgEntry {
     uint32_t timestamp;
     char origin[62];
-    char msg[78];
+    char msg[MAX_TEXT_LEN + 1];
   };
   #define MAX_UNREAD_MSGS   32
   int num_unread;
   int head = MAX_UNREAD_MSGS - 1; // index of latest unread message
   MsgEntry unread[MAX_UNREAD_MSGS];
+
+  // long messages are split into screen-sized pages that rotate automatically
+  int page_start = 0;   // offset into the filtered text of the page on screen
+  int page_next = 0;    // offset of the following page, 0 when the text ends on this page
+  int page_num = 0;
+  unsigned long page_until = 0;
+
+  void resetPage() {
+    page_start = page_next = page_num = 0;
+    page_until = millis() + MSG_PAGE_MILLIS;
+  }
+
+  void nextPage() {
+    if (page_next > 0) {
+      page_start = page_next;
+      page_num++;
+    } else {
+      page_start = page_num = 0;
+    }
+    page_until = millis() + MSG_PAGE_MILLIS;
+  }
 
 public:
   MsgPreviewScreen(UITask* task, mesh::RTCClock* rtc) : _task(task), _rtc(rtc) { num_unread = 0; }
@@ -1060,43 +1126,82 @@ public:
       sprintf(p->origin, "(%d) %s:", (uint32_t) path_len, from_name);
     }
     StrHelper::strncpy(p->msg, msg, sizeof(p->msg));
+    resetPage();
   }
 
   int render(DisplayDriver& display) override {
-    char tmp[16];
-    display.setCursor(0, 0);
-    display.setTextSize(1);
-    display.setColor(UIColor::corp_blue);
-    sprintf(tmp, "Unread: %d", num_unread);
-    display.print(tmp);
-
     auto p = &unread[head];
-
-    int secs = _rtc->getCurrentTime() - p->timestamp;
-    if (secs < 60) {
-      sprintf(tmp, "%ds", secs);
-    } else if (secs < 60*60) {
-      sprintf(tmp, "%dm", secs / 60);
-    } else {
-      sprintf(tmp, "%dh", secs / (60*60));
-    }
-    display.setCursor(display.width() - display.getTextWidth(tmp) - 2, 0);
-    display.print(tmp);
-
-    display.drawRect(0, 11, display.width(), 1);  // horiz line
-
-    display.setColor(UIColor::secondary_txt);
-    char filtered_origin[sizeof(p->origin)];
-    display.translateUTF8ToBlocks(filtered_origin, p->origin, sizeof(filtered_origin));
-    display.drawTextEllipsized(0, 14, display.width(), filtered_origin);
-
-    display.setCursor(0, 25);
-    display.setColor(UIColor::primary_txt);
     char filtered_msg[sizeof(p->msg)];
     display.translateUTF8ToBlocks(filtered_msg, p->msg, sizeof(filtered_msg));
-    display.printWordWrap(filtered_msg, display.width());
+    int msg_len = strlen(filtered_msg);
+
+    if (page_next > 0 || page_num > 0) {
+      if ((long)(millis() - page_until) >= 0) nextPage();
+    }
+    if (page_start >= msg_len) resetPage();
+
+    // short screens (128x64 OLED and alike) merge the sender into the title row to fit one more text line
+    bool compact = display.height() < 100;
+    int text_y = compact ? 14 : 25;
+
+    display.setTextSize(1);
+    display.setCursor(0, text_y);
+    display.setColor(UIColor::primary_txt);
+    const char* rest = display.printWordWrap(&filtered_msg[page_start], display.width());
+    page_next = (*rest && rest > &filtered_msg[page_start]) ? (int)(rest - filtered_msg) : 0;
+    bool paged = page_next > 0 || page_num > 0;
+
+    char tmp[24];
+    char age[8];
+    int secs = _rtc->getCurrentTime() - p->timestamp;
+    if (secs < 60) {
+      sprintf(age, "%ds", secs);
+    } else if (secs < 60*60) {
+      sprintf(age, "%dm", secs / 60);
+    } else {
+      sprintf(age, "%dh", secs / (60*60));
+    }
+    char page_tag[8] = "";
+    if (paged) sprintf(page_tag, "p%d%s ", page_num + 1, page_next > 0 ? "+" : "");
+
+    char filtered_origin[sizeof(p->origin)];
+    display.translateUTF8ToBlocks(filtered_origin, p->origin, sizeof(filtered_origin));
+
+    if (compact) {
+      if (num_unread > 1) {
+        sprintf(tmp, "%s+%d %s", page_tag, num_unread - 1, age);
+      } else {
+        sprintf(tmp, "%s%s", page_tag, age);
+      }
+      int right_w = display.getTextWidth(tmp);
+      display.setColor(UIColor::corp_blue);
+      display.setCursor(display.width() - right_w - 1, 0);
+      display.print(tmp);
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextEllipsized(0, 0, display.width() - right_w - 4, filtered_origin);
+      display.setColor(UIColor::corp_blue);
+      display.drawRect(0, 11, display.width(), 1);  // horiz line
+    } else {
+      display.setCursor(0, 0);
+      display.setColor(UIColor::corp_blue);
+      sprintf(tmp, "Unread: %d", num_unread);
+      display.print(tmp);
+
+      sprintf(tmp, "%s%s", page_tag, age);
+      display.setCursor(display.width() - display.getTextWidth(tmp) - 2, 0);
+      display.print(tmp);
+
+      display.drawRect(0, 11, display.width(), 1);  // horiz line
+
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextEllipsized(0, 14, display.width(), filtered_origin);
+    }
 
 #if AUTO_OFF_MILLIS==0 // probably e-ink
+    if (paged) {
+      long wait = (long)(page_until - millis());
+      return wait > 200 ? wait : 200;
+    }
     return 10000; // 10 s
 #else
     return 1000;  // next render after 1000 ms
@@ -1107,9 +1212,18 @@ public:
     if (c == KEY_NEXT || c == KEY_RIGHT) {
       head = (head + MAX_UNREAD_MSGS - 1) % MAX_UNREAD_MSGS;
       num_unread--;
+      resetPage();
       if (num_unread == 0) {
         _task->gotoHomeScreen();
       }
+      return true;
+    }
+    if (c == KEY_PREV || c == KEY_DOWN) {   // manual page flip (double click on single-button boards)
+      if (page_next > 0 || page_num > 0) nextPage();
+      return true;
+    }
+    if (c == KEY_UP) {
+      resetPage();
       return true;
     }
     if (c == KEY_ENTER) {

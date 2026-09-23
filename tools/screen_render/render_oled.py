@@ -1,15 +1,22 @@
-"""Offline renders of the companion / repeater UI on a 128x64 SSD1306 OLED.
+"""Offline renders of the companion / repeater UI.
 
-Fonts and icons are parsed from the firmware sources, and the drawing logic
-mirrors SSD1306Display and the page layouts in examples/*/UITask.cpp, so the
-output matches the device pixel for pixel. Page content is sample data.
+Two targets:
+  * 128x64 SSD1306 OLED (Heltec V3/V4 and alike), mirrors SSD1306Display;
+  * Heltec MeshPocket 2.13" e-ink (GxEPD2_213_B74, 250x122), mirrors GxEPDDisplay
+    with the EINK_SCALE_* / EINK_*_OFFSET values from variants/mesh_pocket.
+
+Fonts and icons are parsed from the firmware sources and the Adafruit GFX library,
+and the page layouts follow examples/*/UITask.cpp, so the output matches the device
+pixel for pixel. Page content is sample data.
 
 Usage:  python tools/screen_render/render_oled.py [out_dir]
 """
 
 import glob
+import math
 import os
 import re
+import struct
 import sys
 
 from PIL import Image, ImageDraw, ImageFont
@@ -32,21 +39,55 @@ def parse_c(path):
     return arrays, scalars
 
 
-def find_glcdfont():
-    hits = glob.glob(os.path.join(ROOT, ".pio", "libdeps", "*", "Adafruit GFX Library", "glcdfont.c"))
+def find_gfx_file(rel):
+    hits = glob.glob(os.path.join(ROOT, ".pio", "libdeps", "*", "Adafruit GFX Library", rel))
     if not hits:
-        sys.exit("glcdfont.c not found: build any OLED env once so PlatformIO fetches Adafruit GFX")
+        sys.exit(rel + " not found: build any display env once so PlatformIO fetches Adafruit GFX")
     return hits[0]
 
 
-FONT = parse_c(find_glcdfont())[0]["font"]
-_cyr_arr, _cyr_sc = parse_c(os.path.join(ROOT, "src", "helpers", "ui", "CyrillicGlyphs.inc"))
-CYR_H = _cyr_sc["CYR_OLED_H"]
-CYR_BASE = _cyr_sc["CYR_OLED_BASE"]
-CYR_ADV = _cyr_arr["CYR_OLED_ADV"]
-CYR_OFF = _cyr_arr["CYR_OLED_OFF"]
-CYR_BITS = _cyr_arr["CYR_OLED_BITS"]
+FONT = parse_c(find_gfx_file("glcdfont.c"))[0]["font"]
+
+
+class CyrFont:
+    def __init__(self, arrays, scalars, prefix):
+        self.h = scalars[prefix + "_H"]
+        self.base = scalars[prefix + "_BASE"]
+        self.adv = arrays[prefix + "_ADV"]
+        self.off = arrays[prefix + "_OFF"]
+        self.bits = arrays[prefix + "_BITS"]
+
+    def advance(self, idx):
+        return self.adv[idx] if idx >= 0 else (self.h * 2) // 3
+
+    def pixel(self, idx, x, y):
+        w = self.adv[idx]
+        if x >= w or y >= self.h: return False
+        rowb = (w + 7) >> 3
+        return bool(self.bits[self.off[idx] + y * rowb + (x >> 3)] & (0x80 >> (x & 7)))
+
+
+_cyr = parse_c(os.path.join(ROOT, "src", "helpers", "ui", "CyrillicGlyphs.inc"))
+CYR_OLED = CyrFont(*_cyr, "CYR_OLED")
+CYR_EINK = CyrFont(*_cyr, "CYR_EINK")
+CYR_EINK2 = CyrFont(*_cyr, "CYR_EINK2")
 ICONS = parse_c(os.path.join(ROOT, "examples", "companion_radio", "ui-new", "icons.h"))[0]
+with open(os.path.join(ROOT, "src", "helpers", "FirmwareVersion.h"), encoding="utf-8") as _f:
+    _ver = dict(re.findall(r'#define\s+(MESHCORE_BASE_VERSION|FORK_VERSION)\s+"([^"]*)"', _f.read()))
+VERSION = "%s-%s" % (_ver["MESHCORE_BASE_VERSION"], _ver["FORK_VERSION"])
+
+
+def load_gfx_font(name):
+    with open(find_gfx_file(os.path.join("Fonts", name + ".h")), encoding="utf-8", errors="replace") as f:
+        text = re.sub(r"//[^\n]*", "", f.read())
+    bm = re.search(name + r"Bitmaps\[\]\s*PROGMEM\s*=\s*\{(.*?)\};", text, re.S).group(1)
+    gl = re.search(name + r"Glyphs\[\]\s*PROGMEM\s*=\s*\{(.*?)\};", text, re.S).group(1)
+    tail = re.search(r"GFXfont\s+" + name + r"\s+PROGMEM\s*=\s*\{[^,]*,[^,]*,\s*(\w+),\s*(\w+),\s*(\w+)\s*\}", text)
+    return {
+        "bits": [int(v, 16) for v in re.findall(r"0x[0-9A-Fa-f]+", bm)],
+        "glyphs": [tuple(int(v) for v in g) for g in re.findall(r"\{\s*" + r",\s*".join([r"(-?\d+)"] * 6) + r"\s*\}", gl)],
+        "first": int(tail.group(1), 0), "last": int(tail.group(2), 0), "yadv": int(tail.group(3), 0),
+    }
 
 
 def cyr_index(cp):
@@ -55,13 +96,6 @@ def cyr_index(cp):
     if 0x0430 <= cp <= 0x044F: return 33 + cp - 0x0430
     if cp == 0x0451: return 65
     return -1
-
-
-def cyr_pixel(idx, x, y):
-    w = CYR_ADV[idx]
-    if x >= w or y >= CYR_H: return False
-    rowb = (w + 7) >> 3
-    return bool(CYR_BITS[CYR_OFF[idx] + y * rowb + (x >> 3)] & (0x80 >> (x & 7)))
 
 
 def utf8_next(b, i):
@@ -82,18 +116,84 @@ def B(s):
     return s.encode("utf-8") if isinstance(s, str) else bytes(s)
 
 
-class Oled:
+# Home pages compiled in for each target (ui-new HomePage enum).
+PAGES = ["FIRST", "RECENT", "NEIGHBORS", "RADIO", "POWER", "SCAN", "FSCAN",
+         "BLUETOOTH", "ADVERT", "GPS", "BEACON", "SHUTDOWN"]
+PAGES_NO_GPS = [p for p in PAGES if p not in ("GPS", "BEACON")]
+UPSTREAM_PAGES = ["FIRST", "RECENT", "RADIO", "BLUETOOTH", "ADVERT", "GPS", "SHUTDOWN"]
+
+
+class Driver:
+    """DisplayDriver helpers shared by every target."""
+    legacy = False
+    pages = PAGES
+
+    def drawTextCentered(self, mid_x, y, s):
+        self.setCursor(mid_x - self.getTextWidth(s) // 2, y); self.print(s)
+
+    def drawTextRightAlign(self, x, y, s):
+        self.setCursor(x - self.getTextWidth(s), y); self.print(s)
+
+    def drawTextLeftAlign(self, x, y, s):
+        self.setCursor(x, y); self.print(s)
+
+    def drawTextEllipsized(self, x, y, max_width, s):
+        t = B(s)[:255]
+        if self.getTextWidth(t) <= max_width:
+            self.setCursor(x, y); self.print(t); return
+        ell = b"... " if self.getTextWidth(b"i") != self.getTextWidth(b"l") else b"..."
+        ew, n = self.getTextWidth(ell), len(t)
+        while n > 0 and self.getTextWidth(t[:n]) > max_width - ew:
+            n -= 1
+            if not self.legacy:
+                while n > 0 and (t[n] & 0xC0) == 0x80: n -= 1
+        self.setCursor(x, y); self.print(t[:n] + ell)
+
+    def translate(self, s, dest_size=256):
+        b, out = B(s), bytearray()
+        if self.legacy:
+            i = 0
+            while i < len(b) and len(out) < dest_size - 1:
+                c = b[i]
+                if 32 <= c <= 126: out.append(c)
+                elif c >= 0x80:
+                    out.append(0xDB)
+                    while i + 1 < len(b) and (b[i + 1] & 0xC0) == 0x80: i += 1
+                i += 1
+            return bytes(out)
+        i = 0
+        while i < len(b) and len(out) + 1 < dest_size:
+            start = i
+            cp, i = utf8_next(b, i)
+            if 32 <= cp <= 126: out.append(cp)
+            elif cyr_index(cp) >= 0:
+                if len(out) + (i - start) >= dest_size: break
+                out += b[start:i]
+            else: out.append(32)
+        return re.sub(rb" {2,}", b" ", bytes(out)).strip(b" ")
+
+    def alert(self, text):
+        self.setTextSize(1)
+        w, h = self.width(), self.height()
+        y, p = h // 3, h // 32
+        self.setColor(BLACK); self.fillRect(p, y, w - p * 2, y)
+        self.setColor(WHITE); self.drawRect(p, y, w - p * 2, y)
+        self.drawTextCentered(w // 2, y + p * 3, text)
+
+
+class Oled(Driver):
     """SSD1306Display on top of Adafruit_SSD1306. legacy=True mimics upstream (no Cyrillic)."""
 
     def __init__(self, legacy=False):
         self.legacy = legacy
-        self.fb = [[0] * W for _ in range(H)]
+        self.clear()
         self.color = WHITE
         self.ts = 1
         self.cx = self.cy = 0
 
     def width(self): return W
     def height(self): return H
+    def clear(self): self.fb = [[0] * W for _ in range(H)]
     def setColor(self, c): self.color = c
     def setTextSize(self, s): self.ts = max(1, s)
     def setCursor(self, x, y): self.cx, self.cy = x, y
@@ -131,12 +231,12 @@ class Oled:
         return x, y
 
     def _cyr_glyph(self, idx, x, y):
-        s = self.ts
-        w = CYR_ADV[idx] if idx >= 0 else (CYR_H * 2) // 3
-        for row in range(CYR_H):
+        s, f = self.ts, CYR_OLED
+        w = f.advance(idx)
+        for row in range(f.h):
             for col in range(w):
-                on = cyr_pixel(idx, col, row) if idx >= 0 else (
-                    row == 0 or row == CYR_H - 1 or col == 0 or col == w - 1)
+                on = f.pixel(idx, col, row) if idx >= 0 else (
+                    row == 0 or row == f.h - 1 or col == 0 or col == w - 1)
                 if on: self.fillRect(x + col * s, y + row * s, s, s)
 
     def _span(self, b):
@@ -148,19 +248,19 @@ class Oled:
                     self.cx, self.cy = self._gfx_write(self.cx, self.cy, c)
                     self.cx += 6 * s
             return
-        dy = (6 - CYR_BASE) * s
+        dy = (6 - CYR_OLED.base) * s
         i = 0
         while i < len(b) and b[i]:
             cp, i = utf8_next(b, i)
             if cp == 10:
-                self.cx, self.cy = 0, self.cy + (CYR_H + 1) * s
+                self.cx, self.cy = 0, self.cy + (CYR_OLED.h + 1) * s
             elif cp < 0x80:
                 self._gfx_write(self.cx, self.cy, cp)
                 self.cx += 6 * s
             else:
                 idx = cyr_index(cp)
                 self._cyr_glyph(idx, self.cx, self.cy + dy)
-                self.cx += (CYR_ADV[idx] if idx >= 0 else (CYR_H * 2) // 3) * s
+                self.cx += CYR_OLED.advance(idx) * s
 
     def print(self, s): self._span(B(s))
 
@@ -183,46 +283,25 @@ class Oled:
             cp, i = utf8_next(b, i)
             if cp == 10: continue
             idx = cyr_index(cp)
-            w += (CYR_ADV[idx] if idx >= 0 else 6) * self.ts
+            w += (CYR_OLED.adv[idx] if idx >= 0 else 6) * self.ts
         return w
 
-    def translate(self, s, dest_size=256):
-        b, out = B(s), bytearray()
-        if self.legacy:
-            i = 0
-            while i < len(b) and len(out) < dest_size - 1:
-                c = b[i]
-                if 32 <= c <= 126: out.append(c)
-                elif c >= 0x80:
-                    out.append(0xDB)
-                    while i + 1 < len(b) and (b[i + 1] & 0xC0) == 0x80: i += 1
-                i += 1
-            return bytes(out)
-        i = 0
-        while i < len(b) and len(out) + 1 < dest_size:
-            start = i
-            cp, i = utf8_next(b, i)
-            if 32 <= cp <= 126: out.append(cp)
-            elif cyr_index(cp) >= 0:
-                if len(out) + (i - start) >= dest_size: break
-                out += b[start:i]
-            elif cp >= 0x80: out.append(0xDB)
-        return bytes(out)
-
     def printWordWrap(self, s, max_width):
-        if self.legacy:
-            return self.print(s)
+        """Returns the byte offset of the first char that did not fit."""
         b = B(s)
+        if self.legacy:
+            self.print(b)
+            return len(b)
         origin, sc = self.cx, self.ts
         max_width = min(max_width, max(1, W - origin))
-        step = (CYR_H + 1) * sc
+        step = (CYR_OLED.h + 1) * sc
         p = 0
         while p < len(b) and self.cy < H:
             line, width, brk, end = p, 0, None, p
             while end < len(b) and b[end] != 10:
                 cp, nxt = utf8_next(b, end)
                 idx = cyr_index(cp)
-                cw = (CYR_ADV[idx] if idx >= 0 else 6) * sc
+                cw = (CYR_OLED.adv[idx] if idx >= 0 else 6) * sc
                 if width + cw > max_width and end != line: break
                 width += cw
                 if cp in (32, 45, 47): brk = nxt
@@ -234,36 +313,221 @@ class Oled:
             if cut == p: break
             p = cut
             if p < len(b):
-                if self.cy + step >= H: break
+                if self.cy + step + 8 * sc > H: break
                 self.cx, self.cy = origin, self.cy + step
+        return p
 
-    def drawTextCentered(self, mid_x, y, s):
-        self.setCursor(mid_x - self.getTextWidth(s) // 2, y); self.print(s)
 
-    def drawTextRightAlign(self, x, y, s):
-        self.setCursor(x - self.getTextWidth(s), y); self.print(s)
+# ------------------------------------------------------------ MeshPocket e-ink
 
-    def drawTextLeftAlign(self, x, y, s):
-        self.setCursor(x, y); self.print(s)
+def f32(v):
+    return struct.unpack("f", struct.pack("f", v))[0]
 
-    def drawTextEllipsized(self, x, y, max_width, s):
-        t = B(s)[:255]
-        if self.getTextWidth(t) <= max_width:
-            self.setCursor(x, y); self.print(t); return
-        ell = b"... " if self.getTextWidth(b"i") != self.getTextWidth(b"l") else b"..."
-        ew, n = self.getTextWidth(ell), len(t)
-        while n > 0 and self.getTextWidth(t[:n]) > max_width - ew:
-            n -= 1
-            if not self.legacy:
-                while n > 0 and (t[n] & 0xC0) == 0x80: n -= 1
-        self.setCursor(x, y); self.print(t[:n] + ell)
 
-    def alert(self, text):
-        self.setTextSize(1)
-        y, p = H // 3, H // 32
-        self.setColor(BLACK); self.fillRect(p, y, W - p * 2, y)
-        self.setColor(WHITE); self.drawRect(p, y, W - p * 2, y)
-        self.drawTextCentered(W // 2, y + p * 3, text)
+def fmul(a, b):
+    return f32(f32(a) * f32(b))
+
+
+def pio_defines(variant):
+    with open(os.path.join(ROOT, "variants", variant, "platformio.ini"), encoding="utf-8") as f:
+        text = f.read()
+    return dict(re.findall(r"^\s*-D\s+(\w+)=([^\s;]+)", text, re.M))
+
+
+_pocket = pio_defines("mesh_pocket")
+EINK_W, EINK_H = 250, 122          # GxEPD2_213_B74 visible area after setRotation(3)
+EINK_SX = f32(float(_pocket["EINK_SCALE_X"].rstrip("f")))
+EINK_SY = f32(float(_pocket["EINK_SCALE_Y"].rstrip("f")))
+EINK_OX = float(_pocket["EINK_X_OFFSET"])
+EINK_OY = float(_pocket["EINK_Y_OFFSET"])
+EINK_LOGICAL_H = int(_pocket.get("EINK_LOGICAL_HEIGHT", 128))
+_GFX = {}
+
+
+def gfx_font(ts):
+    name = {2: "FreeSansBold12pt7b", 3: "FreeSans18pt7b"}.get(ts, "FreeSans9pt7b")
+    if name not in _GFX: _GFX[name] = load_gfx_font(name)
+    return _GFX[name]
+
+
+class Eink(Driver):
+    """GxEPDDisplay on top of GxEPD2_BW: the logical grid is scaled onto the physical panel.
+    fb holds physical pixels, 1 = ink (the OLED 'lit' colour maps to GxEPD_BLACK)."""
+    pages = PAGES_NO_GPS
+
+    def __init__(self):
+        self.clear()
+        self.color = WHITE
+        self.ts = 1
+        self.lx = self.ly = 0
+        self.px = self.py = 0
+        self.wrap = True
+
+    def width(self): return 128
+    def height(self): return EINK_LOGICAL_H
+    def clear(self): self.fb = [[0] * EINK_W for _ in range(EINK_H)]
+    def setColor(self, c): self.color = c
+    def setTextSize(self, s): self.ts = max(1, s)
+
+    @property
+    def font(self): return gfx_font(self.ts)
+
+    @property
+    def cyr(self): return CYR_EINK2 if self.ts >= 2 else CYR_EINK
+
+    def _baseline(self, y):
+        cap = lambda f: -f["glyphs"][ord("H") - f["first"]][5]
+        return int(fmul(y + EINK_OY, EINK_SY)) + cap(self.font) - cap(gfx_font(1))
+
+    def setCursor(self, x, y):
+        self.lx, self.ly = x, y
+        self.px, self.py = int(fmul(x + EINK_OX, EINK_SX)), self._baseline(y)
+
+    def _fill(self, x, y, w, h):
+        for yy in range(max(0, y), min(EINK_H, y + h)):
+            row = self.fb[yy]
+            for xx in range(max(0, x), min(EINK_W, x + w)):
+                row[xx] = self.color
+
+    def fillRect(self, x, y, w, h):
+        self._fill(int(fmul(x, EINK_SX)), int(fmul(y, EINK_SY)), int(fmul(w, EINK_SX)), int(fmul(h, EINK_SY)))
+
+    def drawRect(self, x, y, w, h):
+        x, y = int(fmul(x, EINK_SX)), int(fmul(y, EINK_SY))
+        w, h = int(fmul(w, EINK_SX)), int(fmul(h, EINK_SY))
+        if w <= 0 or h <= 0: return
+        self._fill(x, y, w, 1); self._fill(x, y + h - 1, w, 1)
+        self._fill(x, y, 1, h); self._fill(x + w - 1, y, 1, h)
+
+    def drawXbm(self, x, y, bits, w, h):
+        sx, sy = int(fmul(x, EINK_SX)), int(fmul(y, EINK_SY))
+        stride = (w + 7) // 8
+        for by in range(h):
+            y1, y2 = sy + int(fmul(by, EINK_SY)), sy + int(fmul(by + 1, EINK_SY))
+            for bx in range(w):
+                if bits[by * stride + bx // 8] & (0x80 >> (bx & 7)):
+                    x1, x2 = sx + int(fmul(bx, EINK_SX)), sx + int(fmul(bx + 1, EINK_SX))
+                    self._fill(x1, y1, x2 - x1, y2 - y1)
+
+    def _glyph(self, c):
+        f = self.font
+        return f["glyphs"][c - f["first"]] if f["first"] <= c <= f["last"] else None
+
+    def _write(self, c):
+        """Adafruit_GFX::write() with a GFXfont."""
+        f = self.font
+        if c == 10: self.px, self.py = 0, self.py + f["yadv"]; return
+        if c == 13: return
+        g = self._glyph(c)
+        if not g: return
+        off, gw, gh, xa, xo, yo = g
+        if gw > 0 and gh > 0:
+            if self.wrap and self.px + xo + gw > EINK_W:
+                self.px, self.py = 0, self.py + f["yadv"]
+            bits, bit, bo = f["bits"], 0, off
+            for yy in range(gh):
+                for xx in range(gw):
+                    if not bit & 7:
+                        byte = bits[bo]; bo += 1
+                    if byte & 0x80: self._fill(self.px + xo + xx, self.py + yo + yy, 1, 1)
+                    byte = (byte << 1) & 0xFF
+                    bit += 1
+        self.px += xa
+
+    def _bounds_w(self, b):
+        """Width reported by Adafruit_GFX::getTextBounds()."""
+        x, minx, maxx = 0, 0x7FFF, -1
+        for c in b:
+            if c == 10: x = 0; continue
+            if c == 13: continue
+            g = self._glyph(c)
+            if not g: continue
+            off, gw, gh, xa, xo, yo = g
+            if self.wrap and x + xo + gw > EINK_W: x = 0
+            minx, maxx = min(minx, x + xo), max(maxx, x + xo + gw - 1)
+            x += xa
+        return maxx - minx + 1 if maxx >= minx else 0
+
+    def _cyr_glyph(self, idx, x, y):
+        f = self.cyr
+        w = max(1, f.advance(idx))
+        top = y - f.base
+        for row in range(f.h):
+            for col in range(w):
+                on = f.pixel(idx, col, row) if idx >= 0 else (
+                    row == 0 or row == f.h - 1 or col == 0 or col == w - 1)
+                if on: self._fill(x + col, top + row, 1, 1)
+
+    def _span(self, b):
+        i = 0
+        while i < len(b) and b[i]:
+            if b[i] < 0x80:
+                self._write(b[i]); i += 1
+            else:
+                cp, i = utf8_next(b, i)
+                idx = cyr_index(cp)
+                self._cyr_glyph(idx, self.px, self.py)
+                self.px += self.cyr.advance(idx)
+
+    def print(self, s): self._span(B(s))
+
+    def getTextWidth(self, s):
+        b = B(s)
+        if all(c < 0x80 for c in b):
+            return int(math.ceil(f32((self._bounds_w(b) + 1) / EINK_SX)))
+        px, i = 0, 0
+        while i < len(b):
+            cp, i = utf8_next(b, i)
+            px += self._cp_width(cp)
+        return int(math.ceil(f32((px + 1) / EINK_SX)))
+
+    def _cp_width(self, cp):
+        if cp < 32 or cp == 10: return 0
+        idx = cyr_index(cp)
+        if idx >= 0: return self.cyr.adv[idx]
+        if cp < 0x80:
+            g = self._glyph(cp)
+            return g[3] if g else 0
+        return self.cyr.advance(-1)
+
+    def _line_step(self):
+        phys = max(self.font["yadv"], self.cyr.h + 2, 1)
+        step = int(f32(phys / EINK_SY))
+        if fmul(step, EINK_SY) < f32(phys - f32(0.01)): step += 1
+        return max(1, step)
+
+    def printWordWrap(self, s, max_width):
+        b = B(s)
+        origin, y = self.lx, self.ly
+        limit = max(1, EINK_W - int(fmul(origin + EINK_OX, EINK_SX)))
+        max_px = max(1, min(limit, int(f32(fmul(max_width, EINK_SX) + 0.5))))
+        step = self._line_step()
+        descent = max(0, self.cyr.h - self.cyr.base)
+        self.wrap = False
+        first, p = True, 0
+        while p < len(b):
+            baseline = self._baseline(y)
+            if not first and (baseline < 0 or baseline + descent >= EINK_H): break
+            line, width, brk, end = p, 0, None, p
+            while end < len(b) and b[end] != 10:
+                cp, nxt = utf8_next(b, end)
+                cw = self._cp_width(cp)
+                if width + cw > max_px and end != line: break
+                width += cw
+                if cp in (32, 45, 47): brk = nxt
+                end = nxt
+            cut = end
+            if end < len(b) and b[end] != 10 and brk and brk > line: cut = brk
+            self.setCursor(origin, y)
+            self._span(b[line:cut])
+            first = False
+            if cut < len(b) and b[cut] in (10, 32): cut += 1
+            if cut == p: break
+            p = cut
+            if p < len(b): y += step
+        self.wrap = True
+        self.lx, self.ly = origin, y
+        return p
 
 
 # ---------------------------------------------------------------- sample data
@@ -271,14 +535,11 @@ class Oled:
 NODE_NAME = "Termin36"
 BATT_MV = 3950
 PRESS_LABEL = "long press"
-PAGES = ["FIRST", "RECENT", "NEIGHBORS", "RADIO", "POWER", "SCAN", "FSCAN",
-         "BLUETOOTH", "ADVERT", "GPS", "BEACON", "SHUTDOWN"]
-UPSTREAM_PAGES = ["FIRST", "RECENT", "RADIO", "BLUETOOTH", "ADVERT", "GPS", "SHUTDOWN"]
 
 
 def battery(d, mv, x_off=5):
     pct = max(0, min(100, ((mv - 3000) * 100) // 1200))
-    ix, iw, ih = W - 24 - x_off, 24, 10
+    ix, iw, ih = d.width() - 24 - x_off, 24, 10
     d.setColor(WHITE)
     d.drawRect(ix, 0, iw, ih)
     d.fillRect(ix + iw, ih // 4, 3, ih // 2)
@@ -286,13 +547,14 @@ def battery(d, mv, x_off=5):
 
 
 def home_header(d, page, gps_on=True):
-    d.setColor(BLACK); d.fillRect(0, 0, W, 12)
+    w = d.width()
+    d.setColor(BLACK); d.fillRect(0, 0, w, 12)
     d.setTextSize(1); d.setColor(WHITE)
     d.setCursor(0, 2); d.print(d.translate(NODE_NAME, 32))
     battery(d, BATT_MV)
-    visible = UPSTREAM_PAGES if d.legacy else [p for p in PAGES if gps_on or p != "BEACON"]
+    visible = UPSTREAM_PAGES if d.legacy else [p for p in d.pages if gps_on or p != "BEACON"]
     idx = visible.index(page)
-    x = W // 2 - 5 * (len(visible) - 1)
+    x = w // 2 - 5 * (len(visible) - 1)
     d.setColor(WHITE)
     for i in range(len(visible)):
         if i == idx: d.fillRect(x - 1, 13, 4, 4)
@@ -308,23 +570,25 @@ def fmt_age(secs):
 
 def name_list(d, rows, y0=20):
     d.setColor(WHITE); d.setTextSize(1)
+    w = d.width()
     for i, (name, right) in enumerate(rows):
         y = y0 + i * 11
         tw = d.getTextWidth(right)
-        d.drawTextEllipsized(0, y, W - tw - 1, d.translate(name, 32))
-        d.setCursor(W - tw - 1, y); d.print(right)
+        d.drawTextEllipsized(0, y, w - tw - 1, d.translate(name, 32))
+        d.setCursor(w - tw - 1, y); d.print(right)
 
 
 def scr_splash(d, subtitle="by Termin36", repeater=False):
+    w = d.width()
     d.setColor(WHITE)
-    d.drawXbm(0, 3, ICONS["meshcore_logo"], 128, 13)
+    d.drawXbm((w - 128) // 2, 3, ICONS["meshcore_logo"], 128, 13)
     site = "https://meshcore.io"
     if repeater:
-        d.drawTextCentered(W // 2, 22, site)
+        d.drawTextCentered(w // 2, 22, site)
     else:
-        d.setCursor((W - d.getTextWidth(site)) // 2, 22); d.print(site)
-    d.drawTextCentered(W // 2, 35, "v1.17.1")
-    d.drawTextCentered(W // 2, 48, subtitle)
+        d.setCursor((w - d.getTextWidth(site)) // 2, 22); d.print(site)
+    d.drawTextCentered(w // 2, 35, VERSION)
+    d.drawTextCentered(w // 2, 48, subtitle)
 
 
 def scr_recent(d):
@@ -342,8 +606,8 @@ def scr_neighbors(d):
 def scr_neighbors_empty(d):
     home_header(d, "NEIGHBORS")
     d.setColor(WHITE); d.setTextSize(1)
-    d.drawTextCentered(W // 2, 28, "no neighbors")
-    d.drawTextCentered(W // 2, 64 - 11, "poll: " + PRESS_LABEL)
+    d.drawTextCentered(d.width() // 2, 28, "no neighbors")
+    d.drawTextCentered(d.width() // 2, 64 - 11, "poll: " + PRESS_LABEL)
 
 
 def scr_radio(d, lna=False):
@@ -357,30 +621,32 @@ def scr_radio(d, lna=False):
 
 def scr_power(d, name, cpu, boost, lna, hold=None, gps_on=False):
     home_header(d, "POWER", gps_on)
+    w = d.width()
     d.setTextSize(1)
     y = 18
     d.setColor(WHITE)
     d.drawTextLeftAlign(0, y, "Power")
-    d.drawTextRightAlign(W - 1, y, name)
+    d.drawTextRightAlign(w - 1, y, name)
     y += 12
     d.drawTextLeftAlign(0, y, "CPU off" if cpu else "CPU on")
-    d.drawTextRightAlign(W - 1, y, "RX on" if boost else "RX off")
+    d.drawTextRightAlign(w - 1, y, "RX on" if boost else "RX off")
     y += 12
     d.drawTextLeftAlign(0, y, "LNA on" if lna else "LNA off")
     y += 12
-    if y + 8 <= H:
-        d.drawTextCentered(W // 2, y, hold or ("mode: " + PRESS_LABEL))
+    if y + 8 <= d.height():
+        d.drawTextCentered(w // 2, y, hold or ("mode: " + PRESS_LABEL))
 
 
 def scr_scan(d, live=-112, nl=-109, peak=-98, pkt=False):
     home_header(d, "SCAN")
+    w = d.width()
     d.setColor(WHITE); d.setTextSize(2)
-    d.drawTextCentered(W // 2, 18, "%d" % live)
+    d.drawTextCentered(w // 2, 18, "%d" % live)
     d.setTextSize(1)
-    if pkt: d.drawTextRightAlign(W - 1, 18, "PKT")
+    if pkt: d.drawTextRightAlign(w - 1, 18, "PKT")
     d.drawTextLeftAlign(0, 36, "NL %d" % nl if nl else "NL --")
-    d.drawTextRightAlign(W - 1, 36, "pk %d" % peak)
-    bw = W - 4
+    d.drawTextRightAlign(w - 1, 36, "pk %d" % peak)
+    bw = w - 4
     fill = ((max(-120, min(-50, live)) + 120) * bw) // 70
     d.drawRect(2, 48, bw, 8)
     if fill > 2: d.fillRect(3, 49, fill - 2, 6)
@@ -389,16 +655,17 @@ def scr_scan(d, live=-112, nl=-109, peak=-98, pkt=False):
 def scr_fscan_idle(d):
     home_header(d, "FSCAN")
     d.setTextSize(1); d.setColor(WHITE)
-    d.drawTextCentered(W // 2, 28, "find quiet freq")
-    d.drawTextCentered(W // 2, H - 11, "scan: " + PRESS_LABEL)
+    d.drawTextCentered(d.width() // 2, 28, "find quiet freq")
+    d.drawTextCentered(d.width() // 2, d.height() - 11, "scan: " + PRESS_LABEL)
 
 
 def scr_fscan_run(d, i=7, n=17, freq=868.775):
     home_header(d, "FSCAN")
+    w = d.width()
     d.setTextSize(1); d.setColor(WHITE)
-    d.drawTextCentered(W // 2, 22, "scan %d/%d" % (i, n))
-    d.drawTextCentered(W // 2, 36, "%06.3f" % freq)
-    bw = W - 4
+    d.drawTextCentered(w // 2, 22, "scan %d/%d" % (i, n))
+    d.drawTextCentered(w // 2, 36, "%06.3f" % freq)
+    bw = w - 4
     fill = (i * bw) // n
     d.drawRect(2, 50, bw, 8)
     if fill > 2: d.fillRect(3, 51, fill - 2, 6)
@@ -417,39 +684,74 @@ def scr_fscan_done(d):
 
 def scr_gps(d):
     home_header(d, "GPS")
+    w = d.width()
     d.setTextSize(1); d.setColor(WHITE)
     y = 20
-    d.drawTextLeftAlign(0, y, "module"); d.drawTextRightAlign(W - 1, y, "on"); y += 12
-    d.drawTextLeftAlign(0, y, "fix yes"); d.drawTextRightAlign(W - 1, y, "sat 9"); y += 12
-    d.drawTextLeftAlign(0, y, "pos"); d.drawTextRightAlign(W - 1, y, "%.4f %.4f" % (55.7558, 37.6173)); y += 12
-    d.drawTextLeftAlign(0, y, "alt"); d.drawTextRightAlign(W - 1, y, "%.2f" % 156.0)
+    d.drawTextLeftAlign(0, y, "module"); d.drawTextRightAlign(w - 1, y, "on"); y += 12
+    d.drawTextLeftAlign(0, y, "fix yes"); d.drawTextRightAlign(w - 1, y, "sat 9"); y += 12
+    d.drawTextLeftAlign(0, y, "pos"); d.drawTextRightAlign(w - 1, y, "%.4f %.4f" % (55.7558, 37.6173)); y += 12
+    d.drawTextLeftAlign(0, y, "alt"); d.drawTextRightAlign(w - 1, y, "%.2f" % 156.0)
 
 
 def scr_beacon(d, mode, target, pos, sent):
     home_header(d, "BEACON")
+    w = d.width()
     kind, _, iv = mode.partition(" ")
     d.setTextSize(1); d.setColor(WHITE)
     y = 18
     d.drawTextLeftAlign(0, y, kind)
-    if iv: d.drawTextRightAlign(W - 1, y, iv)
+    if iv: d.drawTextRightAlign(w - 1, y, iv)
     y += 12
-    d.drawTextEllipsized(0, y, W - 1, d.translate(target, 32)); y += 12
-    d.drawTextEllipsized(0, y, W - 1, pos); y += 12
+    d.drawTextEllipsized(0, y, w - 1, d.translate(target, 32)); y += 12
+    d.drawTextEllipsized(0, y, w - 1, pos); y += 12
     d.drawTextLeftAlign(0, y, sent)
 
 
-def scr_message(d):
-    d.setCursor(0, 0); d.setTextSize(1); d.setColor(WHITE)
-    d.print("Unread: 2")
-    d.setCursor(W - d.getTextWidth("3m") - 2, 0); d.print("3m")
-    d.drawRect(0, 11, W, 1)
-    origin = d.translate("(1) Алексей Смирнов:", 40)
+MSG_SHORT = "Привет! Встречаемся у реки в 18:00, возьми рацию."
+MSG_LONG = "Привет! Встречаемся у старого моста в 18:00, возьми рацию и запасной аккумулятор."
+MSG_LATIN = ("Meet at the old bridge at 18:00. Bring the radio, a spare battery, "
+             "a flashlight and water. If you are late, write to the group chat.")
+
+
+MSG_EMOJI = "Привет! 👋👋  Встречаемся у реки 🏞️ в 18:00 🔥🔥🔥 — возьми рацию 📻!"
+
+
+def scr_message(d, text=MSG_SHORT, page=0, unread=2, origin="(1) Алексей Смирнов:"):
+    w = d.width()
     if d.legacy:
-        d.setCursor(0, 14); d.print(origin)
+        # upstream layout: 78-byte buffer, sender on its own row
+        d.setCursor(0, 0); d.setTextSize(1); d.setColor(WHITE)
+        d.print("Unread: %d" % unread)
+        d.setCursor(w - d.getTextWidth("3m") - 2, 0); d.print("3m")
+        d.drawRect(0, 11, w, 1)
+        d.setCursor(0, 14); d.print(d.translate(origin, 40))
+        d.setCursor(0, 25)
+        d.printWordWrap(d.translate(text, 78), w)
+        return
+    compact = d.height() < 100
+    msg = d.translate(text, 161)
+    start, num = 0, 0
+    d.setTextSize(1); d.setColor(WHITE)
+    while True:
+        d.clear()
+        d.setCursor(0, 14 if compact else 25)
+        rest = start + d.printWordWrap(msg[start:], w)
+        nxt = rest if rest < len(msg) and rest > start else 0
+        if num == page or not nxt: break
+        start, num = nxt, num + 1
+    tag = "p%d%s " % (num + 1, "+" if nxt else "") if (nxt or num) else ""
+    if compact:
+        right = tag + ("+%d " % (unread - 1) if unread > 1 else "") + "3m"
+        rw = d.getTextWidth(right)
+        d.setCursor(w - rw - 1, 0); d.print(right)
+        d.drawTextEllipsized(0, 0, w - rw - 4, d.translate(origin, 62))
+        d.drawRect(0, 11, w, 1)
     else:
-        d.drawTextEllipsized(0, 14, W, origin)
-    d.setCursor(0, 25)
-    d.printWordWrap(d.translate("Привет! Встречаемся у реки в 18:00, возьми рацию.", 160), W)
+        d.setCursor(0, 0); d.print("Unread: %d" % unread)
+        right = tag + "3m"
+        d.setCursor(w - d.getTextWidth(right) - 2, 0); d.print(right)
+        d.drawRect(0, 11, w, 1)
+        d.drawTextEllipsized(0, 14, w, d.translate(origin, 62))
 
 
 def scr_repeater(d, name="Repeater South", lna=False):
@@ -464,6 +766,11 @@ def scr_repeater(d, name="Repeater South", lna=False):
 SCREENS = [
     ("01_splash", "Заставка Companion", lambda d: scr_splash(d)),
     ("02_message", "Сообщение на кириллице", scr_message),
+    ("02a_message_long", "Сообщение на 160 байт", lambda d: scr_message(d, MSG_LONG, 0, 1)),
+    ("02b_message_page1", "Листание: стр. 1", lambda d: scr_message(d, MSG_LATIN, 0, 1)),
+    ("02c_message_page2", "Листание: стр. 2", lambda d: scr_message(d, MSG_LATIN, 1, 1)),
+    ("02d_message_emoji", "Эмодзи -> пробелы", lambda d: scr_message(
+        d, MSG_EMOJI, 0, 1, "(2) 🦊 Лиса 🦊:")),
     ("03_recent", "Recent adverts", scr_recent),
     ("04_neighbors", "Neighbors: соседи по SNR", scr_neighbors),
     ("05_neighbors_empty", "Neighbors: до опроса", scr_neighbors_empty),
@@ -486,8 +793,13 @@ SCREENS = [
     ("18_repeater", "Экран Repeater", scr_repeater),
 ]
 
+# MeshPocket has no GPS, so its companion build has no GPS / Beacon pages.
+EINK_SCREENS = [s for s in SCREENS if s[0][:2] not in ("13", "14", "15", "16")] + [
+    ("19_alert", "Всплывающее уведомление", lambda d: (scr_scan(d), d.alert("Peak reset"))),
+]
+
 COMPARE = [
-    ("cmp_message", "Сообщение", scr_message),
+    ("cmp_message", "Сообщение", lambda d: scr_message(d, MSG_LONG)),
 ]
 
 # ------------------------------------------------------------------- output
@@ -496,6 +808,11 @@ SCALE = 4
 BG = (8, 10, 14)
 OFF = (20, 24, 30)
 ON = (205, 230, 255)
+
+EINK_SCALE = 3
+BEZEL = (46, 48, 52)
+PAPER = (224, 224, 214)
+INK = (30, 32, 36)
 
 
 def to_image(d):
@@ -506,6 +823,19 @@ def to_image(d):
         for x in range(W):
             x0, y0 = pad + x * SCALE, pad + y * SCALE
             dr.rectangle([x0, y0, x0 + SCALE - 2, y0 + SCALE - 2], fill=ON if d.fb[y][x] else OFF)
+    return img
+
+
+def to_image_eink(d):
+    s, pad = EINK_SCALE, 4 * EINK_SCALE
+    img = Image.new("RGB", (EINK_W * s + pad * 2, EINK_H * s + pad * 2), BEZEL)
+    dr = ImageDraw.Draw(img)
+    dr.rectangle([pad, pad, pad + EINK_W * s - 1, pad + EINK_H * s - 1], fill=PAPER)
+    for y in range(EINK_H):
+        for x in range(EINK_W):
+            if d.fb[y][x]:
+                x0, y0 = pad + x * s, pad + y * s
+                dr.rectangle([x0, y0, x0 + s - 1, y0 + s - 1], fill=INK)
     return img
 
 
@@ -534,16 +864,23 @@ def sheet(items, cols, title=None):
     return img
 
 
+def render_set(out, subdir, screens, make, to_img, cols, title, gallery_name):
+    os.makedirs(os.path.join(out, subdir), exist_ok=True)
+    gallery = []
+    for fname, label, fn in screens:
+        d = make(); fn(d)
+        im = to_img(d)
+        im.save(os.path.join(out, subdir, fname + ".png"))
+        gallery.append((label, im))
+    sheet(gallery, cols, title).save(os.path.join(out, gallery_name))
+
+
 def main():
     out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "docs", "screens")
-    os.makedirs(os.path.join(out, "oled"), exist_ok=True)
-    gallery = []
-    for fname, label, fn in SCREENS:
-        d = Oled(); fn(d)
-        im = to_image(d)
-        im.save(os.path.join(out, "oled", fname + ".png"))
-        gallery.append((label, im))
-    sheet(gallery, 3, "MeshCore by Termin36 — OLED 128x64").save(os.path.join(out, "gallery.png"))
+    render_set(out, "oled", SCREENS, Oled, to_image, 3,
+               "MeshCore by Termin36 — OLED 128x64", "gallery.png")
+    render_set(out, "meshpocket", EINK_SCREENS, Eink, to_image_eink, 3,
+               "MeshCore by Termin36 — Heltec MeshPocket, e-ink 2.13\" 250x122", "gallery_meshpocket.png")
 
     for fname, label, fn in COMPARE:
         pair = []

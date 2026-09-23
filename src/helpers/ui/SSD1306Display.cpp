@@ -133,7 +133,7 @@ void SSD1306Display::print(const char* str) {
   printSpan(str, str + strlen(str));
 }
 
-void SSD1306Display::printWordWrap(const char* str, int max_width) {
+const char* SSD1306Display::printWordWrap(const char* str, int max_width) {
   int origin = _cx;
   int scale = _textSize < 1 ? 1 : _textSize;
   int limit = display.width() - origin;
@@ -163,12 +163,13 @@ void SSD1306Display::printWordWrap(const char* str, int max_width) {
     p = cut;
     if (*p) {
       int next_y = _cy + cyrLineStep();
-      if (next_y >= height()) break;
+      if (next_y + 8 * scale > height()) break;
       _cx = origin;
       _cy = next_y;
       display.setCursor(_cx, _cy);
     }
   }
+  return p;
 }
 
 void SSD1306Display::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {

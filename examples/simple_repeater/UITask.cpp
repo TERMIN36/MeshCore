@@ -43,17 +43,8 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   user_btn.begin();
 #endif
 
-  // strip off dash and commit hash by changing dash to null terminator
-  // e.g: v1.2.3-abcdef -> v1.2.3
-  char *version = strdup(firmware_version);
-  char *dash = strchr(version, '-');
-  if(dash){
-    *dash = 0;
-  }
-
-  // v1.2.3 (1 Jan 2025)
-  snprintf(_version_info, sizeof(_version_info), "%s (%s)", version, build_date);
-  free(version);
+  // "v1.17.1-0.1.1 (date)" is wider than a 128px screen, so the splash shows the version only
+  firmwareVersionNoHash(_version_info, sizeof(_version_info), firmware_version);
 }
 
 void UITask::renderBatteryIndicator() {
