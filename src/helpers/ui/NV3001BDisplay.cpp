@@ -490,8 +490,48 @@ void NV3001BDisplay::setCursor(int x, int y) {
   cursor_y = scaleY(y);
 }
 
+void NV3001BDisplay::syncCyrScale() {
+  CyrCellText::scale_x = textPixelScaleX(text_size);
+  CyrCellText::scale_y = textPixelScaleY(text_size);
+  wrap_px = 0;
+}
+
+void NV3001BDisplay::cyrAscii(int x, int y, uint8_t c) {
+  drawChar(x, y, (char)c);
+}
+
+void NV3001BDisplay::cyrFill(int x, int y, int w, int h) {
+  fillPhysicalRect(x, y, w, h);
+}
+
+void NV3001BDisplay::printWordWrap(const char* str, int max_width) {
+  if (!str || !is_on) return;
+  syncCyrScale();
+  pen_x = cursor_x;
+  pen_y = cursor_y;
+  int max_px = max_width * DISPLAY_SCALE_X;
+  int limit = NV3001B_SCREEN_WIDTH - pen_x;
+  cyrWordWrap(str, max_px < limit ? max_px : limit, NV3001B_SCREEN_HEIGHT);
+  cursor_x = pen_x;
+  cursor_y = pen_y;
+}
+
+void NV3001BDisplay::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {
+  translateUtf8KeepCyrillic(dest, src, dest_size);
+}
+
 void NV3001BDisplay::print(const char* str) {
   if (!str || !is_on) return;
+
+  if (hasUtf8(str)) {
+    syncCyrScale();
+    pen_x = cursor_x;
+    pen_y = cursor_y;
+    cyrPrint(str);
+    cursor_x = pen_x;
+    cursor_y = pen_y;
+    return;
+  }
 
   int scale_x = textPixelScaleX(text_size);
   int scale_y = textPixelScaleY(text_size);
@@ -541,6 +581,10 @@ void NV3001BDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
 
 uint16_t NV3001BDisplay::getTextWidth(const char* str) {
   if (!str) return 0;
+  if (hasUtf8(str)) {
+    syncCyrScale();
+    return (uint16_t)(cyrWidth(str) / DISPLAY_SCALE_X);
+  }
 
   uint16_t len = 0;
   while (str[len] && str[len] != '\n' && str[len] != '\r') len++;

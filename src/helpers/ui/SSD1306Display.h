@@ -19,13 +19,18 @@ class SSD1306Display : public DisplayDriver {
   Adafruit_SSD1306 display;
   bool _isOn;
   uint8_t _color;
+  int _textSize;
+  int _cx, _cy;
   RefCountedDigitalPin* _peripher_power;
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
+  void drawCyrGlyph(int idx, int x, int y);
+  void printSpan(const char* begin, const char* end);
+  int cyrLineStep() const;
 public:
   SSD1306Display(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64), 
       display(128, 64, &Wire, PIN_OLED_RESET),
-      _peripher_power(peripher_power)
+      _textSize(1), _cx(0), _cy(0), _peripher_power(peripher_power)
   {
     _isOn = false; 
   }
@@ -40,6 +45,8 @@ public:
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;
+  void printWordWrap(const char* str, int max_width) override;
+  void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override;
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;

@@ -11,6 +11,7 @@ permissions:
 
 jobs:
   github-pages:
+    if: github.repository == 'meshcore-dev/MeshCore'
     runs-on: ubuntu-latest
     steps:
 

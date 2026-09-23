@@ -1,16 +1,19 @@
 #pragma once
 
 #include "DisplayDriver.h"
+#include "CyrillicText.h"
 #include <Wire.h>
 #include <SPI.h>
 #include "TFT_eSPI.h"
 #include <helpers/RefCountedDigitalPin.h>
 
-class ST7735Display : public DisplayDriver {
+class ST7735Display : public DisplayDriver, private CyrCellText {
   bool _isOn;
   RefCountedDigitalPin* _peripher_power;
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
+  void cyrAscii(int x, int y, uint8_t c) override;
+  void cyrFill(int x, int y, int w, int h) override;
 public:
 #ifdef USE_PIN_TFT
   ST7735Display(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64), 
@@ -38,6 +41,8 @@ public:
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;
+  void printWordWrap(const char* str, int max_width) override;
+  void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override;
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DisplayDriver.h"
+#include "CyrillicText.h"
 #include <SPI.h>
 #include <helpers/RefCountedDigitalPin.h>
 
@@ -24,7 +25,7 @@
   #define NV3001B_SPI_HOST HSPI
 #endif
 
-class NV3001BDisplay : public DisplayDriver {
+class NV3001BDisplay : public DisplayDriver, private CyrCellText {
   SPIClass spi;
   RefCountedDigitalPin* periph_power;
   bool is_on = false;
@@ -41,6 +42,9 @@ class NV3001BDisplay : public DisplayDriver {
   void fillPhysicalRect(int x, int y, int w, int h);
   void initPanel();
   void drawChar(int x, int y, char ch);
+  void syncCyrScale();
+  void cyrAscii(int x, int y, uint8_t c) override;
+  void cyrFill(int x, int y, int w, int h) override;
 
 public:
   NV3001BDisplay(RefCountedDigitalPin* power = nullptr) :
@@ -60,6 +64,8 @@ public:
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;
+  void printWordWrap(const char* str, int max_width) override;
+  void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override;
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;

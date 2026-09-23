@@ -60,6 +60,7 @@ class UITask : public AbstractUITask {
   char handleLongPress(char c);
   char handleDoubleClick(char c);
   char handleTripleClick(char c);
+  char handleQuadClick(char c);
 
   void setCurrScreen(UIScreen* c);
 
@@ -73,6 +74,7 @@ public:
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
   void gotoHomeScreen() { setCurrScreen(home); }
+  void keepDisplayAwake();
   void showAlert(const char* text, int duration_millis);
   int  getMsgCount() const { return _msgcount; }
   bool hasDisplay() const { return _display != NULL; }
@@ -89,6 +91,29 @@ public:
   void toggleBuzzer();
   bool getGPSState();
   void toggleGPS();
+  bool canControlFemLna() const { return _board && _board->canControlLoRaFemLna(); }
+  bool isFemLnaEnabled() const { return _board && _board->isLoRaFemLnaEnabled(); }
+  void toggleFemLna();
+  // Most economical first. Parentheses on the page show CPU, RX boost and LNA.
+  void applyPowerProfile(bool rx_boost, bool fem_lna, bool cpu_sleep);
+  bool canSelectMcuSleep() const { return _board && _board->canSelectMcuSleep(); }
+  bool gpsBlocksCpuSleep() const {
+#if ENV_INCLUDE_GPS == 1
+    return _node_prefs && _node_prefs->gps_enabled != 0;
+#else
+    return false;
+#endif
+  }
+  // ESP32 manual light sleep stops the BLE controller. This Arduino build
+  // has no BT modem sleep, so CPU-off modes wait until Bluetooth is off.
+  bool bleBlocksCpuSleep() const {
+#if defined(BLE_PIN_CODE)
+    return isBluetoothEnabled();
+#else
+    return false;
+#endif
+  }
+  bool isDisplayOn() const override;
 
 
   // from AbstractUITask

@@ -92,12 +92,19 @@ void ST7789LCDDisplay::clear() {
 void ST7789LCDDisplay::startFrame(ColorVal bkg) {
   display.fillScreen(bkg);
   display.setTextColor(_color = UIColor::primary_txt);
-  display.setTextSize(1 * DISPLAY_SCALE_X); // This one affects size of Please wait... message
+  setTextScale(1); // This one affects size of Please wait... message
   display.cp437(true); // Use full 256 char 'Code Page 437' font
 }
 
+void ST7789LCDDisplay::setTextScale(int sz) {
+  uint8_t s = sz * DISPLAY_SCALE_X;
+  if (s < 1) s = 1;
+  scale_x = scale_y = s;
+  display.setTextSize(s);
+}
+
 void ST7789LCDDisplay::setTextSize(int sz) {
-  display.setTextSize(sz * DISPLAY_SCALE_X);
+  setTextScale(sz);
 }
 
 void ST7789LCDDisplay::setColor(ColorVal c) {
@@ -108,8 +115,38 @@ void ST7789LCDDisplay::setCursor(int x, int y) {
   display.setCursor(x * DISPLAY_SCALE_X, y * DISPLAY_SCALE_Y);
 }
 
+void ST7789LCDDisplay::cyrAscii(int x, int y, uint8_t c) {
+  display.drawChar(x, y, c, _color, _color, scale_x);
+}
+
+void ST7789LCDDisplay::cyrFill(int x, int y, int w, int h) {
+  display.fillRect(x, y, w, h, _color);
+}
+
 void ST7789LCDDisplay::print(const char* str) {
-  display.print(str);
+  if (!hasUtf8(str)) {
+    display.print(str);
+    return;
+  }
+  pen_x = display.getCursorX();
+  pen_y = display.getCursorY();
+  wrap_px = display.width();
+  cyrPrint(str);
+  display.setCursor(pen_x, pen_y);
+}
+
+void ST7789LCDDisplay::printWordWrap(const char* str, int max_width) {
+  pen_x = display.getCursorX();
+  pen_y = display.getCursorY();
+  wrap_px = 0;
+  int max_px = max_width * DISPLAY_SCALE_X;
+  int limit = display.width() - pen_x;
+  cyrWordWrap(str, max_px < limit ? max_px : limit, display.height());
+  display.setCursor(pen_x, pen_y);
+}
+
+void ST7789LCDDisplay::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {
+  translateUtf8KeepCyrillic(dest, src, dest_size);
 }
 
 void ST7789LCDDisplay::fillRect(int x, int y, int w, int h) {
@@ -140,6 +177,7 @@ void ST7789LCDDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) 
 }
 
 uint16_t ST7789LCDDisplay::getTextWidth(const char* str) {
+  if (hasUtf8(str)) return cyrWidth(str) / DISPLAY_SCALE_X;
   int16_t x1, y1;
   uint16_t w, h;
   display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);

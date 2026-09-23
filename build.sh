@@ -40,6 +40,8 @@ $ sh build.sh build-kiss-radio-firmwares
 Environment Variables:
   DISABLE_DEBUG=1: Disables all debug logging flags (MESH_DEBUG, MESH_PACKET_LOGGING, etc.)
                    If not set, debug flags from variant platformio.ini files are used.
+  DISPLAY_ENVS_ONLY=0: Include boards without a display in build-*-firmwares and release builds.
+                   By default only envs with a DISPLAY_CLASS (other than NullDisplayDriver) are built.
 
 Examples:
 Build without debug logging:
@@ -73,6 +75,8 @@ esac
 # cache project config json for use in get_platform_for_env()
 PIO_CONFIG_JSON=$(pio project config --json-output)
 
+PYTHON=${PYTHON:-$(command -v python3 || command -v python)}
+
 # $1 should be the string to find (case insensitive)
 get_pio_envs_containing_string() {
   shopt -s nocasematch
@@ -84,12 +88,45 @@ get_pio_envs_containing_string() {
   done
 }
 
+# Bulk and release builds only cover envs with a real display, since the fork's
+# changes are the on-device UI and display drivers. Set DISPLAY_ENVS_ONLY=0 to build every board.
+DISPLAY_ENVS_ONLY=${DISPLAY_ENVS_ONLY-1}
+
+# print pio env names that define a DISPLAY_CLASS other than NullDisplayDriver
+get_display_envs() {
+  printf '%s' "$PIO_CONFIG_JSON" | "$PYTHON" -c "
+import sys, json, re
+data = json.load(sys.stdin)
+for section, options in data:
+    if not section.startswith('env:'):
+        continue
+    for key, value in options:
+        if key != 'build_flags':
+            continue
+        flags = ' '.join(value) if isinstance(value, list) else str(value)
+        m = re.search(r'DISPLAY_CLASS=(\w+)', flags)
+        if m and m.group(1) != 'NullDisplayDriver':
+            print(section[4:])
+"
+}
+
+# $1 should be the pio env name
+is_fork_env() {
+  if [ "$DISPLAY_ENVS_ONLY" != "1" ]; then
+    return 0
+  fi
+  if [ -z "$DISPLAY_ENVS" ]; then
+    DISPLAY_ENVS=" $(get_display_envs | tr -d '\r' | tr '\n' ' ') "
+  fi
+  [[ "$DISPLAY_ENVS" == *" $1 "* ]]
+}
+
 # $1 should be the string to find (case insensitive)
 get_pio_envs_ending_with_string() {
   shopt -s nocasematch
   envs=($(get_pio_envs))
   for env in "${envs[@]}"; do
-    if [[ "$env" == *${1} ]]; then
+    if [[ "$env" == *${1} ]] && is_fork_env "$env"; then
       echo $env
     fi
   done
@@ -99,7 +136,7 @@ get_pio_envs_ending_with_string() {
 # $1 should be the environment name
 get_platform_for_env() {
   local env_name=$1
-  printf '%s' "$PIO_CONFIG_JSON" | python3 -c "
+  printf '%s' "$PIO_CONFIG_JSON" | "$PYTHON" -c "
 import sys, json, re
 data = json.load(sys.stdin)
 for section, options in data:
@@ -164,7 +201,7 @@ build_firmware() {
 
   # build .uf2 for nrf52 boards, copy .uf2 and .zip to out folder (e.g: RAK_4631_Repeater-v1.0.0-SHA.uf2)
   if [ "$ENV_PLATFORM" == "NRF52_PLATFORM" ]; then
-    python3 bin/uf2conv/uf2conv.py .pio/build/$1/firmware.hex -c -o .pio/build/$1/firmware.uf2 -f 0xADA52840
+    "$PYTHON" bin/uf2conv/uf2conv.py .pio/build/$1/firmware.hex -c -o .pio/build/$1/firmware.uf2 -f 0xADA52840
     cp .pio/build/$1/firmware.uf2 out/${FIRMWARE_FILENAME}.uf2 2>/dev/null || true
     cp .pio/build/$1/firmware.zip out/${FIRMWARE_FILENAME}.zip 2>/dev/null || true
   fi

@@ -172,6 +172,9 @@ public:
   ContactInfo* lookupContactByPubKey(const uint8_t* pub_key, int prefix_len);
   bool  removeContact(ContactInfo& contact);
   bool  addContact(const ContactInfo& contact);
+  bool isTextAckPending() const {
+    return txt_send_timeout != 0 && !millisHasNowPassed(txt_send_timeout);
+  }
   int getTotalContactSlots() const { return num_contacts; }
   int getNumContacts() const { return num_contacts - MAX_ANON_CONTACTS; }  // don't include the reserved slots at start
   bool getContactByIdx(uint32_t idx, ContactInfo& contact);

@@ -55,6 +55,8 @@ void LGFXDisplay::startFrame(ColorVal bkg) {
 }
 
 void LGFXDisplay::setTextSize(int sz) {
+  if (sz < 1) sz = 1;
+  scale_x = scale_y = sz;
   buffer.setTextSize(sz);
 }
 
@@ -66,9 +68,39 @@ void LGFXDisplay::setCursor(int x, int y) {
   buffer.setCursor(x, y);
 }
 
+void LGFXDisplay::cyrAscii(int x, int y, uint8_t c) {
+  buffer.setCursor(x, y);
+  buffer.print((char)c);
+}
+
+void LGFXDisplay::cyrFill(int x, int y, int w, int h) {
+  buffer.fillRect(x, y, w, h, _color);
+}
+
 void LGFXDisplay::print(const char* str) {
-  buffer.println(str);
+  if (!hasUtf8(str)) {
+    buffer.println(str);
+    return;
+  }
+  pen_x = buffer.getCursorX();
+  pen_y = buffer.getCursorY();
+  wrap_px = buffer.width();
+  cyrPrint(str);
+  buffer.setCursor(0, pen_y + 8 * scale_y);
 //  Serial.println(str);
+}
+
+void LGFXDisplay::printWordWrap(const char* str, int max_width) {
+  pen_x = buffer.getCursorX();
+  pen_y = buffer.getCursorY();
+  wrap_px = 0;
+  int limit = buffer.width() - pen_x;
+  cyrWordWrap(str, max_width < limit ? max_width : limit, buffer.height());
+  buffer.setCursor(pen_x, pen_y);
+}
+
+void LGFXDisplay::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {
+  translateUtf8KeepCyrillic(dest, src, dest_size);
 }
 
 void LGFXDisplay::fillRect(int x, int y, int w, int h) {
@@ -84,6 +116,7 @@ void LGFXDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
 }
 
 uint16_t LGFXDisplay::getTextWidth(const char* str) {
+  if (hasUtf8(str)) return cyrWidth(str);
   return buffer.textWidth(str);
 }
 

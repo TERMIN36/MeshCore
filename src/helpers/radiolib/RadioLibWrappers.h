@@ -18,6 +18,7 @@ protected:
   uint32_t n_recv, n_sent, n_recv_errors;
   int16_t _noise_floor, _threshold;
   bool _cad_enabled;
+  bool _nf_paused;
   uint16_t _num_floor_samples;
   int32_t _floor_sample_sum;
   uint8_t _preamble_sf;
@@ -29,7 +30,7 @@ protected:
   virtual void doResetAGC();
 
 public:
-  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0) { n_recv = n_sent = 0; }
+  RadioLibWrapper(PhysicalLayer& radio, mesh::MainBoard& board) : _radio(&radio), _board(&board), _preamble_sf(0), _nf_paused(false) { n_recv = n_sent = 0; }
 
   void begin() override;
   virtual void powerOff() { _radio->sleep(); }
@@ -48,6 +49,7 @@ public:
   }
 
   virtual void setParams(float freq, float bw, uint8_t sf, uint8_t cr) = 0;
+  void setFrequency(float freq) { _radio->setFrequency(freq); startRecv(); }
   uint32_t getRngSeed();
   void setTxPower(int8_t dbm);
 
@@ -60,6 +62,7 @@ public:
 
   int getNoiseFloor() const override { return _noise_floor; }
   void triggerNoiseFloorCalibrate(int threshold) override;
+  void pauseNoiseFloor(bool pause) { _nf_paused = pause; }
   void setCADEnabled(bool enable) override { _cad_enabled = enable; }
   void resetAGC() override;
 

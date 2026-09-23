@@ -84,6 +84,13 @@ struct AdvertPath {
   uint8_t path[MAX_PATH_SIZE];
 };
 
+struct NeighborInfo {
+  uint8_t pubkey[PUB_KEY_SIZE];
+  char    name[32];
+  int8_t  snr_x4;
+  uint32_t recv_timestamp;
+};
+
 class MyMesh : public BaseChatMesh, public DataStoreHost {
 public:
   MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMeshTables &tables, DataStore& store, AbstractUITask* ui=NULL);
@@ -98,14 +105,24 @@ public:
   void loop();
   void handleCmdFrame(size_t len);
   bool advert();
+#if ENV_INCLUDE_GPS == 1
+  void cycleBeacon();
+  bool cycleBeaconInterval();
+  bool stopBeacon();
+  void formatBeacon(char* mode, size_t mode_sz, char* target, size_t target_sz, char* pos, size_t pos_sz, char* sent, size_t sent_sz);
+#endif
+  bool sendNeighborDiscover();
   void enterCLIRescue();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
+  int  getNeighbors(NeighborInfo dest[], int max_num);
+  void restoreRadioAfterScan();
 
 protected:
   float getAirtimeBudgetFactor() const override;
   int getInterferenceThreshold() const override;
   bool getCADEnabled() const override;
+  int getAGCResetInterval() const override;
   int calcRxDelay(float score, uint32_t air_time) const override;
   uint32_t getRetransmitDelay(const mesh::Packet *packet) override;
   uint32_t getDirectRetransmitDelay(const mesh::Packet *packet) override;
@@ -256,6 +273,27 @@ private:
 
   #define ADVERT_PATH_TABLE_SIZE   16
   AdvertPath advert_paths[ADVERT_PATH_TABLE_SIZE]; // circular table
+
+  #define NEIGHBOR_TABLE_SIZE  8
+  NeighborInfo neighbors[NEIGHBOR_TABLE_SIZE];
+  uint32_t pending_neighbor_discover_tag;
+  unsigned long pending_neighbor_discover_until;
+
+  void putNeighbor(const uint8_t* pubkey, int8_t snr_x4);
+
+#if ENV_INCLUDE_GPS == 1
+  unsigned long _beacon_next;
+  uint32_t _beacon_sent_at;
+  struct BeaconOpt {
+    uint8_t mode;
+    uint8_t chan;
+    uint8_t pub[PUB_KEY_SIZE];
+  };
+  int buildBeaconOptions(BeaconOpt* out, int max_out);
+  uint32_t beaconIntervalMs() const;
+  bool beaconHasFix() const;
+  void checkBeacon();
+#endif
 };
 
 extern MyMesh the_mesh;

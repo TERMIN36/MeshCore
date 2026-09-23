@@ -65,11 +65,14 @@ void SH1106Display::startFrame(ColorVal bkg)
   _color = SH110X_WHITE;
   display.setTextColor(_color);
   display.setTextSize(1);
+  scale_x = scale_y = 1;
   display.cp437(true); // Use full 256 char 'Code Page 437' font
 }
 
 void SH1106Display::setTextSize(int sz)
 {
+  if (sz < 1) sz = 1;
+  scale_x = scale_y = sz;
   display.setTextSize(sz);
 }
 
@@ -84,9 +87,42 @@ void SH1106Display::setCursor(int x, int y)
   display.setCursor(x, y);
 }
 
+void SH1106Display::cyrAscii(int x, int y, uint8_t c)
+{
+  display.drawChar(x, y, c, _color, _color, scale_x);
+}
+
+void SH1106Display::cyrFill(int x, int y, int w, int h)
+{
+  display.fillRect(x, y, w, h, _color);
+}
+
 void SH1106Display::print(const char *str)
 {
-  display.print(str);
+  if (!hasUtf8(str)) {
+    display.print(str);
+    return;
+  }
+  pen_x = display.getCursorX();
+  pen_y = display.getCursorY();
+  wrap_px = display.width();
+  cyrPrint(str);
+  display.setCursor(pen_x, pen_y);
+}
+
+void SH1106Display::printWordWrap(const char *str, int max_width)
+{
+  pen_x = display.getCursorX();
+  pen_y = display.getCursorY();
+  wrap_px = 0;
+  int limit = display.width() - pen_x;
+  cyrWordWrap(str, max_width < limit ? max_width : limit, display.height());
+  display.setCursor(pen_x, pen_y);
+}
+
+void SH1106Display::translateUTF8ToBlocks(char *dest, const char *src, size_t dest_size)
+{
+  translateUtf8KeepCyrillic(dest, src, dest_size);
 }
 
 void SH1106Display::fillRect(int x, int y, int w, int h)
@@ -106,6 +142,7 @@ void SH1106Display::drawXbm(int x, int y, const uint8_t *bits, int w, int h)
 
 uint16_t SH1106Display::getTextWidth(const char *str)
 {
+  if (hasUtf8(str)) return cyrWidth(str);
   int16_t x1, y1;
   uint16_t w, h;
   display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);

@@ -70,44 +70,53 @@ public:
     return P_LORA_DIO_1; // default for SX1262
   }
 
-  void sleep(uint32_t secs) override {
-    // Skip if not allow to sleep
+  bool canSelectMcuSleep() const override { return !inhibit_sleep; }
+
+  void idleSleep(uint32_t timeout_ms) override {
     if (inhibit_sleep) {
-      delay(1); // Give MCU to OTA to run
+      delay(1); // Give MCU to OTA or WiFi to run
       return;
     }
 
-    // Set GPIO wakeup
-    gpio_num_t wakeupPin = (gpio_num_t)getIRQGpio();    
+    gpio_num_t wakeupPin = (gpio_num_t)getIRQGpio();
+    bool btn_wake = false;
+#if defined(PIN_USER_BTN)
+    btn_wake = PIN_USER_BTN >= 0 && (int)PIN_USER_BTN != (int)wakeupPin;
+#endif
 
-    // Configure timer wakeup
-    if (secs > 0) {
-      esp_sleep_enable_timer_wakeup(secs * 1000000ULL); // Wake up periodically to do scheduled jobs
+    if (timeout_ms > 0) {
+      esp_sleep_enable_timer_wakeup((uint64_t)timeout_ms * 1000ULL);
     }
 
-    // Disable CPU interrupt servicing
     portENTER_CRITICAL(&sleepMux);
 
-    // Skip sleep if there is a LoRa packet
+    // Skip sleep if a LoRa packet is already waiting
     if (gpio_get_level(wakeupPin) == HIGH) {
       portEXIT_CRITICAL(&sleepMux);
       delay(1);
       return;
     }
 
-    // Configure GPIO wakeup
     esp_sleep_enable_gpio_wakeup();
-    gpio_wakeup_enable((gpio_num_t)wakeupPin, GPIO_INTR_HIGH_LEVEL); // Wake up when receiving a LoRa packet
+    gpio_wakeup_enable(wakeupPin, GPIO_INTR_HIGH_LEVEL);
+    if (btn_wake) {
+      gpio_wakeup_enable((gpio_num_t)PIN_USER_BTN,
+          (USER_BTN_PRESSED) == LOW ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
+    }
 
-    // MCU enters light sleep
     esp_light_sleep_start();
 
-    // Avoid ISR flood during wakeup due to HIGH LEVEL interrupt
     gpio_wakeup_disable(wakeupPin);
+    if (btn_wake) {
+      gpio_wakeup_disable((gpio_num_t)PIN_USER_BTN);
+    }
     gpio_set_intr_type(wakeupPin, GPIO_INTR_POSEDGE);
 
-    // Enable CPU interrupt servicing
     portEXIT_CRITICAL(&sleepMux);
+  }
+
+  void sleep(uint32_t secs) override {
+    idleSleep(secs > 0 ? secs * 1000UL : 0);
   }
 
   uint8_t getStartupReason() const override { return startup_reason; }

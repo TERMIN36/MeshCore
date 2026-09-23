@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DisplayDriver.h"
+#include "CyrillicFont.h"
 #include <U8g2lib.h>
 #include <Wire.h>
 
@@ -29,9 +30,9 @@ class U8g2Display : public DisplayDriver {
 
   void applyFont(int sz) {
     if (sz >= 2) {
-      _u8g2.setFont(u8g2_font_6x10_mr); // slightly larger font for better readability. TODO: more font sizes?
+      _u8g2.setFont(u8g2_font_6x12_t_cyrillic); // slightly larger font for better readability. TODO: more font sizes?
     } else {
-      _u8g2.setFont(u8g2_font_5x7_mr);
+      _u8g2.setFont(u8g2_font_5x7_t_cyrillic);
     }
     _fontAscent = _u8g2.getAscent();
     _fontHeight = _u8g2.getAscent() - _u8g2.getDescent();
@@ -94,7 +95,14 @@ public:
   }
 
   void print(const char* str) override {
-    _u8g2.drawStr(_cursorX, _cursorY, str);
+    _u8g2.drawUTF8(_cursorX, _cursorY, str);
+  }
+
+  void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override {
+    translateUtf8KeepCyrillic(dest, src, dest_size);
+    for (char* p = dest; *p; p++) {
+      if (*p == '\xDB') *p = '?';  // no block glyph in the U8g2 Cyrillic fonts
+    }
   }
 
   void fillRect(int x, int y, int w, int h) override {
@@ -110,7 +118,7 @@ public:
   }
 
   uint16_t getTextWidth(const char* str) override {
-    return _u8g2.getStrWidth(str);
+    return _u8g2.getUTF8Width(str);
   }
 
   void endFrame() override {

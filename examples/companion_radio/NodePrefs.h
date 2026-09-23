@@ -9,6 +9,12 @@
 #define ADVERT_LOC_NONE       0
 #define ADVERT_LOC_SHARE      1
 
+#define BEACON_OFF            0
+#define BEACON_ADVERT_LOCAL   1
+#define BEACON_ADVERT_FLOOD   2
+#define BEACON_GROUP          3
+#define BEACON_CHAT           4
+
 class NodePrefs : public ConfigSerializer {  // persisted to file
 public:
   float airtime_factor = 0;
@@ -31,8 +37,14 @@ public:
   uint8_t  vibe_quiet = 0;
   uint8_t  gps_enabled = 0;      // GPS enabled flag (0=disabled, 1=enabled)
   uint32_t gps_interval = 0;     // GPS read interval in seconds
+  uint8_t  beacon_mode = BEACON_OFF;
+  uint8_t  beacon_chan = 0;      // group channel index when beacon_mode == BEACON_GROUP
+  uint8_t  beacon_group_mins = 30;
+  uint8_t  beacon_chat_mins = 30;
+  uint8_t  beacon_pub[32];       // contact public key when beacon_mode == BEACON_CHAT
   uint8_t autoadd_config = 0;    // bitmask for auto-add contacts config
   uint8_t rx_boosted_gain = 0; // SX126x RX boosted gain mode (0=power saving, 1=boosted)
+  uint8_t mcu_sleep = 0;       // 1 = light-sleep the MCU while idle (ESP32)
   uint8_t radio_fem_rxgain = 0; // external LoRa FEM RX gain (LNA)
   uint8_t radio_fem_txgain = 0; // external LoRa FEM TX gain (low by default)
   uint8_t _client_repeat = 0;  // DEPRECATED -> use repeat.disable_fwd
@@ -53,10 +65,9 @@ private:
       //def("cad", _parent->cad_enabled);
       //def("int_thr", _parent->interference_threshold);
       def("rxgain", _parent->rx_boosted_gain);
-    #if 0
-      // NOTE: these cannot be set (yet) so don't load/save until we can.
-      //       also, fem_rxgain WAS mapped to wrong JSON property previously
       def("fem_rxgain", _parent->radio_fem_rxgain);
+    #if 0
+      // NOTE: fem_txgain cannot be set from companion UI yet.
       def("fem_txgain", _parent->radio_fem_txgain);
     #endif
       def("tx", _parent->tx_power_dbm);
@@ -80,6 +91,11 @@ private:
       def("en", _parent->gps_enabled); // boolean
       def("int", _parent->gps_interval);   // interval in seconds
       def("adv_loc", _parent->advert_loc_policy);
+      def("bcn", _parent->beacon_mode);
+      def("bcn_ch", _parent->beacon_chan);
+      def("bcn_gm", _parent->beacon_group_mins);
+      def("bcn_cm", _parent->beacon_chat_mins);
+      def("bcn_pub", (void *) _parent->beacon_pub, sizeof(_parent->beacon_pub));
     }
   public:
     GPSPrefs(NodePrefs* parent) : _parent(parent) { }
@@ -109,6 +125,7 @@ private:
       def("defs_key", (void *) _parent->default_scope_key, sizeof(_parent->default_scope_key));
       def("pin", _parent->ble_pin);
       def("buzz_q", _parent->buzzer_quiet);
+      def("mcu_slp", _parent->mcu_sleep);
       def("vibe_q", _parent->vibe_quiet);
       def("auto_add", _parent->autoadd_config);    // bitmask for auto-add contacts config
       def("man_add", _parent->manual_add_contacts);
@@ -138,6 +155,7 @@ public:
     node_name[0] = 0;
     default_scope_name[0] = 0;
     memset(default_scope_key, 0, sizeof(default_scope_key));
+    memset(beacon_pub, 0, sizeof(beacon_pub));
   }
   // new accessor methods
   bool isRepeatEn() const { return repeat.disable_fwd == 0; }

@@ -543,10 +543,13 @@ void ST7735Display::startFrame(ColorVal bkg) {
   sprite->setTextColor(curr_color = UIColor::primary_txt);
   sprite->setFreeFont();
   sprite->setTextSize(1);      // This one affects size of Please wait... message
+  scale_x = scale_y = 1;
   //sprite->cp437(true);         // Use full 256 char 'Code Page 437' font
 }
 
 void ST7735Display::setTextSize(int sz) {
+  if (sz < 1) sz = 1;
+  scale_x = scale_y = sz;
   sprite->setTextSize(sz);
 }
 
@@ -559,8 +562,38 @@ void ST7735Display::setCursor(int x, int y) {
   sprite->setCursor(x*SCALE_X, y*SCALE_Y);
 }
 
+void ST7735Display::cyrAscii(int x, int y, uint8_t c) {
+  sprite->drawChar(x, y, c, curr_color, curr_color, scale_x);
+}
+
+void ST7735Display::cyrFill(int x, int y, int w, int h) {
+  sprite->fillRect(x, y, w, h, curr_color);
+}
+
 void ST7735Display::print(const char* str) {
-  sprite->print(str);
+  if (!hasUtf8(str)) {
+    sprite->print(str);
+    return;
+  }
+  pen_x = sprite->getCursorX();
+  pen_y = sprite->getCursorY();
+  wrap_px = sprite->width();
+  cyrPrint(str);
+  sprite->setCursor(pen_x, pen_y);
+}
+
+void ST7735Display::printWordWrap(const char* str, int max_width) {
+  pen_x = sprite->getCursorX();
+  pen_y = sprite->getCursorY();
+  wrap_px = 0;
+  int max_px = max_width * SCALE_X;
+  int limit = sprite->width() - pen_x;
+  cyrWordWrap(str, max_px < limit ? max_px : limit, sprite->height());
+  sprite->setCursor(pen_x, pen_y);
+}
+
+void ST7735Display::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {
+  translateUtf8KeepCyrillic(dest, src, dest_size);
 }
 
 void ST7735Display::fillRect(int x, int y, int w, int h) {
@@ -576,6 +609,7 @@ void ST7735Display::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
 }
 
 uint16_t ST7735Display::getTextWidth(const char* str) {
+  if (hasUtf8(str)) return cyrWidth(str) / SCALE_X;
   return sprite->textWidth(str) / SCALE_X;
 }
 

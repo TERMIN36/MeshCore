@@ -1,6 +1,7 @@
 #pragma once
 
 #include <helpers/ui/DisplayDriver.h>
+#include <helpers/ui/CyrillicText.h>
 
 #define LGFX_USE_V1
 #include <LovyanGFX.hpp>
@@ -9,13 +10,16 @@
   #define UI_ZOOM 1
 #endif
 
-class LGFXDisplay : public DisplayDriver {
+class LGFXDisplay : public DisplayDriver, private CyrCellText {
 protected:
   LGFX_Device* display;
   LGFX_Sprite buffer;
 
   bool _isOn = false;
   int _color = TFT_WHITE;
+
+  void cyrAscii(int x, int y, uint8_t c) override;
+  void cyrFill(int x, int y, int w, int h) override;
 
 public:
   LGFXDisplay(int w, int h, LGFX_Device &disp)
@@ -30,6 +34,8 @@ public:
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;
+  void printWordWrap(const char* str, int max_width) override;
+  void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override;
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;

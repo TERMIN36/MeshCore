@@ -13,6 +13,7 @@
 #define KEY_NEXT           0xF1
 #define KEY_PREV           0xF2
 #define KEY_CONTEXT_MENU   0xF3
+#define KEY_QUAD           0xF4
 
 class UIScreen {
 protected:

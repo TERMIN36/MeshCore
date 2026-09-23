@@ -259,6 +259,25 @@ void loop() {
   if (!the_mesh.hasPendingWork()) {
 #if defined(NRF52_PLATFORM)
     board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
+#elif defined(ESP32)
+    // Opt-in light sleep. Stay awake while the screen is on so the UI stays
+    // responsive. A packet (DIO1) or the user button wakes the CPU immediately.
+    if (the_mesh.getNodePrefs()->mcu_sleep && board.canSelectMcuSleep()
+#if ENV_INCLUDE_GPS == 1
+        && !the_mesh.getNodePrefs()->gps_enabled
+#endif
+#ifdef DISPLAY_CLASS
+        && !ui_task.isDisplayOn()
+#endif
+    ) {
+#if defined(BLE_PIN_CODE)
+      // esp_light_sleep_start() halts the Bluedroid controller. Modem sleep
+      // is not compiled into this Arduino core, so any light sleep drops the
+      // phone link. Sleep only while Bluetooth is switched off.
+      if (!bluetooth_interface.isEnabled())
+#endif
+      board.idleSleep(1000);
+    }
 #endif
   }
 

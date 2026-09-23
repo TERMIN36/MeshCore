@@ -1,13 +1,14 @@
 #pragma once
 
 #include "DisplayDriver.h"
+#include "CyrillicText.h"
 #include <Wire.h>
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
 #include <helpers/RefCountedDigitalPin.h>
 
-class ST7789LCDDisplay : public DisplayDriver {
+class ST7789LCDDisplay : public DisplayDriver, private CyrCellText {
   #if defined(LILYGO_TDECK) || defined(HELTEC_LORA_V4_TFT) || defined(HELTEC_V4_R8_TFT)
     SPIClass displaySPI;
   #endif
@@ -17,6 +18,9 @@ class ST7789LCDDisplay : public DisplayDriver {
   RefCountedDigitalPin* _peripher_power;
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
+  void setTextScale(int sz);
+  void cyrAscii(int x, int y, uint8_t c) override;
+  void cyrFill(int x, int y, int w, int h) override;
 public:
 #ifdef USE_PIN_TFT
   ST7789LCDDisplay(RefCountedDigitalPin* peripher_power=NULL) : DisplayDriver(128, 64), 
@@ -52,6 +56,8 @@ public:
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char* str) override;
+  void printWordWrap(const char* str, int max_width) override;
+  void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override;
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;

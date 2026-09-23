@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DisplayDriver.h"
+#include "CyrillicText.h"
 
 #include <SPI.h>
 #include <Wire.h>
@@ -9,7 +10,7 @@
 #include <helpers/RefCountedDigitalPin.h>
 
 // Display driver for E213 e-ink display
-class E213Display : public DisplayDriver {
+class E213Display : public DisplayDriver, private CyrCellText {
   BaseDisplay* display=NULL;
   bool _init = false;
   bool _isOn = false;
@@ -36,6 +37,8 @@ public:
   void setColor(ColorVal c) override;
   void setCursor(int x, int y) override;
   void print(const char *str) override;
+  void printWordWrap(const char *str, int max_width) override;
+  void translateUTF8ToBlocks(char *dest, const char *src, size_t dest_size) override;
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t *bits, int w, int h) override;
@@ -43,6 +46,8 @@ public:
   void endFrame() override;
 
 private:
+  void cyrAscii(int x, int y, uint8_t c) override;
+  void cyrFill(int x, int y, int w, int h) override;
   BaseDisplay* detectEInk();
   void powerOn();
   void powerOff();

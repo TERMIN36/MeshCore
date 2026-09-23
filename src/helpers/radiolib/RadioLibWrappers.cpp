@@ -37,6 +37,7 @@ void RadioLibWrapper::begin() {
   _noise_floor = 0;
   _threshold = 0;
   _cad_enabled = false;
+  _nf_paused = false;
 
   // start average out some samples
   _num_floor_samples = 0;
@@ -85,6 +86,7 @@ void RadioLibWrapper::resetAGC() {
 }
 
 void RadioLibWrapper::loop() {
+  if (_nf_paused) return;
   if (state == STATE_RX && _num_floor_samples < NUM_NOISE_FLOOR_SAMPLES) {
     if (!isReceivingPacket()) {
       int rssi = getCurrentRSSI();

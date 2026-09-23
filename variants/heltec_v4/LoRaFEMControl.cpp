@@ -29,6 +29,7 @@ void LoRaFEMControl::init(void)
         digitalWrite(P_LORA_KCT8103L_PA_CSD, HIGH);
         rtc_gpio_hold_dis((gpio_num_t)P_LORA_KCT8103L_PA_CTX);
         pinMode(P_LORA_KCT8103L_PA_CTX, OUTPUT);
+        // CTX LOW = RX LNA on, HIGH = RX bypass. Default lna_enabled is false.
         digitalWrite(P_LORA_KCT8103L_PA_CTX, lna_enabled ? LOW : HIGH);
         setLnaCanControl(true);
     } else {

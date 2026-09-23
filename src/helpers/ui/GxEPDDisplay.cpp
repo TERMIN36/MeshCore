@@ -1,5 +1,6 @@
 
 #include "GxEPDDisplay.h"
+#include "CyrillicFont.h"
 
 #ifdef EXP_PIN_BACKLIGHT
   #include <PCA9557.h>
@@ -79,7 +80,34 @@ void GxEPDDisplay::startFrame(ColorVal bkg) {
   display_crc.reset();
 }
 
+const CyrBitmapFont& GxEPDDisplay::cyrFace() const {
+  return _textSize >= 2 ? CYR_EINK2 : CYR_EINK;
+}
+
+void GxEPDDisplay::drawCyrGlyph(int idx, int x, int y) {
+  const CyrBitmapFont& font = cyrFace();
+  int w = idx >= 0 ? cyrAdvance(font, idx) : (font.height * 2) / 3;
+  int h = font.height;
+  if (w < 1) w = 1;
+  int top = y - font.baseline;
+  for (int row = 0; row < h; row++) {
+    int run = -1;
+    for (int col = 0; col <= w; col++) {
+      bool on = col < w && (idx >= 0 ? cyrPixel(font, idx, col, row)
+                                     : (row == 0 || row == h - 1 || col == 0 || col == w - 1));
+      if (on) {
+        if (run < 0) run = col;
+      } else if (run >= 0) {
+        display.fillRect(x + run, top + row, col - run, 1, _curr_color);
+        run = -1;
+      }
+    }
+  }
+}
+
 void GxEPDDisplay::setTextSize(int sz) {
+  if (sz < 1) sz = 1;
+  _textSize = sz;
   display_crc.update<int>(sz);
   switch(sz) {
     case 1:  // Small
@@ -103,14 +131,136 @@ void GxEPDDisplay::setColor(ColorVal c) {
 }
 
 void GxEPDDisplay::setCursor(int x, int y) {
+  _lx = x;
+  _ly = y;
   display_crc.update<int>(x);
   display_crc.update<int>(y);
   display.setCursor((x+offset_x)*scale_x, (y+offset_y)*scale_y);
 }
 
+static const GFXfont* latinFace(int textSize) {
+  switch (textSize) {
+    case 2: return &FreeSansBold12pt7b;
+    case 3: return &FreeSans18pt7b;
+    default: return &FreeSans9pt7b;
+  }
+}
+
+static int latinAdvance(const GFXfont* font, uint32_t cp) {
+  if (cp < 32 || cp > 255) return 0;
+  GFXfont face;
+  memcpy_P(&face, font, sizeof(face));
+  if ((uint16_t)cp < face.first || (uint16_t)cp > face.last) return 0;
+  GFXglyph glyph;
+  memcpy_P(&glyph, face.glyph + ((uint16_t)cp - face.first), sizeof(glyph));
+  return glyph.xAdvance;
+}
+
+int GxEPDDisplay::codepointWidthPx(uint32_t cp) const {
+  if (cp < 32 || cp == '\n') return 0;
+  int idx = cyrillicGlyphIndex(cp);
+  if (idx >= 0) return cyrAdvance(cyrFace(), idx);
+  if (cp < 0x80) return latinAdvance(latinFace(_textSize), cp);
+  return (cyrFace().height * 2) / 3;
+}
+
+int GxEPDDisplay::textLineStep() const {
+  GFXfont face;
+  memcpy_P(&face, latinFace(_textSize), sizeof(face));
+  int phys = face.yAdvance;
+  int cyr = (int)cyrFace().height + 2;
+  if (cyr > phys) phys = cyr;
+  if (phys < 1) phys = 1;
+  int step = (int)(phys / scale_y);
+  if ((float)step * scale_y < (float)phys - 0.01f) step++;
+  if (step < 1) step = 1;
+  return step;
+}
+
+void GxEPDDisplay::printSpan(const char* begin, const char* end) {
+  if (!begin || end < begin) return;
+  display_crc.update<char>(begin, (size_t)(end - begin));
+  const char* p = begin;
+  while (p < end && *p) {
+    if ((uint8_t)*p < 0x80) {
+      char buf[64];
+      int n = 0;
+      while (p < end && *p && (uint8_t)*p < 0x80 && n < (int)sizeof(buf) - 1) {
+        buf[n++] = *p++;
+      }
+      buf[n] = 0;
+      display.print(buf);
+    } else {
+      uint32_t cp = 0;
+      const char* next = utf8Next(p, cp);
+      if (next > end) next = end;
+      int idx = cyrillicGlyphIndex(cp);
+      int x = display.getCursorX();
+      int y = display.getCursorY();
+      drawCyrGlyph(idx, x, y);
+      int adv = idx >= 0 ? cyrAdvance(cyrFace(), idx) : (cyrFace().height * 2) / 3;
+      display.setCursor(x + adv, y);
+      p = next;
+    }
+  }
+}
+
 void GxEPDDisplay::print(const char* str) {
-  display_crc.update<char>(str, strlen(str));
-  display.print(str);
+  printSpan(str, str + strlen(str));
+}
+
+void GxEPDDisplay::printWordWrap(const char* str, int max_width) {
+  int origin = _lx;
+  int y = _ly;
+  int origin_px = (int)((origin + offset_x) * scale_x);
+  int limit = display.width() - origin_px;
+  if (limit < 1) limit = 1;
+  int max_px = (int)(max_width * scale_x + 0.5f);
+  if (max_px > limit) max_px = limit;
+  if (max_px < 1) max_px = 1;
+  int step = textLineStep();
+  int descent = (int)cyrFace().height - (int)cyrFace().baseline;
+  if (descent < 0) descent = 0;
+  // Lines are already split to the panel width. Leave GFX wrap off so a
+  // one-pixel rounding difference cannot insert an extra break mid-line.
+  display.setTextWrap(false);
+
+  bool first = true;
+  const char* p = str;
+  while (*p) {
+    int baseline = (int)((y + offset_y) * scale_y);
+    if (!first && (baseline < 0 || baseline + descent >= display.height())) break;
+
+    const char* line = p;
+    int width = 0;
+    const char* brk = nullptr;
+    const char* end = p;
+    while (*end && *end != '\n') {
+      uint32_t cp = 0;
+      const char* next = utf8Next(end, cp);
+      int cw = codepointWidthPx(cp);
+      if (width + cw > max_px && end != line) break;
+      width += cw;
+      if (cp == ' ' || cp == '-' || cp == '/') brk = next;
+      end = next;
+    }
+    const char* cut = end;
+    if (*end && *end != '\n' && brk && brk > line) cut = brk;
+    setCursor(origin, y);
+    printSpan(line, cut);
+    first = false;
+    if (*cut == '\n' || *cut == ' ') cut++;
+    if (cut == p) break;
+    p = cut;
+    if (*p) y += step;
+  }
+  display.setTextWrap(true);
+  _lx = origin;
+  _ly = y;
+}
+
+void GxEPDDisplay::translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) {
+  translateUtf8KeepCyrillic(dest, src, dest_size);
 }
 
 void GxEPDDisplay::fillRect(int x, int y, int w, int h) {
@@ -171,10 +321,36 @@ void GxEPDDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
 }
 
 uint16_t GxEPDDisplay::getTextWidth(const char* str) {
+  bool utf8 = false;
+  for (const char* q = str; *q; q++) {
+    if ((uint8_t)*q >= 0x80) { utf8 = true; break; }
+  }
   int16_t x1, y1;
   uint16_t w, h;
-  display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
-  return ceil((w + 1) / scale_x);
+  if (!utf8) {
+    display.getTextBounds(str, 0, 0, &x1, &y1, &w, &h);
+    return ceil((w + 1) / scale_x);
+  }
+  int px = 0;
+  const char* p = str;
+  while (*p) {
+    if ((uint8_t)*p < 0x80) {
+      char buf[64];
+      int n = 0;
+      while (*p && (uint8_t)*p < 0x80 && n < (int)sizeof(buf) - 1) {
+        buf[n++] = *p++;
+      }
+      buf[n] = 0;
+      display.getTextBounds(buf, 0, 0, &x1, &y1, &w, &h);
+      px += w;
+    } else {
+      uint32_t cp = 0;
+      p = utf8Next(p, cp);
+      int idx = cyrillicGlyphIndex(cp);
+      px += idx >= 0 ? cyrAdvance(cyrFace(), idx) : (cyrFace().height * 2) / 3;
+    }
+  }
+  return ceil((px + 1) / scale_x);
 }
 
 void GxEPDDisplay::endFrame() {

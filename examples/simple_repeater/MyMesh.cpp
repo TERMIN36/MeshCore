@@ -931,7 +931,7 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _prefs.rx_boosted_gain = 1; // enabled by default;
 #endif
 #endif
-  _prefs.radio_fem_rxgain = 1;
+  _prefs.radio_fem_rxgain = 0;  // FEM RX LNA off (Heltec V4.3 bypass)
   _prefs.radio_fem_txgain = 0;
 
   pending_discover_tag = 0;

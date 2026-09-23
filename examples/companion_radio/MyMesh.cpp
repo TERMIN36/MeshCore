@@ -265,6 +265,19 @@ bool MyMesh::getCADEnabled() const {
   return false; // hardware CAD before TX (disabled by default, until configurable)
 }
 
+int MyMesh::getAGCResetInterval() const {
+  return 4000; // SX1262 analog/AGC can stick; companion had no reset
+}
+
+void MyMesh::restoreRadioAfterScan() {
+  radio_driver.pauseNoiseFloor(false);
+  radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  radio_driver.setTxPower(_prefs.tx_power_dbm);
+  radio_driver.setRxBoostedGainMode(_prefs.rx_boosted_gain);
+  board.setLoRaFemLnaEnabled(_prefs.radio_fem_rxgain);
+  radio_driver.resetAGC();
+}
+
 int MyMesh::calcRxDelay(float score, uint32_t air_time) const {
   if (_prefs.rx_delay_base <= 0.0f) return 0;
   return (int)((pow(_prefs.rx_delay_base, 0.85f - score) - 1.0) * air_time);
@@ -401,6 +414,77 @@ int MyMesh::getRecentlyHeard(AdvertPath dest[], int max_num) {
     dest[i] = advert_paths[i];
   }
   return max_num;
+}
+
+static int sort_neighbors_by_snr(const void *a, const void *b) {
+  const NeighborInfo* na = (const NeighborInfo*)a;
+  const NeighborInfo* nb = (const NeighborInfo*)b;
+  if (na->recv_timestamp == 0 && nb->recv_timestamp == 0) return 0;
+  if (na->recv_timestamp == 0) return 1;
+  if (nb->recv_timestamp == 0) return -1;
+  if (nb->snr_x4 != na->snr_x4) return (int)nb->snr_x4 - (int)na->snr_x4;
+  if (nb->recv_timestamp > na->recv_timestamp) return 1;
+  if (nb->recv_timestamp < na->recv_timestamp) return -1;
+  return 0;
+}
+
+void MyMesh::putNeighbor(const uint8_t* pubkey, int8_t snr_x4) {
+  NeighborInfo* slot = NULL;
+  uint32_t oldest = 0xFFFFFFFF;
+  for (int i = 0; i < NEIGHBOR_TABLE_SIZE; i++) {
+    if (memcmp(neighbors[i].pubkey, pubkey, PUB_KEY_SIZE) == 0) {
+      slot = &neighbors[i];
+      break;
+    }
+    if (neighbors[i].recv_timestamp < oldest) {
+      oldest = neighbors[i].recv_timestamp;
+      slot = &neighbors[i];
+    }
+  }
+  if (!slot) return;
+
+  memcpy(slot->pubkey, pubkey, PUB_KEY_SIZE);
+  slot->snr_x4 = snr_x4;
+  slot->recv_timestamp = getRTCClock()->getCurrentTime();
+
+  ContactInfo* known = lookupContactByPubKey(pubkey, PUB_KEY_SIZE);
+  if (known && known->name[0]) {
+    StrHelper::strncpy(slot->name, known->name, sizeof(slot->name));
+  } else {
+    mesh::Utils::toHex(slot->name, pubkey, 4);
+    slot->name[8] = 0;
+  }
+}
+
+int MyMesh::getNeighbors(NeighborInfo dest[], int max_num) {
+  if (max_num > NEIGHBOR_TABLE_SIZE) max_num = NEIGHBOR_TABLE_SIZE;
+  qsort(neighbors, NEIGHBOR_TABLE_SIZE, sizeof(neighbors[0]), sort_neighbors_by_snr);
+  int n = 0;
+  for (int i = 0; i < NEIGHBOR_TABLE_SIZE && n < max_num; i++) {
+    if (neighbors[i].recv_timestamp == 0) continue;
+    dest[n++] = neighbors[i];
+  }
+  return n;
+}
+
+bool MyMesh::sendNeighborDiscover() {
+  uint8_t data[10];
+  data[0] = 0x80; // CTL_TYPE_NODE_DISCOVER_REQ
+  data[1] = (1 << ADV_TYPE_REPEATER);
+  getRNG()->random(&data[2], 4);
+  memcpy(&pending_neighbor_discover_tag, &data[2], 4);
+  pending_neighbor_discover_until = futureMillis(60000);
+  uint32_t since = 0;
+  memcpy(&data[6], &since, 4);
+
+  auto pkt = createControlData(data, sizeof(data));
+  if (pkt) {
+    memset(neighbors, 0, sizeof(neighbors));
+    sendZeroHop(pkt);
+    return true;
+  }
+  pending_neighbor_discover_tag = 0;
+  return false;
 }
 
 void MyMesh::onContactPathUpdated(const ContactInfo &contact) {
@@ -779,6 +863,22 @@ bool MyMesh::onContactPathRecv(ContactInfo& contact, uint8_t* in_path, uint8_t i
 }
 
 void MyMesh::onControlDataRecv(mesh::Packet *packet) {
+  uint8_t type = packet->payload[0] & 0xF0;
+  if (type == 0x90 && packet->payload_len >= 6 + PUB_KEY_SIZE) { // CTL_TYPE_NODE_DISCOVER_RESP
+    uint8_t node_type = packet->payload[0] & 0x0F;
+    if (node_type == ADV_TYPE_REPEATER && pending_neighbor_discover_tag != 0
+        && !millisHasNowPassed(pending_neighbor_discover_until)) {
+      uint32_t tag;
+      memcpy(&tag, &packet->payload[2], 4);
+      if (tag == pending_neighbor_discover_tag) {
+        mesh::Identity id(&packet->payload[6]);
+        if (!id.matches(self_id)) {
+          putNeighbor(id.pub_key, (int8_t)(packet->getSNR() * 4));
+        }
+      }
+    }
+  }
+
   if (packet->payload_len + 4 > sizeof(out_frame)) {
     MESH_DEBUG_PRINTLN("onControlDataRecv(), payload_len too long: %d", packet->payload_len);
     return;
@@ -872,6 +972,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   sign_data = NULL;
   dirty_contacts_expiry = 0;
   memset(advert_paths, 0, sizeof(advert_paths));
+  memset(neighbors, 0, sizeof(neighbors));
+  pending_neighbor_discover_tag = 0;
+  pending_neighbor_discover_until = 0;
   memset(send_scope.key, 0, sizeof(send_scope.key));
   send_unscoped = false;
 
@@ -885,7 +988,11 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _prefs.tx_power_dbm = LORA_TX_POWER;
   _prefs.gps_enabled = 0;       // GPS disabled by default
   _prefs.gps_interval = 0;      // No automatic GPS updates by default
-  _prefs.radio_fem_rxgain = 1;
+#if ENV_INCLUDE_GPS == 1
+  _beacon_next = 0;
+  _beacon_sent_at = 0;
+#endif
+  _prefs.radio_fem_rxgain = 0;  // FEM RX LNA off (Heltec V4.3 bypass)
   _prefs.radio_fem_txgain = 0;
   //_prefs.rx_delay_base = 10.0f;  enable once new algo fixed
   _prefs.setRepeatEn(false);
@@ -947,6 +1054,14 @@ void MyMesh::begin(bool has_display) {
   _prefs.tx_power_dbm = constrain(_prefs.tx_power_dbm, -9, MAX_LORA_TX_POWER);
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
+  _prefs.beacon_mode = constrain(_prefs.beacon_mode, BEACON_OFF, BEACON_CHAT);
+  if (_prefs.beacon_group_mins < 5 || _prefs.beacon_group_mins > 180) _prefs.beacon_group_mins = 30;
+  if (_prefs.beacon_chat_mins < 5 || _prefs.beacon_chat_mins > 180) _prefs.beacon_chat_mins = 30;
+#ifdef MAX_GROUP_CHANNELS
+  if (MAX_GROUP_CHANNELS > 0) {
+    _prefs.beacon_chan = constrain(_prefs.beacon_chan, 0, MAX_GROUP_CHANNELS - 1);
+  }
+#endif
 
 #ifdef BLE_PIN_CODE // 123456 by default
   if (_prefs.ble_pin == 0) {
@@ -2244,7 +2359,283 @@ void MyMesh::loop() {
 #ifdef DISPLAY_CLASS
   if (_ui) _ui->setHasConnection(_serial->isConnected());
 #endif
+
+#if ENV_INCLUDE_GPS == 1
+  checkBeacon();
+#endif
 }
+
+#if ENV_INCLUDE_GPS == 1
+#define BEACON_RECENT_CHATS  8
+#define BEACON_LOCAL_MS      (10UL * 60UL * 1000UL)
+#define BEACON_FLOOD_MS      (30UL * 60UL * 1000UL)
+#define BEACON_FIRST_MS      20000UL
+#define BEACON_NOFIX_MS      15000UL
+#define BEACON_RETRY_MS      20000UL
+
+static void beaconCopy(char* dest, size_t n, const char* src) {
+  if (n == 0) return;
+  if (src == NULL) src = "";
+  strncpy(dest, src, n - 1);
+  dest[n - 1] = 0;
+}
+
+static void formatBeaconAge(char* dest, size_t n, uint32_t secs) {
+  if (secs < 60) snprintf(dest, n, "%us", (unsigned)secs);
+  else if (secs < 3600) snprintf(dest, n, "%um", (unsigned)(secs / 60));
+  else snprintf(dest, n, "%uh", (unsigned)(secs / 3600));
+}
+
+int MyMesh::buildBeaconOptions(BeaconOpt* out, int max_out) {
+  int n = 0;
+  if (n < max_out) {
+    out[n].mode = BEACON_OFF;
+    out[n].chan = 0;
+    memset(out[n].pub, 0, PUB_KEY_SIZE);
+    n++;
+  }
+  if (n < max_out) {
+    out[n].mode = BEACON_ADVERT_LOCAL;
+    out[n].chan = 0;
+    memset(out[n].pub, 0, PUB_KEY_SIZE);
+    n++;
+  }
+  if (n < max_out) {
+    out[n].mode = BEACON_ADVERT_FLOOD;
+    out[n].chan = 0;
+    memset(out[n].pub, 0, PUB_KEY_SIZE);
+    n++;
+  }
+#ifdef MAX_GROUP_CHANNELS
+  for (int i = 0; i < MAX_GROUP_CHANNELS && n < max_out; i++) {
+    ChannelDetails ch;
+    if (!getChannel(i, ch) || ch.name[0] == 0) continue;
+    out[n].mode = BEACON_GROUP;
+    out[n].chan = (uint8_t)i;
+    memset(out[n].pub, 0, PUB_KEY_SIZE);
+    n++;
+  }
+#endif
+  struct ChatPick {
+    uint32_t ts;
+    uint8_t pub[PUB_KEY_SIZE];
+  };
+  ChatPick pick[BEACON_RECENT_CHATS];
+  int npick = 0;
+  int total = getTotalContactSlots();
+  for (int i = 0; i < total; i++) {
+    ContactInfo c;
+    if (!getContactByIdx((uint32_t)i, c)) continue;
+    if (c.type != ADV_TYPE_CHAT || c.name[0] == 0) continue;
+    int at = 0;
+    while (at < npick && pick[at].ts >= c.last_advert_timestamp) at++;
+    if (at >= BEACON_RECENT_CHATS) continue;
+    int last = (npick < BEACON_RECENT_CHATS) ? npick : (BEACON_RECENT_CHATS - 1);
+    for (int j = last; j > at; j--) pick[j] = pick[j - 1];
+    pick[at].ts = c.last_advert_timestamp;
+    memcpy(pick[at].pub, c.id.pub_key, PUB_KEY_SIZE);
+    if (npick < BEACON_RECENT_CHATS) npick++;
+  }
+  for (int i = 0; i < npick && n < max_out; i++) {
+    out[n].mode = BEACON_CHAT;
+    out[n].chan = 0;
+    memcpy(out[n].pub, pick[i].pub, PUB_KEY_SIZE);
+    n++;
+  }
+  return n;
+}
+
+uint32_t MyMesh::beaconIntervalMs() const {
+  if (_prefs.beacon_mode == BEACON_ADVERT_LOCAL) return BEACON_LOCAL_MS;
+  if (_prefs.beacon_mode == BEACON_GROUP) return (uint32_t)_prefs.beacon_group_mins * 60UL * 1000UL;
+  if (_prefs.beacon_mode == BEACON_CHAT) return (uint32_t)_prefs.beacon_chat_mins * 60UL * 1000UL;
+  return BEACON_FLOOD_MS;
+}
+
+bool MyMesh::beaconHasFix() const {
+  LocationProvider* loc = sensors.getLocationProvider();
+  return loc != NULL && loc->isValid();
+}
+
+void MyMesh::formatBeacon(char* mode, size_t mode_sz, char* target, size_t target_sz, char* pos, size_t pos_sz, char* sent, size_t sent_sz) {
+  const char* mode_name = "off";
+  const char* target_name = "hold to start";
+  char target_buf[32];
+  target_buf[0] = 0;
+  switch (_prefs.beacon_mode) {
+    case BEACON_ADVERT_LOCAL:
+      mode_name = "advert";
+      target_name = "neighbors";
+      break;
+    case BEACON_ADVERT_FLOOD:
+      mode_name = "advert";
+      target_name = "flood";
+      break;
+    case BEACON_GROUP: {
+      mode_name = "group";
+      ChannelDetails ch;
+      if (getChannel(_prefs.beacon_chan, ch) && ch.name[0]) {
+        beaconCopy(target_buf, sizeof(target_buf), ch.name);
+        target_name = target_buf;
+      } else {
+        target_name = "no channel";
+      }
+      break;
+    }
+    case BEACON_CHAT: {
+      mode_name = "chat";
+      ContactInfo* c = lookupContactByPubKey(_prefs.beacon_pub, PUB_KEY_SIZE);
+      if (c && c->name[0]) {
+        beaconCopy(target_buf, sizeof(target_buf), c->name);
+        target_name = target_buf;
+      } else {
+        target_name = "no contact";
+      }
+      break;
+    }
+    default:
+      break;
+  }
+  if (_prefs.beacon_mode == BEACON_OFF) {
+    beaconCopy(mode, mode_sz, mode_name);
+  } else {
+    unsigned mins = (unsigned)(beaconIntervalMs() / 60000UL);
+    snprintf(mode, mode_sz, "%s %um", mode_name, mins);
+  }
+  beaconCopy(target, target_sz, target_name);
+
+  if (_beacon_sent_at != 0) {
+    uint32_t now = getRTCClock()->getCurrentTime();
+    uint32_t secs = (now >= _beacon_sent_at) ? (now - _beacon_sent_at) : 0;
+    char age[8];
+    formatBeaconAge(age, sizeof(age), secs);
+    snprintf(sent, sent_sz, "sent %s ago", age);
+  } else if (_prefs.beacon_mode == BEACON_OFF) {
+    beaconCopy(sent, sent_sz, "");
+  } else {
+    beaconCopy(sent, sent_sz, "not sent");
+  }
+
+  if (_prefs.beacon_mode == BEACON_OFF) {
+    beaconCopy(pos, pos_sz, "");
+    return;
+  }
+  if (!beaconHasFix()) {
+    LocationProvider* loc = sensors.getLocationProvider();
+    beaconCopy(pos, pos_sz, (loc == NULL) ? "no gps" : "no fix");
+    return;
+  }
+  snprintf(pos, pos_sz, "%.4f  %.4f", sensors.node_lat, sensors.node_lon);
+}
+
+bool MyMesh::stopBeacon() {
+  if (_prefs.beacon_mode == BEACON_OFF) return false;
+  _prefs.beacon_mode = BEACON_OFF;
+  _beacon_next = 0;
+  savePrefs();
+  return true;
+}
+
+void MyMesh::cycleBeacon() {
+  bool was_off = (_prefs.beacon_mode == BEACON_OFF);
+#ifndef MAX_GROUP_CHANNELS
+  #define BEACON_OPT_MAX (3 + BEACON_RECENT_CHATS)
+#else
+  #define BEACON_OPT_MAX (3 + MAX_GROUP_CHANNELS + BEACON_RECENT_CHATS)
+#endif
+  static BeaconOpt opts[BEACON_OPT_MAX];
+  int n = buildBeaconOptions(opts, BEACON_OPT_MAX);
+  if (n <= 0) return;
+  int cur = -1;
+  for (int i = 0; i < n; i++) {
+    const BeaconOpt& opt = opts[i];
+    if (opt.mode != _prefs.beacon_mode) continue;
+    if (opt.mode == BEACON_GROUP && opt.chan != _prefs.beacon_chan) continue;
+    if (opt.mode == BEACON_CHAT && memcmp(opt.pub, _prefs.beacon_pub, PUB_KEY_SIZE) != 0) continue;
+    cur = i;
+    break;
+  }
+  const BeaconOpt& next = opts[(cur + 1) % n];
+  _prefs.beacon_mode = next.mode;
+  if (next.mode == BEACON_GROUP) _prefs.beacon_chan = next.chan;
+  if (next.mode == BEACON_CHAT) memcpy(_prefs.beacon_pub, next.pub, PUB_KEY_SIZE);
+  if (next.mode != BEACON_OFF) {
+    _prefs.gps_enabled = 1;
+    sensors.setSettingValue("gps", "1");
+    if (was_off) _beacon_next = futureMillis(BEACON_FIRST_MS);
+  }
+  savePrefs();
+}
+
+bool MyMesh::cycleBeaconInterval() {
+  uint8_t* slot = NULL;
+  if (_prefs.beacon_mode == BEACON_GROUP) slot = &_prefs.beacon_group_mins;
+  else if (_prefs.beacon_mode == BEACON_CHAT) slot = &_prefs.beacon_chat_mins;
+  else return false;
+
+  static const uint8_t steps[] = { 5, 10, 15, 30, 60, 120 };
+  const int nsteps = (int)(sizeof(steps) / sizeof(steps[0]));
+  int i = 0;
+  while (i < nsteps && steps[i] != *slot) i++;
+  *slot = steps[(i >= nsteps) ? 0 : ((i + 1) % nsteps)];
+  _beacon_next = futureMillis((uint32_t)(*slot) * 60UL * 1000UL);
+  savePrefs();
+  return true;
+}
+
+void MyMesh::checkBeacon() {
+  if (_prefs.beacon_mode == BEACON_OFF) return;
+  if (_beacon_next == 0) _beacon_next = futureMillis(BEACON_FIRST_MS);
+  if (!millisHasNowPassed(_beacon_next)) return;
+
+  if (!beaconHasFix()) {
+    _beacon_next = futureMillis(BEACON_NOFIX_MS);
+    return;
+  }
+
+  char text[48];
+  snprintf(text, sizeof(text), "gps %.5f %.5f", sensors.node_lat, sensors.node_lon);
+  uint32_t now = getRTCClock()->getCurrentTime();
+  bool sent = false;
+
+  if (_prefs.beacon_mode == BEACON_ADVERT_LOCAL || _prefs.beacon_mode == BEACON_ADVERT_FLOOD) {
+    mesh::Packet* pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
+    if (pkt) {
+      if (_prefs.beacon_mode == BEACON_ADVERT_FLOOD) {
+        TransportKey scope;
+        memcpy(&scope.key, _prefs.default_scope_key, sizeof(scope.key));
+        sendFloodScoped(scope, pkt, 0);
+      } else {
+        sendZeroHop(pkt);
+      }
+      sent = true;
+    }
+  } else if (_prefs.beacon_mode == BEACON_GROUP) {
+    ChannelDetails ch;
+    if (getChannel(_prefs.beacon_chan, ch) && ch.name[0]) {
+      sent = sendGroupMessage(now, ch.channel, _prefs.node_name, text, strlen(text));
+    }
+  } else if (_prefs.beacon_mode == BEACON_CHAT) {
+    if (isTextAckPending()) {
+      _beacon_next = futureMillis(BEACON_RETRY_MS);
+      return;
+    }
+    ContactInfo* c = lookupContactByPubKey(_prefs.beacon_pub, PUB_KEY_SIZE);
+    if (c && c->type == ADV_TYPE_CHAT) {
+      uint32_t ack = 0, est = 0;
+      int rc = sendMessage(*c, now, 0, text, ack, est);
+      sent = (rc == MSG_SEND_SENT_FLOOD || rc == MSG_SEND_SENT_DIRECT);
+    }
+  }
+
+  if (sent) {
+    _beacon_sent_at = now;
+    _beacon_next = futureMillis(beaconIntervalMs());
+  } else {
+    _beacon_next = futureMillis(BEACON_RETRY_MS);
+  }
+}
+#endif
 
 bool MyMesh::advert() {
   mesh::Packet* pkt;

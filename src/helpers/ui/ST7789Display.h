@@ -5,21 +5,28 @@
 #include <SPI.h>
 #include <Adafruit_GFX.h>
 #include "ST7789Spi.h"
+#include "CyrillicFont.h"
 
 class ST7789Display : public DisplayDriver {
   ST7789Spi display;
   bool _isOn;
   uint16_t _color;
+  int _textSize;
   int _x=0, _y=0;
+  int _lx=0, _ly=0;
 
   bool i2c_probe(TwoWire& wire, uint8_t addr);
+  const CyrBitmapFont& activeCyrFace() const;
+  void drawCyrGlyph(int idx, int x, int y);
+  void printSpan(const char* begin, const char* end);
+  int codepointWidth(uint32_t cp);
 public:
 #if defined(HELTEC_VISION_MASTER_T190)
-  ST7789Display() : DisplayDriver(128, 64), display(&SPI, PIN_TFT_RST, PIN_TFT_DC, PIN_TFT_CS, GEOMETRY_RAWMODE, 320, 170,PIN_TFT_SDA,-1,PIN_TFT_SCL) {_isOn = false;}
+  ST7789Display() : DisplayDriver(128, 64), display(&SPI, PIN_TFT_RST, PIN_TFT_DC, PIN_TFT_CS, GEOMETRY_RAWMODE, 320, 170,PIN_TFT_SDA,-1,PIN_TFT_SCL), _textSize(1) {_isOn = false;}
 #elif defined(THINKNODE_M9)
-  ST7789Display() : DisplayDriver(128, 64), display(&SPI, ST7789_RESET, ST7789_RS, ST7789_CS, GEOMETRY_RAWMODE, 320, 240, ST7789_SDA, ST7789_MISO, ST7789_SCK) {_isOn = false;}
+  ST7789Display() : DisplayDriver(128, 64), display(&SPI, ST7789_RESET, ST7789_RS, ST7789_CS, GEOMETRY_RAWMODE, 320, 240, ST7789_SDA, ST7789_MISO, ST7789_SCK), _textSize(1) {_isOn = false;}
 #else
-  ST7789Display() : DisplayDriver(128, 64), display(&SPI1, PIN_TFT_RST, PIN_TFT_DC, PIN_TFT_CS, GEOMETRY_RAWMODE, 240, 135) {_isOn = false;}
+  ST7789Display() : DisplayDriver(128, 64), display(&SPI1, PIN_TFT_RST, PIN_TFT_DC, PIN_TFT_CS, GEOMETRY_RAWMODE, 240, 135), _textSize(1) {_isOn = false;}
 #endif
   bool begin();
 
@@ -33,6 +40,7 @@ public:
   void setCursor(int x, int y) override;
   void print(const char* str) override;
   void printWordWrap(const char* str, int max_width) override;
+  void translateUTF8ToBlocks(char* dest, const char* src, size_t dest_size) override;
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;

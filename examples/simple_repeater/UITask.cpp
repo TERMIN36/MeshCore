@@ -1,7 +1,10 @@
 #include "UITask.h"
 #include "target.h"
+#include "MyMesh.h"
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
+
+extern MyMesh the_mesh;
 
 #ifndef USER_BTN_PRESSED
 #define USER_BTN_PRESSED LOW
@@ -53,6 +56,32 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   free(version);
 }
 
+void UITask::renderBatteryIndicator() {
+#ifndef BATT_MIN_MILLIVOLTS
+#define BATT_MIN_MILLIVOLTS 3000
+#endif
+#ifndef BATT_MAX_MILLIVOLTS
+#define BATT_MAX_MILLIVOLTS 4200
+#endif
+  uint16_t batteryMilliVolts = _board->getBattMilliVolts();
+  int batteryPercentage = ((int)batteryMilliVolts - BATT_MIN_MILLIVOLTS) * 100 /
+                          (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
+  if (batteryPercentage < 0) batteryPercentage = 0;
+  if (batteryPercentage > 100) batteryPercentage = 100;
+
+  int iconWidth = 24;
+  int iconHeight = 10;
+  int iconX = _display->width() - iconWidth - 5;
+  int iconY = 0;
+  _display->setColor(UIColor::primary_txt);
+  _display->drawRect(iconX, iconY, iconWidth, iconHeight);
+  _display->fillRect(iconX + iconWidth, iconY + (iconHeight / 4), 3, iconHeight / 2);
+  int fillWidth = (batteryPercentage * (iconWidth - 4)) / 100;
+  if (fillWidth > 0) {
+    _display->fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
+  }
+}
+
 void UITask::renderCurrScreen() {
   char tmp[80];
   if (millis() < _started_at + BOOT_SCREEN_MILLIS) { // boot screen
@@ -72,7 +101,7 @@ void UITask::renderCurrScreen() {
     _display->drawTextCentered(_display->width() / 2, 35, _version_info);
 
     // node type
-    const char* node_type = "< Repeater >";
+    const char* node_type = "Repeater by Termin36";
     _display->drawTextCentered(_display->width() / 2, 48, node_type);
   } else if (_powering_off_at > 0) {
     // meshcore logo
@@ -96,6 +125,7 @@ void UITask::renderCurrScreen() {
     _display->setTextSize(1);
     _display->setColor(UIColor::primary_txt);
     _display->print(_node_prefs->node_name);
+    renderBatteryIndicator();
 
     // freq / sf
     _display->setCursor(0, 20);
@@ -105,6 +135,15 @@ void UITask::renderCurrScreen() {
     // bw / cr
     _display->setCursor(0, 30);
     sprintf(tmp, "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
+    _display->print(tmp);
+
+    _display->setCursor(0, 40);
+    if (_board->canControlLoRaFemLna()) {
+      sprintf(tmp, "LNA: %s  NF: %d", _board->isLoRaFemLnaEnabled() ? "on" : "off",
+              radio_driver.getNoiseFloor());
+    } else {
+      sprintf(tmp, "LNA: n/a  NF: %d", radio_driver.getNoiseFloor());
+    }
     _display->print(tmp);
   }
 }
@@ -119,6 +158,17 @@ void UITask::loop() {
       _display->turnOn();
     }
     _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
+  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
+    _display->turnOn();
+    _auto_off = millis() + AUTO_OFF_MILLIS;
+    if (_board->canControlLoRaFemLna()) {
+      bool enable = !_board->isLoRaFemLnaEnabled();
+      if (_board->setLoRaFemLnaEnabled(enable)) {
+        _node_prefs->radio_fem_rxgain = enable ? 1 : 0;
+        the_mesh.savePrefs();
+        _next_refresh = 0;
+      }
+    }
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
       _display->turnOn();
       Serial.println("Powering Off");

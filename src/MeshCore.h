@@ -59,6 +59,11 @@ public:
   virtual void onBootComplete() { /* no op */ }
   virtual uint32_t getIRQGpio() { return -1; } // not supported. Returns DIO1 (SX1262) and DIO0 (SX127x)
   virtual void sleep(uint32_t secs)  { /* no op */ }
+  // True when the user can opt into MCU idle sleep. nRF52 already sleeps
+  // whenever the loop is idle, so it does not offer a separate choice.
+  virtual bool canSelectMcuSleep() const { return false; }
+  // Light-sleep until a wakeup source or timeout_ms. 0 means no timer.
+  virtual void idleSleep(uint32_t timeout_ms) { (void)timeout_ms; }
   virtual uint32_t getGpio() { return 0; }
   virtual void setGpio(uint32_t values) {}
   virtual uint8_t getStartupReason() const = 0;
