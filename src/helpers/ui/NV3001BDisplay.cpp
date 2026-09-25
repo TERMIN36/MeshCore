@@ -96,16 +96,16 @@
   #define NV3001B_TEXT_SIZE2_SCALE_Y 3
 #endif
 
-// Color scheme
-ColorVal UIColor::window_bkg = 0xFFFF;
+// Dark theme (RGB565). Shared with the other color TFT drivers.
+ColorVal UIColor::window_bkg = 0x0000;
 ColorVal UIColor::title_bkg = 0x001F;
 ColorVal UIColor::title_txt = 0xFFFF;
-ColorVal UIColor::primary_txt = 0x0000;
-ColorVal UIColor::secondary_txt = (18 << 11) | (36 << 5) | 18;  // mid-gray
+ColorVal UIColor::primary_txt = 0xFFFF;
+ColorVal UIColor::secondary_txt = (22 << 11) | (44 << 5) | 22;
 ColorVal UIColor::warning_txt = 0xFD20;
-ColorVal UIColor::popup_bkg =  0x07FF;  // CYAN
-ColorVal UIColor::popup_txt = 0x0000;
-ColorVal UIColor::corp_blue = 0x001A;
+ColorVal UIColor::popup_bkg = 0x4A69;
+ColorVal UIColor::popup_txt = 0xFFFF;
+ColorVal UIColor::corp_blue = 0x04DF;
 
 static int scaleX(int x) {
   return (int)(x * DISPLAY_SCALE_X);

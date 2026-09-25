@@ -23,6 +23,8 @@ public:
 
   virtual bool isOn() = 0;
   virtual bool isEink() { return false; } // default to non-eink, override in eink drivers
+  // Full panel clear. Drops the ghost of the previous image before a new frame.
+  virtual void clean() {}
   virtual void turnOn() = 0;
   virtual void turnOff() = 0;
   virtual void clear() = 0;
@@ -36,6 +38,11 @@ public:
   virtual void fillRect(int x, int y, int w, int h) = 0;
   virtual void drawRect(int x, int y, int w, int h) = 0;
   virtual void drawXbm(int x, int y, const uint8_t* bits, int w, int h) = 0;
+  // Physical panel size. GxEPD scales the logical UI grid, so a clock that
+  // should fill the glass uses these and blit1() instead of fillRect/drawXbm.
+  virtual int frameWidth() { return _w; }
+  virtual int frameHeight() { return _h; }
+  virtual void blit1(int x, int y, int w, int h, const uint8_t* bits) { drawXbm(x, y, bits, w, h); }
   virtual uint16_t getTextWidth(const char* str) = 0;
   virtual void drawTextCentered(int mid_x, int y, const char* str) {   // helper method (override to optimise)
     int w = getTextWidth(str);

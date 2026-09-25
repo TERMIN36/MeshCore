@@ -115,6 +115,14 @@ void E213Display::turnOff() {
   }
 }
 
+void E213Display::clean() {
+  if (!_init || display == NULL) return;
+  display->fastmodeOff();
+  display->clear();
+  display->fastmodeOn();
+  last_display_crc_value = 0;
+}
+
 void E213Display::clear() {
   display->clear();
 }

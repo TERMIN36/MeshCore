@@ -60,7 +60,7 @@
 
 #define LAZY_CONTACTS_WRITE_DELAY    5000
 
-void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr) {
+void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float snr, const char* name) {
 #if MAX_NEIGHBOURS // check if neighbours enabled
   // find existing neighbour, else use least recently updated
   uint32_t oldest_timestamp = 0xFFFFFFFF;
@@ -80,10 +80,16 @@ void MyMesh::putNeighbour(const mesh::Identity &id, uint32_t timestamp, float sn
   }
 
   // update neighbour info
+  bool same = id.matches(neighbour->id);
   neighbour->id = id;
   neighbour->advert_timestamp = timestamp;
   neighbour->heard_timestamp = getRTCClock()->getCurrentTime();
   neighbour->snr = (int8_t)(snr * 4);
+  if (name && name[0]) {
+    StrHelper::strncpy(neighbour->name, name, sizeof(neighbour->name));
+  } else if (!same) {
+    neighbour->name[0] = 0;
+  }
 #endif
 }
 
@@ -182,6 +188,7 @@ uint8_t MyMesh::handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender
 }
 
 uint8_t MyMesh::handleAnonClockReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data) {
+  if (!_prefs.time_valid) return 0;  // do not hand out an unset clock
   if (anon_limiter.allow(rtc_clock.getCurrentTime())) {
     // request data has: {reply-path-len}{reply-path}
     reply_path_len = *data++;
@@ -622,9 +629,20 @@ void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const m
 
 int MyMesh::searchPeersByHash(const uint8_t *hash) {
   int n = 0;
+  bool clock_already = false;
   for (int i = 0; i < acl.getNumClients(); i++) {
     if (acl.getClientByIdx(i)->id.isHashMatch(hash)) {
       matching_peer_indexes[n++] = i; // store the INDEXES of matching contacts (for subsequent 'peer' methods)
+      if (clockNodeSlotUsed(_clock_pull_peer) &&
+          acl.getClientByIdx(i)->id.matches(_clock_pull_peer)) {
+        clock_already = true;
+      }
+    }
+  }
+  if (!clock_already && n < MAX_CLIENTS && clockNodeSlotUsed(_clock_pull_peer)) {
+    mesh::Identity src(_clock_pull_peer);
+    if (src.isHashMatch(hash)) {
+      matching_peer_indexes[n++] = -1; // configured time source, not an ACL client
     }
   }
   return n;
@@ -632,6 +650,10 @@ int MyMesh::searchPeersByHash(const uint8_t *hash) {
 
 void MyMesh::getPeerSharedSecret(uint8_t *dest_secret, int peer_idx) {
   int i = matching_peer_indexes[peer_idx];
+  if (i < 0) {
+    self_id.calcSharedSecret(dest_secret, _clock_pull_peer);
+    return;
+  }
   if (i >= 0 && i < acl.getNumClients()) {
     // lookup pre-calculated shared_secret
     memcpy(dest_secret, acl.getClientByIdx(i)->shared_secret, PUB_KEY_SIZE);
@@ -651,11 +673,38 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
                           const uint8_t *app_data, size_t app_data_len) {
   mesh::Mesh::onAdvertRecv(packet, id, timestamp, app_data, app_data_len); // chain to super impl
 
+  AdvertDataParser parser(app_data, app_data_len);
+  if (parser.isValid() && parser.hasName()) {
+    int slot = -1;
+    int free_slot = -1;
+    for (int i = 0; i < CLOCK_NODE_MAX; i++) {
+      if (_clock_heard[i].name[0] == 0) {
+        if (free_slot < 0) free_slot = i;
+        continue;
+      }
+      if (memcmp(_clock_heard[i].pub, id.pub_key, PUB_KEY_SIZE) == 0) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot < 0) slot = free_slot;
+    if (slot < 0) {
+      slot = 0;
+      for (int i = 0; i < CLOCK_NODE_MAX; i++) {
+        if (!clockNodeListHas(_prefs.clock_nodes, _clock_heard[i].pub)) {
+          slot = i;
+          break;
+        }
+      }
+    }
+    memcpy(_clock_heard[slot].pub, id.pub_key, PUB_KEY_SIZE);
+    StrHelper::strncpy(_clock_heard[slot].name, parser.getName(), sizeof(_clock_heard[slot].name));
+  }
+
   // if this a zero hop advert (and not via 'Share'), add it to neighbours
   if (packet->getPathHashCount() == 0 && !isShare(packet)) {
-    AdvertDataParser parser(app_data, app_data_len);
     if (parser.isValid() && parser.getType() == ADV_TYPE_REPEATER) { // just keep neigbouring Repeaters
-      putNeighbour(id, timestamp, packet->getSNR());
+      putNeighbour(id, timestamp, packet->getSNR(), parser.getName());
     }
   }
 }
@@ -663,11 +712,20 @@ void MyMesh::onAdvertRecv(mesh::Packet *packet, const mesh::Identity &id, uint32
 void MyMesh::onPeerDataRecv(mesh::Packet *packet, uint8_t type, int sender_idx, const uint8_t *secret,
                             uint8_t *data, size_t len) {
   int i = matching_peer_indexes[sender_idx];
-  if (i < 0 || i >= acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
+  if (i < 0) {
+    if (type == PAYLOAD_TYPE_RESPONSE) onClockResponse(data, len);
+    return;
+  }
+  if (i >= acl.getNumClients()) { // get from our known_clients table (sender SHOULD already be known in this context)
     MESH_DEBUG_PRINTLN("onPeerDataRecv: invalid peer idx: %d", i);
     return;
   }
   ClientInfo* client = acl.getClientByIdx(i);
+
+  if (type == PAYLOAD_TYPE_RESPONSE) {
+    if (clockNodeListHas(_prefs.clock_nodes, client->id.pub_key)) onClockResponse(data, len);
+    return;
+  }
 
   if (type == PAYLOAD_TYPE_REQ) { // request (from a Known admin client!)
     uint32_t timestamp;
@@ -838,7 +896,7 @@ void MyMesh::onControlDataRecv(mesh::Packet* packet) {
     if (id.matches(self_id)) {
       return;
     }
-    putNeighbour(id, rtc_clock.getCurrentTime(), packet->getSNR());
+    putNeighbour(id, rtc_clock.getCurrentTime(), packet->getSNR(), NULL);
   }
 }
 
@@ -878,6 +936,13 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   next_local_advert = next_flood_advert = 0;
   dirty_contacts_expiry = 0;
   set_radio_at = revert_radio_at = 0;
+  _clock_pull_tag = 0;
+  memset(_clock_heard, 0, sizeof(_clock_heard));
+  memset(_clock_pull_peer, 0, sizeof(_clock_pull_peer));
+  _clock_rr = 0;
+  _clock_pull_sent_ms = 0;
+  _clock_pull_deadline = 0;
+  _clock_next_pull = 0;
   _logging = false;
   region_load_active = false;
   recv_pkt_region = NULL;
@@ -992,6 +1057,10 @@ void MyMesh::begin(FILESYSTEM *fs) {
 #if ENV_INCLUDE_GPS == 1
   applyGpsPrefs();
 #endif
+
+  if (clockNodesConfigured(_prefs.clock_nodes)) {
+    _clock_next_pull = futureMillis(CLOCK_PULL_FIRST_MS);
+  }
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis, uint8_t path_hash_size) {
@@ -1284,12 +1353,176 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
   }
 }
 
+void MyMesh::lookupClockNodeName(const uint8_t* pub, char* dest, size_t dest_len) {
+  if (dest_len == 0) return;
+  dest[0] = 0;
+  for (int i = 0; i < CLOCK_NODE_MAX; i++) {
+    if (!_clock_heard[i].name[0]) continue;
+    if (memcmp(_clock_heard[i].pub, pub, PUB_KEY_SIZE) != 0) continue;
+    StrHelper::strncpy(dest, _clock_heard[i].name, dest_len);
+    return;
+  }
+#if MAX_NEIGHBOURS
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (!neighbours[i].heard_timestamp) continue;
+    if (!neighbours[i].id.matches(pub)) continue;
+    if (!neighbours[i].name[0]) continue;
+    StrHelper::strncpy(dest, neighbours[i].name, dest_len);
+    return;
+  }
+#endif
+}
+
+bool MyMesh::resolveClockNode(const uint8_t* prefix, int len, uint8_t dest[32]) {
+  const uint8_t* found = NULL;
+  int matches = 0;
+  for (int i = 0; i < acl.getNumClients(); i++) {
+    const uint8_t* key = acl.getClientByIdx(i)->id.pub_key;
+    if (memcmp(key, prefix, len) != 0) continue;
+    if (!found || memcmp(found, key, PUB_KEY_SIZE) != 0) {
+      found = key;
+      matches++;
+    }
+  }
+#if MAX_NEIGHBOURS
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (!neighbours[i].heard_timestamp) continue;
+    const uint8_t* key = neighbours[i].id.pub_key;
+    if (memcmp(key, prefix, len) != 0) continue;
+    if (!found || memcmp(found, key, PUB_KEY_SIZE) != 0) {
+      found = key;
+      matches++;
+    }
+  }
+#endif
+  if (matches != 1 || found == NULL) return false;
+  memcpy(dest, found, PUB_KEY_SIZE);
+  return true;
+}
+
+bool MyMesh::sendClockPullTo(const uint8_t* pub) {
+  mesh::Identity dest(pub);
+  uint8_t path_len = OUT_PATH_UNKNOWN;
+  uint8_t path[MAX_PATH_SIZE];
+  uint8_t reply_path_len = 0;
+  uint8_t reply_path[MAX_PATH_SIZE];
+
+  ClientInfo* client = acl.getClient(pub, PUB_KEY_SIZE);
+  if (client && client->out_path_len != OUT_PATH_UNKNOWN) {
+    path_len = client->out_path_len;
+    mesh::Packet::writePath(path, client->out_path, path_len);
+    reply_path_len = path_len;
+    reversePath(reply_path, path, path_len);
+  }
+#if MAX_NEIGHBOURS
+  if (path_len == OUT_PATH_UNKNOWN) {
+    for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+      if (neighbours[i].heard_timestamp && dest.matches(neighbours[i].id)) {
+        path_len = 0;
+        reply_path_len = 0;
+        break;
+      }
+    }
+  }
+#endif
+  if (path_len == OUT_PATH_UNKNOWN) return false;
+
+  uint8_t body[2 + MAX_PATH_SIZE];
+  uint8_t blen = buildClockReqBody(body, reply_path_len, reply_path);
+  uint8_t plain[4 + 2 + MAX_PATH_SIZE];
+  uint32_t tag = getRTCClock()->getCurrentTimeUnique();
+  memcpy(plain, &tag, 4);
+  memcpy(&plain[4], body, blen);
+
+  uint8_t secret[PUB_KEY_SIZE];
+  self_id.calcSharedSecret(secret, dest);
+  mesh::Packet* pkt = createAnonDatagram(PAYLOAD_TYPE_ANON_REQ, self_id, dest, secret, plain, 4 + blen);
+  if (pkt == NULL) return false;
+
+  sendDirect(pkt, path, path_len);
+  memcpy(_clock_pull_peer, pub, PUB_KEY_SIZE);
+  _clock_pull_tag = tag;
+  _clock_pull_sent_ms = millis();
+  _clock_pull_deadline = futureMillis(CLOCK_PULL_TIMEOUT_MS);
+  return true;
+}
+
+bool MyMesh::sendClockPull() {
+  if (!clockNodesConfigured(_prefs.clock_nodes)) return false;
+  for (int n = 0; n < CLOCK_NODE_MAX; n++) {
+    int i = (_clock_rr + n) % CLOCK_NODE_MAX;
+    if (!clockNodeSlotUsed(_prefs.clock_nodes[i])) continue;
+    if (sendClockPullTo(_prefs.clock_nodes[i])) {
+      _clock_rr = (i + 1) % CLOCK_NODE_MAX;
+      return true;
+    }
+  }
+  return false;
+}
+
+void MyMesh::onClockResponse(const uint8_t* data, size_t len) {
+  if (_clock_pull_tag == 0 || len < 8) return;
+  uint32_t tag;
+  memcpy(&tag, data, 4);
+  if (tag != _clock_pull_tag) return;
+
+  uint32_t remote;
+  memcpy(&remote, &data[4], 4);
+  uint32_t rtt = millis() - _clock_pull_sent_ms;
+  _clock_pull_tag = 0;
+
+  uint32_t accepted;
+  if (!acceptRemoteClock(getRTCClock()->getCurrentTime(), _prefs.time_valid != 0, remote, rtt, &accepted)) {
+    return;
+  }
+  getRTCClock()->setCurrentTime(accepted);
+  _prefs.time_valid = 1;
+  savePrefs();
+}
+
+void MyMesh::noteGpsClock() {
+#if ENV_INCLUDE_GPS == 1
+  LocationProvider* gps = sensors.getLocationProvider();
+  if (gps != NULL && gps->consumeClockSet() && !_prefs.time_valid) {
+    _prefs.time_valid = 1;
+    savePrefs();
+  }
+#endif
+}
+
+void MyMesh::checkClockPull(bool force) {
+  noteGpsClock();
+  if (!clockNodesConfigured(_prefs.clock_nodes)) return;
+
+  if (_clock_pull_tag != 0) {
+    if (!millisHasNowPassed(_clock_pull_deadline)) return;
+    _clock_pull_tag = 0;
+    _clock_next_pull = futureMillis(CLOCK_PULL_RETRY_MS);
+  }
+  if (!force && _clock_next_pull != 0 && !millisHasNowPassed(_clock_next_pull)) return;
+
+  if (sendClockPull()) {
+    _clock_next_pull = futureMillis(_prefs.time_valid ? CLOCK_PULL_INTERVAL_MS : CLOCK_PULL_RETRY_MS);
+  } else {
+    _clock_next_pull = futureMillis(CLOCK_PULL_RETRY_MS);
+  }
+}
+
+bool MyMesh::pullClock() {
+  if (!clockNodesConfigured(_prefs.clock_nodes)) return false;
+  _clock_pull_tag = 0;
+  if (!sendClockPull()) return false;
+  _clock_next_pull = futureMillis(_prefs.time_valid ? CLOCK_PULL_INTERVAL_MS : CLOCK_PULL_RETRY_MS);
+  return true;
+}
+
 void MyMesh::loop() {
 #ifdef WITH_BRIDGE
   bridge.loop();
 #endif
 
   mesh::Mesh::loop();
+  checkClockPull(false);
 
   if (next_flood_advert && millisHasNowPassed(next_flood_advert)) {
     mesh::Packet *pkt = createSelfAdvert();

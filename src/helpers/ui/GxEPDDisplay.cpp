@@ -56,6 +56,11 @@ bool GxEPDDisplay::begin() {
   return true;
 }
 
+void GxEPDDisplay::clean() {
+  cleanScreen();
+  last_display_crc_value = 0;
+}
+
 // Full white fill (~3.5 s per full refresh on SSD1680 panels). Unlike
 // display(false), which drives the panel through the inverse of the current
 // image, this leaves both controller buffers white, so the next partial update
@@ -350,6 +355,35 @@ void GxEPDDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
       if (bitSet) {
         // Draw the block as a filled rectangle
         display.fillRect(x1, y1, block_w, block_h, _curr_color);
+      }
+    }
+  }
+}
+
+int GxEPDDisplay::frameWidth() { return display.width(); }
+
+int GxEPDDisplay::frameHeight() { return display.height(); }
+
+void GxEPDDisplay::blit1(int x, int y, int w, int h, const uint8_t* bits) {
+  display_crc.update<int>(x);
+  display_crc.update<int>(y);
+  display_crc.update<int>(w);
+  display_crc.update<int>(h);
+  if (w > 0 && h > 0) display_crc.update<uint8_t>(bits, ((w + 7) / 8) * h);
+  uint16_t widthInBytes = (w + 7) / 8;
+  for (int by = 0; by < h; by++) {
+    int run = -1;
+    for (int bx = 0; bx <= w; bx++) {
+      bool on = false;
+      if (bx < w) {
+        uint8_t b = pgm_read_byte(bits + by * widthInBytes + (bx >> 3));
+        on = (b & (uint8_t)(0x80 >> (bx & 7))) != 0;
+      }
+      if (on) {
+        if (run < 0) run = bx;
+      } else if (run >= 0) {
+        display.fillRect(x + run, y + by, bx - run, 1, _curr_color);
+        run = -1;
       }
     }
   }

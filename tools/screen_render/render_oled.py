@@ -118,9 +118,9 @@ def B(s):
 
 # Home pages compiled in for each target (ui-new HomePage enum).
 PAGES = ["FIRST", "RECENT", "NEIGHBORS", "RADIO", "POWER", "SCAN", "FSCAN",
-         "BLUETOOTH", "ADVERT", "GPS", "BEACON", "SHUTDOWN"]
+         "BLUETOOTH", "GPS", "BEACON", "SHUTDOWN"]
 PAGES_NO_GPS = [p for p in PAGES if p not in ("GPS", "BEACON")]
-UPSTREAM_PAGES = ["FIRST", "RECENT", "RADIO", "BLUETOOTH", "ADVERT", "GPS", "SHUTDOWN"]
+UPSTREAM_PAGES = ["FIRST", "RECENT", "RADIO", "BLUETOOTH", "GPS", "SHUTDOWN"]
 
 
 class Driver:
@@ -578,6 +578,18 @@ def name_list(d, rows, y0=20):
         d.setCursor(w - tw - 1, y); d.print(right)
 
 
+def scr_home(d, connected=True, lang="ru", msg=8, unread=3):
+    home_header(d, "FIRST")
+    w = d.width()
+    d.setColor(WHITE)
+    d.setTextSize(2)
+    d.drawTextCentered(w // 2, 22, "MSG: %d/%d" % (msg, unread))
+    d.setTextSize(1)
+    d.drawTextCentered(w // 2, 43, "< Connected >" if connected else "Pin:123456")
+    day = "Чт, 24.09" if lang == "ru" else "Thu, 24.09"
+    d.drawTextCentered(w // 2, d.height() - 11, "21:17  " + day)
+
+
 def scr_splash(d, subtitle="by Termin36", repeater=False):
     w = d.width()
     d.setColor(WHITE)
@@ -864,6 +876,117 @@ def sheet(items, cols, title=None):
     return img
 
 
+def parse_clock_face(text, name):
+    raw = re.search(r"CLOCK_%s_BITS\[\][^{]*\{(.*?)\};" % name, text, re.S).group(1)
+    bits = [int(v, 16) for v in re.findall(r"0x[0-9A-Fa-f]+", raw)]
+    glyphs = []
+    body = re.search(r"CLOCK_%s_GLYPHS\[\][^{]*\{(.*?)\};" % name, text, re.S).group(1)
+    for m in re.finditer(r"\{\s*(?:'([^']*)'|0x([0-9A-Fa-f]+))\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(-?\d+)\s*,\s*(\d+)\s*\}", body):
+        ch = ord(m.group(1)) if m.group(1) is not None else int(m.group(2), 16)
+        glyphs.append({"ch": ch, "w": int(m.group(3)), "h": int(m.group(4)),
+                       "adv": int(m.group(5)), "top": int(m.group(6)), "off": int(m.group(7))})
+    return {"bits": bits, "glyphs": {g["ch"]: g for g in glyphs}}
+
+
+def clock_faces():
+    with open(os.path.join(ROOT, "src", "helpers", "ui", "ClockFont.h"), encoding="utf-8") as f:
+        text = f.read()
+    return {n: parse_clock_face(text, n) for n in ("DIGIT_WIDE", "HEADER", "FOOTER")}
+
+
+def clock_width(face, text):
+    w, i, b = 0, 0, text.encode("utf-8")
+    while i < len(b):
+        cp, i = utf8_next(b, i)
+        g = face["glyphs"].get(cp)
+        if g: w += g["adv"]
+    return w
+
+
+def clock_ink(face, text):
+    top, bot = 127, -127
+    i, b = 0, text.encode("utf-8")
+    while i < len(b):
+        cp, i = utf8_next(b, i)
+        g = face["glyphs"].get(cp)
+        if not g or g["h"] == 0: continue
+        top = min(top, g["top"])
+        bot = max(bot, g["top"] + g["h"])
+    if bot < top: return 0, 1
+    return top, bot
+
+
+def clock_blit(fb, face, x, y, text, Wd, Hd):
+    i, b = 0, text.encode("utf-8")
+    while i < len(b):
+        cp, i = utf8_next(b, i)
+        g = face["glyphs"].get(cp)
+        if not g: continue
+        rowb = (g["w"] + 7) >> 3
+        for row in range(g["h"]):
+            yy = y + g["top"] + row
+            if yy < 0 or yy >= Hd: continue
+            for col in range(g["w"]):
+                xx = x + col
+                if xx < 0 or xx >= Wd: continue
+                bit = face["bits"][g["off"] + row * rowb + (col >> 3)] & (0x80 >> (col & 7))
+                if bit: fb[yy][xx] = 1
+        x += g["adv"]
+
+
+def render_clock(faces, fw, fh, date, line1, line2):
+    fb = [[0] * fw for _ in range(fh)]
+    digits = faces["DIGIT_WIDE"]
+    header_h = 0
+    if date:
+        topd, botd = clock_ink(faces["HEADER"], date)
+        y = max(1, 4 - topd)
+        clock_blit(fb, faces["HEADER"], (fw - clock_width(faces["HEADER"], date)) // 2, y, date, fw, fh)
+        header_h = (botd - topd) + 8
+    shown, stack = "", False
+    if line1 and line2:
+        both = line1 + "    " + line2
+        stack = clock_width(faces["FOOTER"], both) > fw - 8
+        shown = line1 if stack else both
+    elif line1 or line2:
+        shown = line1 or line2
+    footer_h = 0
+    if shown:
+        top0, bot0 = clock_ink(faces["FOOTER"], shown)
+        ink = bot0 - top0
+        top1 = bot1 = 0
+        if stack:
+            top1, bot1 = clock_ink(faces["FOOTER"], line2)
+            ink += 4 + (bot1 - top1)
+        y = fh - 6 - ink
+        if not stack:
+            clock_blit(fb, faces["FOOTER"], (fw - clock_width(faces["FOOTER"], shown)) // 2, y - top0, shown, fw, fh)
+        else:
+            clock_blit(fb, faces["FOOTER"], (fw - clock_width(faces["FOOTER"], line1)) // 2, y - top0, line1, fw, fh)
+            clock_blit(fb, faces["FOOTER"], (fw - clock_width(faces["FOOTER"], line2)) // 2,
+                       y + (bot0 - top0) + 4 - top1, line2, fw, fh)
+        footer_h = ink + 12
+    top, bot = clock_ink(digits, "21:17")
+    ink = bot - top
+    area = fh - footer_h - header_h
+    y = header_h + (area - ink) // 2 - top
+    if y < 2: y = 2
+    clock_blit(fb, digits, (fw - clock_width(digits, "21:17")) // 2, y, "21:17", fw, fh)
+    return fb
+
+
+class Fb:
+    def __init__(self, fb): self.fb = fb
+
+
+HOME_DATE = [
+    ("home_date_0", "ru, подключен", lambda d: scr_home(d, True, "ru")),
+    ("home_date_1", "en, подключен", lambda d: scr_home(d, True, "en")),
+    ("home_date_2", "ru, PIN", lambda d: scr_home(d, False, "ru")),
+    ("home_date_3", "en, PIN", lambda d: scr_home(d, False, "en")),
+]
+
+
 def render_set(out, subdir, screens, make, to_img, cols, title, gallery_name):
     os.makedirs(os.path.join(out, subdir), exist_ok=True)
     gallery = []
@@ -881,6 +1004,36 @@ def main():
                "MeshCore by Termin36 — OLED 128x64", "gallery.png")
     render_set(out, "meshpocket", EINK_SCREENS, Eink, to_image_eink, 3,
                "MeshCore by Termin36 — Heltec MeshPocket, e-ink 2.13\" 250x122", "gallery_meshpocket.png")
+
+    date_items = []
+    for fname, label, fn in HOME_DATE:
+        d = Oled(); fn(d)
+        im = to_image(d)
+        im.save(os.path.join(out, "oled", fname + ".png"))
+        date_items.append((label, im))
+
+    faces = clock_faces()
+    clocks = [
+        ("20_clock", "ru, нет сообщений", "Чт, 24.09", "", ""),
+        ("20_clock_msgs", "ru, группы и чаты", "Чт, 24.09", "Группы: 5", "Чаты: 3"),
+        ("20_clock_en", "en, нет сообщений", "Thu, 24.09", "", ""),
+        ("20_clock_en_msgs", "en, группы и чаты", "Thu, 24.09", "Groups: 5", "Chat: 3"),
+    ]
+    clock_items = []
+    for fname, label, date, a, b in clocks:
+        fb = render_clock(faces, EINK_W, EINK_H, date, a, b)
+        im = to_image_eink(Fb(fb))
+        im.save(os.path.join(out, "meshpocket", fname + ".png"))
+        clock_items.append((label, im))
+
+    # Two rows: OLED date line, then the e-ink clock. Cells differ in size, so
+    # each row is its own sheet pasted onto one page.
+    top = sheet(date_items, 4, "OLED 128×64 — время на главном экране")
+    bot = sheet(clock_items, 4, "Электронные чернила — часы через минуту простоя")
+    page = Image.new("RGB", (max(top.width, bot.width), top.height + bot.height), (32, 34, 40))
+    page.paste(top, (0, 0))
+    page.paste(bot, (0, top.height))
+    page.save(os.path.join(out, "gallery_date.png"))
 
     for fname, label, fn in COMPARE:
         pair = []

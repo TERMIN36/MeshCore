@@ -417,16 +417,16 @@ bool ST7735Display::i2c_probe(TwoWire& wire, uint8_t addr) {
   #define PIN_TFT_LEDA_CTL_ACTIVE  HIGH
 #endif
 
-// Color scheme
-ColorVal UIColor::window_bkg = ST77XX_WHITE;
+// Dark theme (RGB565). Shared with the other color TFT drivers.
+ColorVal UIColor::window_bkg = 0x0000;
 ColorVal UIColor::title_bkg = ST77XX_BLUE;
 ColorVal UIColor::title_txt = ST77XX_WHITE;
-ColorVal UIColor::primary_txt = ST77XX_BLACK;
-ColorVal UIColor::secondary_txt = (18 << 11) | (36 << 5) | 18;  // mid-gray
+ColorVal UIColor::primary_txt = ST77XX_WHITE;
+ColorVal UIColor::secondary_txt = (22 << 11) | (44 << 5) | 22;
 ColorVal UIColor::warning_txt = ST77XX_ORANGE;
-ColorVal UIColor::popup_bkg = ST77XX_CYAN;
-ColorVal UIColor::popup_txt = ST77XX_BLACK;
-ColorVal UIColor::corp_blue = 0x001A;
+ColorVal UIColor::popup_bkg = 0x4A69;
+ColorVal UIColor::popup_txt = ST77XX_WHITE;
+ColorVal UIColor::corp_blue = 0x04DF;
 
 bool ST7735Display::begin() {
   if (!sprite) {
@@ -542,8 +542,7 @@ void ST7735Display::startFrame(ColorVal bkg) {
   sprite->fillScreen(bkg);
   sprite->setTextColor(curr_color = UIColor::primary_txt);
   sprite->setFreeFont();
-  sprite->setTextSize(1);      // This one affects size of Please wait... message
-  scale_x = scale_y = 1;
+  setTextSize(1);      // This one affects size of Please wait... message
   //sprite->cp437(true);         // Use full 256 char 'Code Page 437' font
 }
 
@@ -551,6 +550,11 @@ void ST7735Display::setTextSize(int sz) {
   if (sz < 1) sz = 1;
   scale_x = scale_y = sz;
   sprite->setTextSize(sz);
+#ifdef HELTEC_T096
+  // Size 1 is an 8px cell on a ~14px line. 4/3 uses that gap; 3/2 clips the splash URL.
+  if (sz <= 1) { pix_num = 4; pix_div = 3; }
+  else { pix_num = 1; pix_div = 1; }
+#endif
 }
 
 void ST7735Display::setColor(ColorVal c) {
@@ -562,7 +566,39 @@ void ST7735Display::setCursor(int x, int y) {
   sprite->setCursor(x*SCALE_X, y*SCALE_Y);
 }
 
+#ifdef HELTEC_T096
+static const uint8_t t096_font5x7[] PROGMEM = {
+#include "Glcd5x7.inc"
+};
+
+static void t096Latin(TFT_eSprite* sprite, uint16_t color, int x, int y, uint8_t c, int num, int div) {
+  auto px = [&](int v) { return (int)((long)v * num / div); };
+  if (c < 32 || c > 127) c = '?';
+  int index = (c - 32) * 5;
+  for (int col = 0; col < 5; col++) {
+    uint8_t line = pgm_read_byte(t096_font5x7 + index + col);
+    for (int row = 0; row < 7; row++) {
+      if (line & (1 << row)) {
+        int x0 = x + px(col);
+        int y0 = y + px(row);
+        int fw = px(col + 1) - px(col);
+        int fh = px(row + 1) - px(row);
+        if (fw < 1) fw = 1;
+        if (fh < 1) fh = 1;
+        sprite->fillRect(x0, y0, fw, fh, color);
+      }
+    }
+  }
+}
+#endif
+
 void ST7735Display::cyrAscii(int x, int y, uint8_t c) {
+#ifdef HELTEC_T096
+  if (pix_num != pix_div) {
+    t096Latin(sprite, curr_color, x, y, c, pix_num, pix_div);
+    return;
+  }
+#endif
   sprite->drawChar(x, y, c, curr_color, curr_color, scale_x);
 }
 
@@ -571,6 +607,16 @@ void ST7735Display::cyrFill(int x, int y, int w, int h) {
 }
 
 void ST7735Display::print(const char* str) {
+#ifdef HELTEC_T096
+  if (pix_num != pix_div) {
+    pen_x = sprite->getCursorX();
+    pen_y = sprite->getCursorY();
+    wrap_px = sprite->width();
+    cyrPrint(str);
+    sprite->setCursor(pen_x, pen_y);
+    return;
+  }
+#endif
   if (!hasUtf8(str)) {
     sprite->print(str);
     return;
@@ -610,6 +656,9 @@ void ST7735Display::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
 }
 
 uint16_t ST7735Display::getTextWidth(const char* str) {
+#ifdef HELTEC_T096
+  if (pix_num != pix_div) return cyrWidth(str) / SCALE_X;
+#endif
   if (hasUtf8(str)) return cyrWidth(str) / SCALE_X;
   return sprite->textWidth(str) / SCALE_X;
 }

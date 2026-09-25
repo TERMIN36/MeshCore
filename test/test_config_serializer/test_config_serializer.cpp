@@ -177,6 +177,31 @@ TEST(ConfigSerializer, LoadSerial_MissingCommas) {
     EXPECT_FALSE(success);
 }
 
+class BlobPrefs : public ConfigSerializer {
+protected:
+  void structure() override {
+    def("c0", blob, sizeof(blob));
+    def("after", after);
+  }
+public:
+  uint8_t blob[4] = {};
+  uint8_t after = 0;
+};
+
+// clock.node slots are stored as c0..c15. A digit in the key used to abort
+// the parse, so the pubkey and every field after it were dropped on load.
+TEST(ConfigSerializer, LoadSerial_DigitInKey) {
+    MockInputStream s("{c0:\"AABBCCDD\",after:7}");
+    BlobPrefs data;
+
+    ASSERT_TRUE(data.loadSerial(s));
+    EXPECT_EQ(0xAA, data.blob[0]);
+    EXPECT_EQ(0xBB, data.blob[1]);
+    EXPECT_EQ(0xCC, data.blob[2]);
+    EXPECT_EQ(0xDD, data.blob[3]);
+    EXPECT_EQ(7, data.after);
+}
+
 TEST(ConfigSerializer, LoadSerial_IgnoreUnknowns) {
     MockInputStream s("{age:" TEST_INT_S ",xxx:" TEST_INT_S ",name:\"Scott\"}");
     TestStruct data;

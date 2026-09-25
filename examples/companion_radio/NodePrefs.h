@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint> // For uint8_t, uint32_t
 #include <helpers/ConfigSerializer.h>
+#include <helpers/ClockSource.h>
 
 #define TELEM_MODE_DENY            0
 #define TELEM_MODE_ALLOW_FLAGS     1     // use contact.flags
@@ -14,6 +15,9 @@
 #define BEACON_ADVERT_FLOOD   2
 #define BEACON_GROUP          3
 #define BEACON_CHAT           4
+
+#define UI_LANG_RU            0
+#define UI_LANG_EN            1
 
 class NodePrefs : public ConfigSerializer {  // persisted to file
 public:
@@ -52,6 +56,10 @@ public:
   uint8_t autoadd_max_hops = 0;  // 0 = no limit, 1 = direct (0 hops), N = up to N-1 hops (max 64)
   char default_scope_name[31];
   uint8_t default_scope_key[16];
+  int16_t tz_offset_mins = 0;  // local time = UTC + this many minutes
+  uint8_t ui_lang = UI_LANG_RU;  // weekday line on the e-ink clock
+  uint8_t time_valid = 0;        // 1 once GPS, phone, manual set, or a trusted node has set the clock
+  uint8_t clock_nodes[CLOCK_NODE_MAX][32];  // pubkeys to poll for time; empty slots are zeros
 
 private:
   class RadioPrefs : public ConfigSerializer {  // COPIED from CommonCLI (for now)
@@ -132,6 +140,14 @@ private:
       def("tel_base", _parent->telemetry_mode_base);
       def("tel_loc", _parent->telemetry_mode_loc);
       def("tel_env", _parent->telemetry_mode_env);
+      def("tz", _parent->tz_offset_mins);  // minutes east of UTC
+      def("lang", _parent->ui_lang);       // 0 = ru, 1 = en
+      def("tvalid", _parent->time_valid);
+      for (int i = 0; i < CLOCK_NODE_MAX; i++) {
+        char key[8];
+        clockNodePrefKey(key, sizeof(key), i);
+        def(key, _parent->clock_nodes[i], PUB_KEY_SIZE);
+      }
     }
   public:
     CompanionPrefs(NodePrefs* parent) : _parent(parent) { }
@@ -156,6 +172,7 @@ public:
     default_scope_name[0] = 0;
     memset(default_scope_key, 0, sizeof(default_scope_key));
     memset(beacon_pub, 0, sizeof(beacon_pub));
+    memset(clock_nodes, 0, sizeof(clock_nodes));
   }
   // new accessor methods
   bool isRepeatEn() const { return repeat.disable_fwd == 0; }

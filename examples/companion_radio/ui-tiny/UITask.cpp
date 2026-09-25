@@ -1,5 +1,6 @@
 #include "UITask.h"
 #include <helpers/TxtDataHelpers.h>
+#include <helpers/ui/BatteryLevel.h>
 #include "../MyMesh.h"
 #include "target.h"
 #include "u8g2_icons.h"
@@ -12,6 +13,19 @@
   #define AUTO_OFF_MILLIS     15000   // 15 seconds
 #endif
 #define BOOT_SCREEN_MILLIS   4000   // 4 seconds
+
+#ifndef BATT_MIN_MILLIVOLTS
+  #define BATT_MIN_MILLIVOLTS 3000
+#endif
+#ifndef BATT_MAX_MILLIVOLTS
+  #define BATT_MAX_MILLIVOLTS 4200
+#endif
+
+static uint16_t stableBattMilliVolts(uint16_t raw) {
+  static BatteryLevelFilter filter;
+  filter.push(raw, BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS);
+  return filter.displayMilliVolts(BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS);
+}
 
 #ifdef PIN_STATUS_LED
 #define LED_ON_MILLIS     20
@@ -85,7 +99,6 @@ class HomeScreen : public UIScreen {
     RECENT,
     RADIO,
     BLUETOOTH,
-    ADVERT,
 #if ENV_INCLUDE_GPS == 1
     GPS,
 #endif
@@ -184,11 +197,13 @@ public:
       }
     } else if (_page == HomePage::RECENT) {
       the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
+      int shown = 0;
       display.setColor(UIColor::primary_txt);
       int y = 8;
       for (int i = 0; i < UI_RECENT_LIST_SIZE; i++, y += 11) {
         auto a = &recent[i];
         if (a->name[0] == 0) continue;  // empty slot
+        shown++;
         int secs = _rtc->getCurrentTime() - a->recv_timestamp;
         if (secs < 60) {
           sprintf(tmp, "%ds", secs);
@@ -206,6 +221,14 @@ public:
         display.drawTextEllipsized(0, y, max_name_width, filtered_recent_name);
         display.setCursor(display.width() - timestamp_width - 1, y);
         display.print(tmp);
+      }
+      if (shown == 0) {
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextCentered(display.width() / 2, 16, "no adverts");
+      }
+      if (recent[UI_RECENT_LIST_SIZE - 1].name[0] == 0) {
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextCentered(display.width() / 2, 8 + (UI_RECENT_LIST_SIZE - 1) * 11, "advert: " PRESS_LABEL);
       }
     } else if (_page == HomePage::RADIO) {
       display.setColor(UIColor::primary_txt);
@@ -236,10 +259,6 @@ public:
           32, 32);
       display.setTextSize(1);
       // display.drawTextCentered(display.width() / 2, 40 - 11, "toggle: " PRESS_LABEL);
-    } else if (_page == HomePage::ADVERT) {
-      display.setColor(UIColor::corp_blue);
-      display.drawXbm((display.width() - 32) / 2, 8, advert_icon, 32, 32);
-      // display.drawTextCentered(display.width() / 2, 40 - 11, "advert: " PRESS_LABEL);
 #if ENV_INCLUDE_GPS == 1
     } else if (_page == HomePage::GPS) {
       LocationProvider* nmea = sensors.getLocationProvider();
@@ -390,7 +409,7 @@ public:
       }
       return true;
     }
-    if (c == KEY_ENTER && _page == HomePage::ADVERT) {
+    if (c == KEY_ENTER && _page == HomePage::RECENT) {
       _task->notify(UIEventType::ack);
       if (the_mesh.advert()) {
         _task->showAlert("Advert sent!", 1000);
@@ -425,7 +444,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _display = display;
   _sensors = sensors;
   _auto_off = millis() + AUTO_OFF_MILLIS;
-  _cached_batt_mv = getBattMilliVolts();
+  _cached_batt_mv = stableBattMilliVolts(getBattMilliVolts());
 
 #if defined(PIN_USER_BTN)
   user_btn.begin();
@@ -502,7 +521,8 @@ void UITask::msgRead(int msgcount) {
   }
 }
 
-void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
+void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount, bool group) {
+  (void)group;
   _msgcount = msgcount;
 
   if (_display != NULL) {
@@ -721,8 +741,9 @@ void UITask::loop() {
 
 #ifdef AUTO_SHUTDOWN_MILLIVOLTS
   if (millis() > next_batt_chck) {
-    _cached_batt_mv = getBattMilliVolts();
-    if (_cached_batt_mv > 0 && _cached_batt_mv < AUTO_SHUTDOWN_MILLIVOLTS) {
+    uint16_t milliVolts = getBattMilliVolts();
+    _cached_batt_mv = stableBattMilliVolts(milliVolts);
+    if (milliVolts > 0 && milliVolts < AUTO_SHUTDOWN_MILLIVOLTS) {
       if(!board.isExternalPowered()) {
         if (_display != NULL) {
         _display->startFrame();
@@ -740,7 +761,7 @@ void UITask::loop() {
   }
 #else
   if (_display != NULL && _display->isOn() && millis() >= next_batt_chck) {
-    _cached_batt_mv = getBattMilliVolts();
+    _cached_batt_mv = stableBattMilliVolts(getBattMilliVolts());
     next_batt_chck = millis() + 8000;
   }
 #endif

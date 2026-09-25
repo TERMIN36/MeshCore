@@ -79,9 +79,8 @@ public:
     }
 
     gpio_num_t wakeupPin = (gpio_num_t)getIRQGpio();
-    bool btn_wake = false;
 #if defined(PIN_USER_BTN)
-    btn_wake = PIN_USER_BTN >= 0 && (int)PIN_USER_BTN != (int)wakeupPin;
+    bool btn_wake = PIN_USER_BTN >= 0 && (int)PIN_USER_BTN != (int)wakeupPin;
 #endif
 
     if (timeout_ms > 0) {
@@ -99,17 +98,21 @@ public:
 
     esp_sleep_enable_gpio_wakeup();
     gpio_wakeup_enable(wakeupPin, GPIO_INTR_HIGH_LEVEL);
+#if defined(PIN_USER_BTN)
     if (btn_wake) {
       gpio_wakeup_enable((gpio_num_t)PIN_USER_BTN,
           (USER_BTN_PRESSED) == LOW ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
     }
+#endif
 
     esp_light_sleep_start();
 
     gpio_wakeup_disable(wakeupPin);
+#if defined(PIN_USER_BTN)
     if (btn_wake) {
       gpio_wakeup_disable((gpio_num_t)PIN_USER_BTN);
     }
+#endif
     gpio_set_intr_type(wakeupPin, GPIO_INTR_POSEDGE);
 
     portEXIT_CRITICAL(&sleepMux);

@@ -36,6 +36,7 @@
 #include <helpers/RegionMap.h>
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
+#include <helpers/ClockSource.h>
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -68,6 +69,7 @@ struct NeighbourInfo {
   uint32_t advert_timestamp;
   uint32_t heard_timestamp;
   int8_t snr; // multiplied by 4, user should divide to get float value
+  char name[32];
 };
 
 #ifndef FIRMWARE_BUILD_DATE
@@ -107,6 +109,17 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #endif
   CayenneLPP telemetry;
   unsigned long set_radio_at, revert_radio_at;
+  struct ClockHeardName {
+    uint8_t pub[PUB_KEY_SIZE];
+    char name[32];
+  };
+  ClockHeardName _clock_heard[CLOCK_NODE_MAX];
+  uint32_t _clock_pull_tag;
+  uint8_t _clock_pull_peer[PUB_KEY_SIZE];
+  uint8_t _clock_rr;
+  unsigned long _clock_pull_sent_ms;
+  unsigned long _clock_pull_deadline;
+  unsigned long _clock_next_pull;
   float pending_freq;
   float pending_bw;
   uint8_t pending_sf;
@@ -118,7 +131,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   ESPNowBridge bridge;
 #endif
 
-  void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr);
+  void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr, const char* name);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
   uint8_t handleAnonOwnerReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
@@ -174,6 +187,14 @@ protected:
   void onPeerDataRecv(mesh::Packet* packet, uint8_t type, int sender_idx, const uint8_t* secret, uint8_t* data, size_t len) override;
   bool onPeerPathRecv(mesh::Packet* packet, int sender_idx, const uint8_t* secret, uint8_t* path, uint8_t path_len, uint8_t extra_type, uint8_t* extra, uint8_t extra_len) override;
   void onControlDataRecv(mesh::Packet* packet) override;
+  bool pullClock() override;
+  bool resolveClockNode(const uint8_t* prefix, int len, uint8_t dest[32]) override;
+  void lookupClockNodeName(const uint8_t* pub, char* dest, size_t dest_len) override;
+  bool sendClockPull();
+  bool sendClockPullTo(const uint8_t* pub);
+  void onClockResponse(const uint8_t* data, size_t len);
+  void noteGpsClock();
+  void checkClockPull(bool force);
 
   void sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, uint8_t path_hash_size);
 

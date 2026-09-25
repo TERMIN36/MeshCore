@@ -66,6 +66,7 @@ public:
 
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }
+  void clean() override;
   void turnOn() override;
   void turnOff() override;
   void clear() override;
@@ -79,6 +80,9 @@ public:
   void fillRect(int x, int y, int w, int h) override;
   void drawRect(int x, int y, int w, int h) override;
   void drawXbm(int x, int y, const uint8_t* bits, int w, int h) override;
+  int frameWidth() override;
+  int frameHeight() override;
+  void blit1(int x, int y, int w, int h, const uint8_t* bits) override;
   uint16_t getTextWidth(const char* str) override;
   void endFrame() override;
 };

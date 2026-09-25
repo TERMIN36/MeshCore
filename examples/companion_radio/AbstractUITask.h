@@ -41,7 +41,9 @@ public:
   void enableBluetooth() { _interfaceManager->enableBluetooth(); }
   void disableBluetooth() { _interfaceManager->disableBluetooth(); }
   virtual void msgRead(int msgcount) = 0;
-  virtual void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) = 0;
+  // The phone took a message that was also kept on the device screen.
+  virtual void clearTakenMsg() {}
+  virtual void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount, bool group) = 0;
   virtual void notify(UIEventType t = UIEventType::none) = 0;
   virtual void loop() = 0;
 };

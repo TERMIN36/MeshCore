@@ -6,9 +6,17 @@
 class LocationProvider {
 protected:
     bool _time_sync_needed = true;
+    bool _clock_set = false;
+
+    void noteClockSet() { _clock_set = true; }
 
 public:
     virtual void syncTime() { _time_sync_needed = true; }
+    bool consumeClockSet() {
+      bool v = _clock_set;
+      _clock_set = false;
+      return v;
+    }
     virtual bool waitingTimeSync() { return _time_sync_needed; }
     virtual long getLatitude() = 0;
     virtual long getLongitude() = 0;

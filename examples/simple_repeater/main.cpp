@@ -35,6 +35,16 @@ static unsigned long userBtnDownAt = 0;
 #define USER_BTN_HOLD_OFF_MILLIS 1500
 #endif
 
+#ifndef AUTO_SHUTDOWN_MILLIVOLTS
+#define AUTO_SHUTDOWN_MILLIVOLTS 3000
+#endif
+// Readings at or below this are treated as a missing battery or a bad ADC
+// (for example while powered from mains), not as a drained cell.
+#ifndef AUTO_SHUTDOWN_MIN_MILLIVOLTS
+#define AUTO_SHUTDOWN_MIN_MILLIVOLTS 500
+#endif
+static unsigned long next_batt_shutdown_check = 0;
+
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -184,6 +194,25 @@ void loop() {
     userBtnDownAt = 0;
   }
 #endif
+
+  if ((long)(millis() - next_batt_shutdown_check) >= 0) {
+    uint16_t milliVolts = board.getBattMilliVolts();
+    next_batt_shutdown_check = millis() + 8000;
+    if (milliVolts > AUTO_SHUTDOWN_MIN_MILLIVOLTS && milliVolts < AUTO_SHUTDOWN_MILLIVOLTS && !board.isExternalPowered()) {
+      Serial.println("Low battery. Shutting down.");
+#ifdef DISPLAY_CLASS
+      display.turnOn();
+      display.startFrame();
+      display.setTextSize(1);
+      display.setColor(UIColor::warning_txt);
+      display.drawTextCentered(display.width() / 2, 20, "Low Battery.");
+      display.drawTextCentered(display.width() / 2, 36, "Shutting Down!");
+      display.endFrame();
+      if (!display.isEink()) delay(3000);
+#endif
+      board.powerOff();
+    }
+  }
 
   the_mesh.loop();
   sensors.loop();

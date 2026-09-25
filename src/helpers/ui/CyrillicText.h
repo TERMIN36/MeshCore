@@ -14,7 +14,10 @@ protected:
 public:
   int pen_x = 0, pen_y = 0;
   int scale_x = 1, scale_y = 1;  // physical pixels per font pixel
+  int pix_num = 1, pix_div = 1;  // extra rational scale, 1/1 leaves pixels unchanged
   int wrap_px = 0;               // wrap Latin at this x like GFX print(); 0 = never
+
+  int pix(int v) const { return (int)((long)v * pix_num / pix_div); }
 
   static bool hasUtf8(const char* s) {
     for (; *s; s++) {
@@ -23,13 +26,13 @@ public:
     return false;
   }
 
-  int cyrLineStep() const { return (CYR_OLED.height + 1) * scale_y; }
+  int cyrLineStep() const { return pix((CYR_OLED.height + 1) * scale_y); }
 
   int cyrAdvance(uint32_t cp) const {
     if (cp < 32) return 0;
-    if (cp < 0x80) return 6 * scale_x;
+    if (cp < 0x80) return pix(6 * scale_x);
     int idx = cyrillicGlyphIndex(cp);
-    return (idx >= 0 ? ::cyrAdvance(CYR_OLED, idx) : (CYR_OLED.height * 2) / 3) * scale_x;
+    return pix((idx >= 0 ? ::cyrAdvance(CYR_OLED, idx) : (CYR_OLED.height * 2) / 3) * scale_x);
   }
 
   int cyrWidth(const char* str) const {
@@ -44,7 +47,7 @@ public:
   }
 
   void cyrPrint(const char* begin, const char* end) {
-    int dy = (6 - (int)CYR_OLED.baseline) * scale_y;
+    int dy = pix((6 - (int)CYR_OLED.baseline) * scale_y);
     const char* p = begin;
     while (p < end && *p) {
       uint32_t cp = 0;
@@ -54,12 +57,12 @@ public:
         pen_x = 0;
         pen_y += cyrLineStep();
       } else if (cp >= 32 && cp < 0x80) {
-        if (wrap_px > 0 && pen_x + 6 * scale_x > wrap_px) {
+        if (wrap_px > 0 && pen_x + pix(6 * scale_x) > wrap_px) {
           pen_x = 0;
-          pen_y += 8 * scale_y;
+          pen_y += pix(8 * scale_y);
         }
         cyrAscii(pen_x, pen_y, (uint8_t)cp);
-        pen_x += 6 * scale_x;
+        pen_x += pix(6 * scale_x);
       } else if (cp >= 0x80) {
         int idx = cyrillicGlyphIndex(cp);
         drawGlyph(idx, pen_x, pen_y + dy);
@@ -98,7 +101,7 @@ public:
       p = cut;
       if (*p) {
         int next_y = pen_y + cyrLineStep();
-        if (next_y + 8 * scale_y > bottom_px) break;
+        if (next_y + pix(8 * scale_y) > bottom_px) break;
         pen_x = origin;
         pen_y = next_y;
       }
@@ -119,7 +122,13 @@ private:
         if (on) {
           if (run < 0) run = col;
         } else if (run >= 0) {
-          cyrFill(x + run * scale_x, y + row * scale_y, (col - run) * scale_x, scale_y);
+          int x0 = x + pix(run * scale_x);
+          int y0 = y + pix(row * scale_y);
+          int fw = pix(col * scale_x) - pix(run * scale_x);
+          int fh = pix((row + 1) * scale_y) - pix(row * scale_y);
+          if (fw < 1) fw = 1;
+          if (fh < 1) fh = 1;
+          cyrFill(x0, y0, fw, fh);
           run = -1;
         }
       }

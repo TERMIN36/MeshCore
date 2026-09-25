@@ -66,6 +66,7 @@
 #endif
 
 #include <helpers/BaseChatMesh.h>
+#include <helpers/ClockSource.h>
 #include <helpers/TransportKeyStore.h>
 
 /* -------------------------------------------------------------------------------------- */
@@ -111,6 +112,7 @@ public:
 #endif
   bool sendNeighborDiscover();
   void enterCLIRescue();
+  bool pullClock();
 
   int  getRecentlyHeard(AdvertPath dest[], int max_num);
   int  getNeighbors(NeighborInfo dest[], int max_num);
@@ -161,6 +163,7 @@ protected:
                            uint8_t len, uint8_t *reply) override;
   void onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) override;
   void onControlDataRecv(mesh::Packet *packet) override;
+  void onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const mesh::Identity &sender, uint8_t *data, size_t len) override;
   void onRawDataRecv(mesh::Packet *packet) override;
   void onTraceRecv(mesh::Packet *packet, uint32_t tag, uint32_t auth_code, uint8_t flags,
                    const uint8_t *path_snrs, const uint8_t *path_hashes, uint8_t path_len) override;
@@ -206,8 +209,9 @@ private:
   void writeDisabledFrame();
   void writeContactRespFrame(uint8_t code, const ContactInfo &contact);
   void updateContactFromFrame(ContactInfo &contact, uint32_t& last_mod, const uint8_t *frame, int len);
-  void addToOfflineQueue(const uint8_t frame[], int len);
-  int getFromOfflineQueue(uint8_t frame[]);
+  // bit 0: stored. bit 1: a message that was on the device screen was dropped to make room.
+  int addToOfflineQueue(const uint8_t frame[], int len, bool shown);
+  int getFromOfflineQueue(uint8_t frame[], bool* was_shown);
   int getBlobByKey(const uint8_t key[], int key_len, uint8_t dest_buf[]) override { 
     return _store->getBlobByKey(key, key_len, dest_buf);
   }
@@ -216,6 +220,11 @@ private:
   }
 
   void checkCLIRescueCmd();
+  void runCLICommand(char* command, Print& out);
+  void queueConsoleReply(const char* text);
+  void serviceConsoleAck();
+  void fillConsoleContact(ContactInfo& contact) const;
+  static bool isConsoleKey(const uint8_t* key, int len);
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
 
@@ -237,6 +246,10 @@ private:
   uint32_t _most_recent_lastmod;
   uint32_t _active_ble_pin;
   bool _iter_started;
+  bool _iter_console_pending;
+  bool _console_push_msg;
+  uint32_t _console_ack;
+  unsigned long _console_ack_at;
   bool _cli_rescue;
   bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
   char cli_command[80];
@@ -244,6 +257,21 @@ private:
   uint8_t *sign_data;
   uint32_t sign_data_len;
   unsigned long dirty_contacts_expiry;
+  uint32_t _clock_pull_tag;
+  uint8_t _clock_pull_peer[PUB_KEY_SIZE];
+  uint8_t _clock_rr;
+  unsigned long _clock_pull_sent_ms;
+  unsigned long _clock_pull_deadline;
+  unsigned long _clock_next_pull;
+  unsigned long _clock_reply_after;
+
+  bool resolveClockNode(const uint8_t* prefix, int len, uint8_t dest[32]);
+  void lookupClockNodeName(const uint8_t* pub, char* dest, size_t dest_len);
+  bool sendClockPull();
+  bool sendClockPullTo(const uint8_t* pub);
+  void onClockResponse(const uint8_t* data, size_t len);
+  void noteGpsClock();
+  void checkClockPull(bool force);
 
   TransportKey send_scope;
 
@@ -256,6 +284,7 @@ private:
     uint8_t buf[MAX_FRAME_SIZE];
 
     bool isChannelMsg() const;
+    bool shown;   // this frame was also kept on the device screen
   };
   int offline_queue_len;
   Frame offline_queue[OFFLINE_QUEUE_SIZE];

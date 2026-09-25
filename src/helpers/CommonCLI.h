@@ -6,6 +6,7 @@
 #include <helpers/ClientACL.h>
 #include <helpers/RegionMap.h>
 #include <helpers/ConfigSerializer.h>
+#include <helpers/ClockSource.h>
 
 #if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE)
 #define WITH_BRIDGE
@@ -70,6 +71,8 @@ public:
   uint8_t loop_detect = 0;
   uint8_t cad_enabled = 0;      // hardware Channel Activity Detection before TX (boolean)
   uint8_t extra_sf[4];
+  uint8_t time_valid = 0;       // 1 once GPS, admin, or a trusted node has set the clock
+  uint8_t clock_nodes[CLOCK_NODE_MAX][32];  // pubkeys to poll for time; empty slots are zeros
 
 private:
   class RadioPrefs : public ConfigSerializer {
@@ -176,12 +179,18 @@ protected:
     def("f_adv_int", flood_advert_interval);
     def("lat", node_lat);
     def("lon", node_lon);
+    def("tvalid", time_valid);
     def("radio", radio);
     def("bridge", bridge);
     def("gps", gps);
     def("repeat", repeat);
     def("room", room);
     def("power", power);
+    for (int i = 0; i < CLOCK_NODE_MAX; i++) {
+      char key[8];
+      clockNodePrefKey(key, sizeof(key), i);
+      def(key, clock_nodes[i], PUB_KEY_SIZE);
+    }
   }
 
 public:
@@ -191,6 +200,7 @@ public:
     guest_password[0] = 0;
     bridge_secret[0] = 0;
     owner_info[0] = 0;
+    memset(clock_nodes, 0, sizeof(clock_nodes));
   }
 };
 
@@ -219,6 +229,15 @@ public:
   virtual void saveIdentity(const mesh::LocalIdentity& new_id) = 0;
   virtual void clearStats() = 0;
   virtual void applyTempRadioParams(float freq, float bw, uint8_t sf, uint8_t cr, int timeout_mins) = 0;
+  virtual bool pullClock() { return false; }
+  virtual bool resolveClockNode(const uint8_t* prefix, int len, uint8_t dest[32]) {
+    (void)prefix; (void)len; (void)dest;
+    return false;
+  }
+  virtual void lookupClockNodeName(const uint8_t* pub, char* dest, size_t dest_len) {
+    (void)pub;
+    if (dest_len > 0) dest[0] = 0;
+  }
 
   virtual void startRegionsLoad() {
     // no op by default

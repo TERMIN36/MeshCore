@@ -3,6 +3,7 @@
 #include "MyMesh.h"
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
+#include <helpers/ui/BatteryLevel.h>
 
 extern MyMesh the_mesh;
 
@@ -55,10 +56,9 @@ void UITask::renderBatteryIndicator() {
 #define BATT_MAX_MILLIVOLTS 4200
 #endif
   uint16_t batteryMilliVolts = _board->getBattMilliVolts();
-  int batteryPercentage = ((int)batteryMilliVolts - BATT_MIN_MILLIVOLTS) * 100 /
-                          (BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS);
-  if (batteryPercentage < 0) batteryPercentage = 0;
-  if (batteryPercentage > 100) batteryPercentage = 100;
+  static BatteryLevelFilter batt_filter;
+  int batteryPercentage = batt_filter.push(batteryMilliVolts, BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS)
+                          * 100 / BatteryLevelFilter::LEVELS;
 
   int iconWidth = 24;
   int iconHeight = 10;

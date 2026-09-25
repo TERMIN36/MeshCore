@@ -51,7 +51,9 @@ class UITask : public AbstractUITask {
   UIScreen* splash;
   UIScreen* home;
   UIScreen* msg_preview;
+  UIScreen* clock;
   UIScreen* curr;
+  unsigned long _idle_since;
 
   void userLedHandler();
 
@@ -70,14 +72,19 @@ public:
     next_batt_chck = _next_refresh = 0;
     ui_started_at = 0;
     curr = NULL;
+    clock = NULL;
+    _idle_since = 0;
   }
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
   void gotoHomeScreen() { setCurrScreen(home); }
+  void showMsgPreview() { setCurrScreen(msg_preview); }
+  bool reopenMsgPreview();
   void keepDisplayAwake();
   void requestRefresh() { _next_refresh = 0; }
   void showAlert(const char* text, int duration_millis);
   int  getMsgCount() const { return _msgcount; }
+  int  getDeviceStored() const;
   bool hasDisplay() const { return _display != NULL; }
   bool isButtonPressed() const;
 
@@ -119,7 +126,8 @@ public:
 
   // from AbstractUITask
   void msgRead(int msgcount) override;
-  void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) override;
+  void clearTakenMsg() override;
+  void newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount, bool group) override;
   void notify(UIEventType t = UIEventType::none) override;
   void loop() override;
 

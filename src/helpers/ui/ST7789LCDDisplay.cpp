@@ -23,16 +23,16 @@ bool ST7789LCDDisplay::i2c_probe(TwoWire& wire, uint8_t addr) {
   return true;
 }
 
-// Color scheme
-ColorVal UIColor::window_bkg = ST77XX_WHITE;
+// Dark theme (RGB565). Shared with the other color TFT drivers.
+ColorVal UIColor::window_bkg = 0x0000;
 ColorVal UIColor::title_bkg = ST77XX_BLUE;
 ColorVal UIColor::title_txt = ST77XX_WHITE;
-ColorVal UIColor::primary_txt = ST77XX_BLACK;
-ColorVal UIColor::secondary_txt = (18 << 11) | (36 << 5) | 18;  // mid-gray
+ColorVal UIColor::primary_txt = ST77XX_WHITE;
+ColorVal UIColor::secondary_txt = (22 << 11) | (44 << 5) | 22;
 ColorVal UIColor::warning_txt = ST77XX_ORANGE;
-ColorVal UIColor::popup_bkg = ST77XX_CYAN;
-ColorVal UIColor::popup_txt = ST77XX_BLACK;
-ColorVal UIColor::corp_blue = 0x001A;
+ColorVal UIColor::popup_bkg = 0x4A69;
+ColorVal UIColor::popup_txt = ST77XX_WHITE;
+ColorVal UIColor::corp_blue = 0x04DF;
 
 bool ST7789LCDDisplay::begin() {
   if (!_isOn) {

@@ -69,6 +69,14 @@ void E290Display::turnOff() {
   }
 }
 
+void E290Display::clean() {
+  if (!_init) return;
+  display.fastmodeOff();
+  display.clear();
+  display.fastmodeOn();
+  last_display_crc_value = 0;
+}
+
 void E290Display::clear() {
   display.clear();
 }

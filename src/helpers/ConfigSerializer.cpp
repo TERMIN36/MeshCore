@@ -23,7 +23,8 @@ static bool is_whitespace(char c) {
   return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 static bool is_key_char(char c) {
-  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+         (c >= '0' && c <= '9') || c == '_';
 }
 static bool is_value_char(char c) {
   return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == '-' || c == '.';
@@ -84,8 +85,8 @@ int ConfigSerializer::Context::readNext() {
     case EXPECT_STRING_VAL:
       if (c == '"') { rd_buf[rd_len] = 0; rd_len = 0; rd_mode = EXPECT_COMMA_OR_CLOSE; return TOK_VALUE; }
       if (c == '\\') { rd_mode = EXPECT_STRING_ESCAPE; return TOK_WHITESPACE; }
-      if (rd_len < CONFIG_MAX_TOKEN_LEN-1) { rd_buf[rd_len++] = c; return TOK_WHITESPACE; }
-      return TOK_ERROR;
+      if (rd_len < CONFIG_MAX_TOKEN_LEN-1) rd_buf[rd_len++] = c;
+      return TOK_WHITESPACE;
 
     case EXPECT_COMMA_OR_CLOSE:
       if (c == ',') { rd_mode = EXPECT_KEY; return TOK_WHITESPACE; }

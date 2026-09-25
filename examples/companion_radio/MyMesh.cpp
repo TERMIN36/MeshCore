@@ -3,6 +3,25 @@
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
 
+static const uint8_t CONSOLE_PUB_KEY[PUB_KEY_SIZE] = { 'M','C','-','C','L','I' };
+
+class ConsoleReplyPrint : public Print {
+  char* _buf;
+  size_t _cap;
+  size_t _len;
+public:
+  ConsoleReplyPrint(char* buf, size_t cap) : _buf(buf), _cap(cap), _len(0) {
+    if (cap > 0) _buf[0] = 0;
+  }
+  size_t write(uint8_t c) override {
+    if (_cap > 0 && _len + 1 < _cap) {
+      _buf[_len++] = (char)c;
+      _buf[_len] = 0;
+    }
+    return 1;
+  }
+};
+
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
 #define CMD_SEND_CHANNEL_TXT_MSG      3
@@ -216,34 +235,40 @@ bool MyMesh::Frame::isChannelMsg() const {
          buf[0] == RESP_CODE_CHANNEL_DATA_RECV;
 }
 
-void MyMesh::addToOfflineQueue(const uint8_t frame[], int len) {
+int MyMesh::addToOfflineQueue(const uint8_t frame[], int len, bool shown) {
+  int evicted_shown = 0;
   if (offline_queue_len >= OFFLINE_QUEUE_SIZE) {
     MESH_DEBUG_PRINTLN("WARN: offline_queue is full!");
     int pos = 0;
     while (pos < offline_queue_len) {
       if (offline_queue[pos].isChannelMsg()) {
+        if (offline_queue[pos].shown) evicted_shown = 2;
         for (int i = pos; i < offline_queue_len - 1; i++) { // delete oldest channel msg from queue
           offline_queue[i] = offline_queue[i + 1];
         }
         MESH_DEBUG_PRINTLN("INFO: removed oldest channel message from queue.");
         offline_queue[offline_queue_len - 1].len = len;
+        offline_queue[offline_queue_len - 1].shown = shown;
         memcpy(offline_queue[offline_queue_len - 1].buf, frame, len);
-        return;
+        return 1 | evicted_shown;
       }
       pos++;
     }
     MESH_DEBUG_PRINTLN("INFO: no channel messages to remove from queue.");
-  } else {
-    offline_queue[offline_queue_len].len = len;
-    memcpy(offline_queue[offline_queue_len].buf, frame, len);
-    offline_queue_len++;
+    return 0;
   }
+  offline_queue[offline_queue_len].len = len;
+  offline_queue[offline_queue_len].shown = shown;
+  memcpy(offline_queue[offline_queue_len].buf, frame, len);
+  offline_queue_len++;
+  return 1;
 }
 
-int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
+int MyMesh::getFromOfflineQueue(uint8_t frame[], bool* was_shown) {
   if (offline_queue_len > 0) {         // check offline queue
     size_t len = offline_queue[0].len; // take from top of queue
     memcpy(frame, offline_queue[0].buf, len);
+    if (was_shown) *was_shown = offline_queue[0].shown;
 
     offline_queue_len--;
     for (int i = 0; i < offline_queue_len; i++) { // delete top item from queue
@@ -251,6 +276,7 @@ int MyMesh::getFromOfflineQueue(uint8_t frame[]) {
     }
     return len;
   }
+  if (was_shown) *was_shown = false;
   return 0; // queue is empty
 }
 
@@ -540,7 +566,8 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
   }
   memcpy(&out_frame[i], text, tlen);
   i += tlen;
-  addToOfflineQueue(out_frame, i);
+  bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
+  int queued = addToOfflineQueue(out_frame, i, should_display);
 
   if (_serial->isConnected()) {
     uint8_t frame[1];
@@ -550,9 +577,9 @@ void MyMesh::queueMessage(const ContactInfo &from, uint8_t txt_type, mesh::Packe
 
 #ifdef DISPLAY_CLASS
   // we only want to show text messages on display, not cli data
-  bool should_display = txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_SIGNED_PLAIN;
-  if (should_display && _ui) {
-    _ui->newMsg(path_len, from.name, text, offline_queue_len);
+  if (_ui && (queued & 2)) _ui->clearTakenMsg();
+  if (should_display && (queued & 1) && _ui) {
+    _ui->newMsg(path_len, from.name, text, offline_queue_len, false);
     if (!_serial->isConnected()) {
       _ui->notify(UIEventType::contactMessage);
     }
@@ -651,7 +678,7 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
   }
   memcpy(&out_frame[i], text, tlen);
   i += tlen;
-  addToOfflineQueue(out_frame, i);
+  int queued = addToOfflineQueue(out_frame, i, true);
 
   if (_serial->isConnected()) {
     uint8_t frame[1];
@@ -659,17 +686,20 @@ void MyMesh::onChannelMessageRecv(const mesh::GroupChannel &channel, mesh::Packe
     _serial->writeFrame(frame, 1);
   } else {
 #ifdef DISPLAY_CLASS
-    if (_ui) _ui->notify(UIEventType::channelMessage);
+    if ((queued & 1) && _ui) _ui->notify(UIEventType::channelMessage);
 #endif
   }
 #ifdef DISPLAY_CLASS
-  // Get the channel name from the channel index
-  const char *channel_name = "Unknown";
-  ChannelDetails channel_details;
-  if (getChannel(channel_idx, channel_details)) {
-    channel_name = channel_details.name;
+  if (_ui && (queued & 2)) _ui->clearTakenMsg();
+  if (queued & 1) {
+    // Get the channel name from the channel index
+    const char *channel_name = "Unknown";
+    ChannelDetails channel_details;
+    if (getChannel(channel_idx, channel_details)) {
+      channel_name = channel_details.name;
+    }
+    if (_ui) _ui->newMsg(path_len, channel_name, text, offline_queue_len, true);
   }
-  if (_ui) _ui->newMsg(path_len, channel_name, text, offline_queue_len);
 #endif
 }
 
@@ -699,7 +729,10 @@ void MyMesh::onChannelDataRecv(const mesh::GroupChannel &channel, mesh::Packet *
     memcpy(&out_frame[i], data, copy_len);
     i += copy_len;
   }
-  addToOfflineQueue(out_frame, i);
+  int queued = addToOfflineQueue(out_frame, i, false);
+#ifdef DISPLAY_CLASS
+  if (_ui && (queued & 2)) _ui->clearTakenMsg();
+#endif
 
   if (_serial->isConnected()) {
     uint8_t frame[1];
@@ -760,6 +793,11 @@ uint8_t MyMesh::onContactRequest(const ContactInfo &contact, uint32_t sender_tim
 void MyMesh::onContactResponse(const ContactInfo &contact, const uint8_t *data, uint8_t len) {
   uint32_t tag;
   memcpy(&tag, data, 4);
+
+  if (_clock_pull_tag && tag == _clock_pull_tag && clockNodeListHas(_prefs.clock_nodes, contact.id.pub_key)) {
+    onClockResponse(data, len);
+    return;
+  }
 
   if (pending_login && memcmp(&pending_login, contact.id.pub_key, 4) == 0) { // check for login response
     // yes, is response to pending sendLogin()
@@ -964,6 +1002,10 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
     : BaseChatMesh(radio, *new ArduinoMillis(), rng, rtc, *new StaticPoolPacketManager(16), tables),
       _serial(NULL), telemetry(MAX_PACKET_PAYLOAD - 4), _store(&store), _ui(ui), _iter(0) {
   _iter_started = false;
+  _iter_console_pending = false;
+  _console_push_msg = false;
+  _console_ack = 0;
+  _console_ack_at = 0;
   _cli_rescue = false;
   offline_queue_len = 0;
   app_target_ver = 0;
@@ -971,6 +1013,13 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   next_ack_idx = 0;
   sign_data = NULL;
   dirty_contacts_expiry = 0;
+  _clock_pull_tag = 0;
+  memset(_clock_pull_peer, 0, sizeof(_clock_pull_peer));
+  _clock_rr = 0;
+  _clock_pull_sent_ms = 0;
+  _clock_pull_deadline = 0;
+  _clock_next_pull = 0;
+  _clock_reply_after = 0;
   memset(advert_paths, 0, sizeof(advert_paths));
   memset(neighbors, 0, sizeof(neighbors));
   pending_neighbor_discover_tag = 0;
@@ -1085,6 +1134,8 @@ void MyMesh::begin(bool has_display) {
   resetContacts();
   _store->loadContacts(this);
   bootstrapRTCfromContacts();
+  _clock_pull_tag = 0;
+  _clock_next_pull = clockNodesConfigured(_prefs.clock_nodes) ? futureMillis(CLOCK_PULL_FIRST_MS) : 0;
   addChannel("Public", PUBLIC_GROUP_PSK); // pre-configure Andy's public channel
   _store->loadChannels(this);
 
@@ -1206,6 +1257,50 @@ void MyMesh::handleCmdFrame(size_t len) {
     i += 4;
     uint8_t *pub_key_prefix = &cmd_frame[i];
     i += 6;
+    if (isConsoleKey(pub_key_prefix, 6)) {
+      char *text = (char *)&cmd_frame[i];
+      int tlen = len - i;
+      if (tlen < 0) tlen = 0;
+      text[tlen] = 0;
+      // Same hash the app already expects for a normal text send.
+      int text_len = strlen(text);
+      if (text_len > MAX_TEXT_LEN) text_len = MAX_TEXT_LEN;
+      uint8_t ack_src[5 + MAX_TEXT_LEN];
+      memcpy(ack_src, &msg_timestamp, 4);
+      ack_src[4] = (attempt & 3);
+      memcpy(&ack_src[5], text, text_len);
+      uint32_t expected_ack = 0;
+      mesh::Utils::sha256((uint8_t *)&expected_ack, 4, ack_src, 5 + text_len, self_id.pub_key, PUB_KEY_SIZE);
+      if (expected_ack == 0) expected_ack = 1;
+
+      // Resends repeat the same text with a new timestamp. Running each one
+      // filled the chat with copies.
+      static char last_text[48];
+      static unsigned long last_text_ms = 0;
+      bool replay = last_text_ms != 0 && (unsigned long)(millis() - last_text_ms) < 8000 &&
+                    strcmp(last_text, text) == 0;
+      if (!replay) {
+        strncpy(last_text, text, sizeof(last_text) - 1);
+        last_text[sizeof(last_text) - 1] = 0;
+        last_text_ms = millis();
+        char reply[MAX_FRAME_SIZE];
+        ConsoleReplyPrint printer(reply, sizeof(reply));
+        runCLICommand(text, printer);
+        queueConsoleReply(reply);
+      }
+      uint32_t est_timeout = 8000;
+      out_frame[0] = RESP_CODE_SENT;
+      out_frame[1] = 0;
+      memcpy(&out_frame[2], &expected_ack, 4);
+      memcpy(&out_frame[6], &est_timeout, 4);
+      _serial->writeFrame(out_frame, 10);
+      // Confirm on a later loop. Sending it in this same turn arrives before
+      // the app has stored the ack, so the app retries.
+      _console_ack = expected_ack;
+      _console_ack_at = futureMillis(500);
+      _console_push_msg = !replay;
+      return;
+    }
     ContactInfo *recipient = lookupContactByPubKey(pub_key_prefix, 6);
     if (recipient && (txt_type == TXT_TYPE_PLAIN || txt_type == TXT_TYPE_CLI_DATA)) {
       char *text = (char *)&cmd_frame[i];
@@ -1315,8 +1410,9 @@ void MyMesh::handleCmdFrame(size_t len) {
 
       uint8_t reply[5];
       reply[0] = RESP_CODE_CONTACTS_START;
-      uint32_t count = getNumContacts(); // total, NOT filtered count
+      uint32_t count = getNumContacts() + 1; // + local Console chat
       memcpy(&reply[1], &count, 4);
+      _iter_console_pending = true;
       _serial->writeFrame(reply, 5);
 
       // start iterator
@@ -1358,6 +1454,8 @@ void MyMesh::handleCmdFrame(size_t len) {
     uint32_t curr = getRTCClock()->getCurrentTime();
     if (secs >= curr) {
       getRTCClock()->setCurrentTime(secs);
+      _prefs.time_valid = 1;
+      savePrefs();
       writeOKFrame();
     } else {
       writeErrFrame(ERR_CODE_ILLEGAL_ARG);
@@ -1395,6 +1493,10 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
   } else if (cmd_frame[0] == CMD_ADD_UPDATE_CONTACT && len >= 1 + 32 + 2 + 1) {
     uint8_t *pub_key = &cmd_frame[1];
+    if (isConsoleKey(pub_key, PUB_KEY_SIZE)) {
+      writeOKFrame();
+      return;
+    }
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     uint32_t last_mod = getRTCClock()->getCurrentTime();  // fallback value if not present in cmd_frame
     if (recipient) {
@@ -1416,6 +1518,10 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
   } else if (cmd_frame[0] == CMD_REMOVE_CONTACT) {
     uint8_t *pub_key = &cmd_frame[1];
+    if (isConsoleKey(pub_key, PUB_KEY_SIZE)) {
+      writeErrFrame(ERR_CODE_UNSUPPORTED_CMD);
+      return;
+    }
     ContactInfo *recipient = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     if (recipient && removeContact(*recipient)) {
       _store->deleteBlobByKey(pub_key, PUB_KEY_SIZE);
@@ -1438,6 +1544,12 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
   } else if (cmd_frame[0] == CMD_GET_CONTACT_BY_KEY) {
     uint8_t *pub_key = &cmd_frame[1];
+    if (isConsoleKey(pub_key, PUB_KEY_SIZE)) {
+      ContactInfo console;
+      fillConsoleContact(console);
+      writeContactRespFrame(RESP_CODE_CONTACT, console);
+      return;
+    }
     ContactInfo *contact = lookupContactByPubKey(pub_key, PUB_KEY_SIZE);
     if (contact) {
       writeContactRespFrame(RESP_CODE_CONTACT, *contact);
@@ -1482,9 +1594,11 @@ void MyMesh::handleCmdFrame(size_t len) {
     }
   } else if (cmd_frame[0] == CMD_SYNC_NEXT_MESSAGE) {
     int out_len;
-    if ((out_len = getFromOfflineQueue(out_frame)) > 0) {
+    bool shown = false;
+    if ((out_len = getFromOfflineQueue(out_frame, &shown)) > 0) {
       _serial->writeFrame(out_frame, out_len);
 #ifdef DISPLAY_CLASS
+      if (shown && _ui) _ui->clearTakenMsg();
       if (_ui) _ui->msgRead(offline_queue_len);
 #endif
     } else {
@@ -2158,38 +2272,371 @@ void MyMesh::checkCLIRescueCmd() {
 
   if (len > 0 && cli_command[len - 1] == '\r') {  // received complete line
     cli_command[len - 1] = 0;  // replace newline with C string null terminator
+    runCLICommand(cli_command, Serial);
+    cli_command[0] = 0;  // reset command buffer
+  }
+}
 
-    if (memcmp(cli_command, "set ", 4) == 0) {
-      const char* config = &cli_command[4];
-      if (memcmp(config, "pin ", 4) == 0) {
+bool MyMesh::isConsoleKey(const uint8_t* key, int len) {
+  if (len <= 0 || len > PUB_KEY_SIZE) return false;
+  return memcmp(key, CONSOLE_PUB_KEY, len) == 0;
+}
+
+void MyMesh::fillConsoleContact(ContactInfo& contact) const {
+  memset(&contact, 0, sizeof(contact));
+  memcpy(contact.id.pub_key, CONSOLE_PUB_KEY, PUB_KEY_SIZE);
+  strncpy(contact.name, "Console", sizeof(contact.name) - 1);
+  contact.type = ADV_TYPE_CHAT;
+  contact.out_path_len = 0;
+  contact.last_advert_timestamp = 1;
+  contact.lastmod = 1;
+}
+
+void MyMesh::queueConsoleReply(const char* text) {
+  if (text == NULL || text[0] == 0) text = "(no output)";
+  int i = 0;
+  if (app_target_ver >= 3) {
+    out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV_V3;
+    out_frame[i++] = 0;
+    out_frame[i++] = 0;
+    out_frame[i++] = 0;
+  } else {
+    out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV;
+  }
+  memcpy(&out_frame[i], CONSOLE_PUB_KEY, 6);
+  i += 6;
+  out_frame[i++] = 0xFF; // direct, same as a normal contact reply
+  out_frame[i++] = TXT_TYPE_PLAIN;
+  uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
+  memcpy(&out_frame[i], &timestamp, 4);
+  i += 4;
+  int tlen = strlen(text);
+  if (i + tlen > MAX_FRAME_SIZE) tlen = MAX_FRAME_SIZE - i;
+  memcpy(&out_frame[i], text, tlen);
+  i += tlen;
+  addToOfflineQueue(out_frame, i, false);
+}
+
+void MyMesh::serviceConsoleAck() {
+  if (_console_ack_at == 0 || !millisHasNowPassed(_console_ack_at)) return;
+  _console_ack_at = 0;
+  if (_serial == NULL || !_serial->isConnected()) return;
+
+  out_frame[0] = PUSH_CODE_SEND_CONFIRMED;
+  memcpy(&out_frame[1], &_console_ack, 4);
+  uint32_t trip_time = 0;
+  memcpy(&out_frame[5], &trip_time, 4);
+  _serial->writeFrame(out_frame, 9);
+  if (_console_push_msg) {
+    uint8_t tickle[1] = { PUSH_CODE_MSG_WAITING };
+    _serial->writeFrame(tickle, 1);
+    _console_push_msg = false;
+  }
+}
+
+static void formatTzOffset(int16_t mins, char* buf, size_t n) {
+  if (mins == 0) {
+    snprintf(buf, n, "UTC");
+    return;
+  }
+  char sign = mins < 0 ? '-' : '+';
+  int abs_mins = mins < 0 ? -mins : mins;
+  int hours = abs_mins / 60;
+  int minutes = abs_mins % 60;
+  if (minutes) snprintf(buf, n, "UTC%c%d:%02d", sign, hours, minutes);
+  else snprintf(buf, n, "UTC%c%d", sign, hours);
+}
+
+static bool parseUiLang(const char* s, uint8_t& out) {
+  while (*s == ' ') s++;
+  char buf[8];
+  int n = 0;
+  while (*s && *s != ' ' && *s != '\r' && n < 7) {
+    char c = *s++;
+    if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+    buf[n++] = c;
+  }
+  buf[n] = 0;
+  while (*s == ' ' || *s == '\r') s++;
+  if (*s != 0) return false;
+  if (strcmp(buf, "ru") == 0) { out = UI_LANG_RU; return true; }
+  if (strcmp(buf, "en") == 0) { out = UI_LANG_EN; return true; }
+  return false;
+}
+
+static bool parseTzOffset(const char* s, int16_t& out) {
+  while (*s == ' ') s++;
+  int sign = 1;
+  if (*s == '+') s++;
+  else if (*s == '-') { sign = -1; s++; }
+  if (*s < '0' || *s > '9') return false;
+  int hours = 0;
+  while (*s >= '0' && *s <= '9') {
+    hours = hours * 10 + (*s - '0');
+    if (hours > 14) return false;
+    s++;
+  }
+  int minutes = 0;
+  if (*s == ':') {
+    s++;
+    if (*s < '0' || *s > '9') return false;
+    while (*s >= '0' && *s <= '9') {
+      minutes = minutes * 10 + (*s - '0');
+      s++;
+    }
+    if (minutes > 59) return false;
+  }
+  while (*s == ' ' || *s == '\r') s++;
+  if (*s != 0) return false;
+  int total = sign * (hours * 60 + minutes);
+  if (total < -14 * 60 || total > 14 * 60) return false;
+  out = (int16_t)total;
+  return true;
+}
+
+static bool readFixedNum(const char*& s, int& out, int digits) {
+  int value = 0;
+  for (int i = 0; i < digits; i++) {
+    if (*s < '0' || *s > '9') return false;
+    value = value * 10 + (*s - '0');
+    s++;
+  }
+  out = value;
+  return true;
+}
+
+static bool parseLocalDateTime(const char* s, int& year, int& month, int& day, int& hour, int& minute, int& second) {
+  while (*s == ' ') s++;
+  if (!readFixedNum(s, year, 4) || *s++ != '-') return false;
+  if (!readFixedNum(s, month, 2) || *s++ != '-') return false;
+  if (!readFixedNum(s, day, 2) || *s++ != ' ') return false;
+  if (!readFixedNum(s, hour, 2) || *s++ != ':') return false;
+  if (!readFixedNum(s, minute, 2)) return false;
+  second = 0;
+  if (*s == ':') {
+    s++;
+    if (!readFixedNum(s, second, 2)) return false;
+  }
+  while (*s == ' ' || *s == '\r') s++;
+  if (*s != 0) return false;
+  if (year < 2020 || year > 2099 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59) return false;
+  static const uint8_t mdays[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int dim = mdays[month];
+  if (month == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)) dim = 29;
+  return day >= 1 && day <= dim;
+}
+
+static void formatLocalDateTime(uint32_t utc, int16_t tz_mins, char* buf, size_t n) {
+  int64_t local = (int64_t)utc + (int64_t)tz_mins * 60;
+  if (local < 0) local = 0;
+  DateTime dt((uint32_t)local);
+  char tz[16];
+  formatTzOffset(tz_mins, tz, sizeof(tz));
+  snprintf(buf, n, "%04d-%02d-%02d %02d:%02d:%02d %s",
+           dt.year(), dt.month(), dt.day(), dt.hour(), dt.minute(), dt.second(), tz);
+}
+
+void MyMesh::runCLICommand(char* command, Print& out) {
+    char line[96];
+    if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
+      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
+    } else if (strcmp(command, "ver") == 0) {
+      snprintf(line, sizeof(line), "%s %s\n", FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
+      out.print(line);
+    } else if (memcmp(command, "clock.node", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+      const char* arg = (command[10] == ' ') ? &command[11] : "";
+      while (*arg == ' ') arg++;
+      if (memcmp(arg, "remove", 6) == 0 && (arg[6] == 0 || arg[6] == ' ')) {
+        const char* num = (arg[6] == ' ') ? &arg[7] : "";
+        while (*num == ' ') num++;
+        int index = 0;
+        bool digits = num[0] >= '0' && num[0] <= '9';
+        for (const char* p = num; digits && *p; p++) {
+          if (*p < '0' || *p > '9') digits = false;
+          else index = index * 10 + (*p - '0');
+        }
+        if (!digits) {
+          out.print("  Error: index required\n");
+        } else if (clockNodeRemoveAt(_prefs.clock_nodes, index)) {
+          savePrefs();
+          out.print("  > removed\n");
+        } else {
+          out.print("  Error: no such index\n");
+        }
+      } else if (!clockNodesConfigured(_prefs.clock_nodes)) {
+        out.print("  > clock.node is off\n");
+      } else {
+        int shown = 0;
+        for (int i = 0; i < CLOCK_NODE_MAX; i++) {
+          if (!clockNodeSlotUsed(_prefs.clock_nodes[i])) continue;
+          char name[32];
+          lookupClockNodeName(_prefs.clock_nodes[i], name, sizeof(name));
+          if (!name[0]) strcpy(name, "?");
+          snprintf(line, sizeof(line), "  > %d %s\n", shown, name);
+          out.print(line);
+          shown++;
+        }
+      }
+    } else if (strcmp(command, "clock pull") == 0) {
+      if (!clockNodesConfigured(_prefs.clock_nodes)) {
+        out.print("  Error: clock.node is off\n");
+      } else if (pullClock()) {
+        out.print("  > clock pull sent\n");
+      } else {
+        out.print("  Error: no direct path yet\n");
+      }
+    } else if (strcmp(command, "clock") == 0) {
+      snprintf(line, sizeof(line), "%u\n", (unsigned)getRTCClock()->getCurrentTime());
+      out.print(line);
+    } else if (memcmp(command, "set ", 4) == 0) {
+      const char* config = &command[4];
+      if (memcmp(config, "clock.node", 10) == 0 && (config[10] == 0 || config[10] == ' ')) {
+        const char* arg = (config[10] == ' ') ? &config[11] : "";
+        while (*arg == ' ') arg++;
+        if (memcmp(arg, "remove", 6) == 0 && (arg[6] == 0 || arg[6] == ' ')) {
+          const char* num = (arg[6] == ' ') ? &arg[7] : "";
+          while (*num == ' ') num++;
+          int index = 0;
+          bool digits = num[0] >= '0' && num[0] <= '9';
+          for (const char* p = num; digits && *p; p++) {
+            if (*p < '0' || *p > '9') digits = false;
+            else index = index * 10 + (*p - '0');
+          }
+          if (!digits) {
+            out.print("  Error: index required\n");
+          } else if (clockNodeRemoveAt(_prefs.clock_nodes, index)) {
+            savePrefs();
+            out.print("  > removed\n");
+          } else {
+            out.print("  Error: no such index\n");
+          }
+        } else if (*arg == 0 || strcmp(arg, "off") == 0) {
+          clockNodesClear(_prefs.clock_nodes);
+          savePrefs();
+          out.print("  > clock.node is off\n");
+        } else {
+          uint8_t raw[PUB_KEY_SIZE];
+          uint8_t full[PUB_KEY_SIZE];
+          int hex_len = strlen(arg);
+          int nbytes = hex_len / 2;
+          const uint8_t* key = NULL;
+          if ((hex_len % 2) != 0 || nbytes < 1 || nbytes > PUB_KEY_SIZE || !mesh::Utils::fromHex(raw, nbytes, arg)) {
+            out.print("  Error: bad pubkey\n");
+          } else if (nbytes == PUB_KEY_SIZE) {
+            key = raw;
+          } else if (resolveClockNode(raw, nbytes, full)) {
+            key = full;
+          } else {
+            out.print("  Error: pubkey prefix not unique\n");
+          }
+          if (key) {
+            int rc = clockNodeAdd(_prefs.clock_nodes, key);
+            if (rc < 0) {
+              out.print("  Error: clock.node list full\n");
+            } else {
+              savePrefs();
+              _clock_next_pull = futureMillis(500);
+              out.print(rc == 0 ? "  > already in list\n" : "  > clock.node added\n");
+            }
+          }
+        }
+      } else if (memcmp(config, "pin ", 4) == 0) {
         _prefs.ble_pin = atoi(&config[4]);
         savePrefs();
-        Serial.printf("  > pin is now %06d\n", _prefs.ble_pin);
+        snprintf(line, sizeof(line), "  > pin is now %06d\n", _prefs.ble_pin);
+        out.print(line);
+      } else if (memcmp(config, "tz", 2) == 0 && (config[2] == 0 || config[2] == ' ')) {
+        const char* arg = (config[2] == ' ') ? &config[3] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          char tz[16];
+          formatTzOffset(_prefs.tz_offset_mins, tz, sizeof(tz));
+          snprintf(line, sizeof(line), "  > tz is %s\n", tz);
+          out.print(line);
+        } else {
+          int16_t mins;
+          if (!parseTzOffset(arg, mins)) {
+            out.print("  Error: tz is ±H or ±H:MM, from UTC-14 to UTC+14\n");
+          } else {
+            _prefs.tz_offset_mins = mins;
+            savePrefs();
+            char tz[16];
+            formatTzOffset(mins, tz, sizeof(tz));
+            snprintf(line, sizeof(line), "  > tz is now %s\n", tz);
+            out.print(line);
+          }
+        }
+      } else if (memcmp(config, "lang", 4) == 0 && (config[4] == 0 || config[4] == ' ')) {
+        const char* arg = (config[4] == ' ') ? &config[5] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          snprintf(line, sizeof(line), "  > lang is %s\n", _prefs.ui_lang == UI_LANG_EN ? "en" : "ru");
+          out.print(line);
+        } else {
+          uint8_t lang;
+          if (!parseUiLang(arg, lang)) {
+            out.print("  Error: lang is ru or en\n");
+          } else {
+            _prefs.ui_lang = lang;
+            savePrefs();
+            snprintf(line, sizeof(line), "  > lang is now %s\n", lang == UI_LANG_EN ? "en" : "ru");
+            out.print(line);
+          }
+        }
+      } else if (memcmp(config, "time", 4) == 0 && (config[4] == 0 || config[4] == ' ')) {
+        const char* arg = (config[4] == ' ') ? &config[5] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          formatLocalDateTime(getRTCClock()->getCurrentTime(), _prefs.tz_offset_mins, line, sizeof(line));
+          out.print("  > ");
+          out.print(line);
+          out.print("\n");
+        } else {
+          int year, month, day, hour, minute, second;
+          if (!parseLocalDateTime(arg, year, month, day, hour, minute, second)) {
+            out.print("  Error: time is YYYY-MM-DD HH:MM[:SS]\n");
+          } else {
+            DateTime local(year, month, day, hour, minute, second);
+            int64_t utc = (int64_t)local.unixtime() - (int64_t)_prefs.tz_offset_mins * 60;
+            if (utc < 1000000000LL || utc > 0xFFFFFFFFLL) {
+              out.print("  Error: time out of range\n");
+            } else {
+              getRTCClock()->setCurrentTime((uint32_t)utc);
+              _prefs.time_valid = 1;
+              savePrefs();
+              formatLocalDateTime(getRTCClock()->getCurrentTime(), _prefs.tz_offset_mins, line, sizeof(line));
+              out.print("  > time is now ");
+              out.print(line);
+              out.print("\n");
+            }
+          }
+        }
       } else {
-        Serial.printf("  Error: unknown config: %s\n", config);
+        snprintf(line, sizeof(line), "  Error: unknown config: %s\n", config);
+        out.print(line);
       }
-    } else if (strcmp(cli_command, "rebuild") == 0) {
+    } else if (strcmp(command, "rebuild") == 0) {
       bool success = _store->formatFileSystem();
       if (success) {
         _store->saveMainIdentity(self_id);
         savePrefs();
         saveContacts();
         saveChannels();
-        Serial.println("  > erase and rebuild done");
+        out.print("  > erase and rebuild done\n");
       } else {
-        Serial.println("  Error: erase failed");
+        out.print("  Error: erase failed\n");
       }
-    } else if (strcmp(cli_command, "erase") == 0) {
+    } else if (strcmp(command, "erase") == 0) {
       bool success = _store->formatFileSystem();
       if (success) {
-        Serial.println("  > erase done");
+        out.print("  > erase done\n");
       } else {
-        Serial.println("  Error: erase failed");
+        out.print("  Error: erase failed\n");
       }
-    } else if (memcmp(cli_command, "ls", 2) == 0) {
+    } else if (memcmp(command, "ls", 2) == 0) {
 
       // get path from command e.g: "ls /adafruit"
-      const char *path = &cli_command[3];
+      const char *path = (command[2] == ' ') ? &command[3] : "";
 
       bool is_fs2 = false;
       if (memcmp(path, "UserData/", 9) == 0) {
@@ -2198,7 +2645,8 @@ void MyMesh::checkCLIRescueCmd() {
         path += 7; // skip "ExtraFS"
         is_fs2 = true;
       }
-      Serial.printf("Listing files in %s\n", path);
+      snprintf(line, sizeof(line), "Listing files in %s\n", path);
+      out.print(line);
 
       // log each file and directory
       File root = _store->openRead(path);
@@ -2207,9 +2655,11 @@ void MyMesh::checkCLIRescueCmd() {
           File file = root.openNextFile();
           while (file) {
             if (file.isDirectory()) {
-              Serial.printf("[dir]  UserData%s/%s\n", path, file.name());
+              snprintf(line, sizeof(line), "[dir]  UserData%s/%s\n", path, file.name());
+              out.print(line);
             } else {
-              Serial.printf("[file] UserData%s/%s (%d bytes)\n", path, file.name(), file.size());
+              snprintf(line, sizeof(line), "[file] UserData%s/%s (%d bytes)\n", path, file.name(), file.size());
+              out.print(line);
             }
             // move to next file
             file = root.openNextFile();
@@ -2224,9 +2674,11 @@ void MyMesh::checkCLIRescueCmd() {
           File file = root2.openNextFile();
           while (file) {
             if (file.isDirectory()) {
-              Serial.printf("[dir]  ExtraFS%s/%s\n", path, file.name());
+              snprintf(line, sizeof(line), "[dir]  ExtraFS%s/%s\n", path, file.name());
+              out.print(line);
             } else {
-              Serial.printf("[file] ExtraFS%s/%s (%d bytes)\n", path, file.name(), file.size());
+              snprintf(line, sizeof(line), "[file] ExtraFS%s/%s (%d bytes)\n", path, file.name(), file.size());
+              out.print(line);
             }
             // move to next file
             file = root2.openNextFile();
@@ -2234,10 +2686,10 @@ void MyMesh::checkCLIRescueCmd() {
           root2.close();
         }
       }
-    } else if (memcmp(cli_command, "cat", 3) == 0) {
+    } else if (memcmp(command, "cat", 3) == 0) {
 
       // get path from command e.g: "cat /contacts3"
-      const char *path = &cli_command[4];
+      const char *path = (command[3] == ' ') ? &command[4] : "";
 
       bool is_fs2 = false;
       if (memcmp(path, "UserData/", 9) == 0) {
@@ -2246,8 +2698,7 @@ void MyMesh::checkCLIRescueCmd() {
         path += 7; // skip "ExtraFS"
         is_fs2 = true;
       } else {
-        Serial.println("Invalid path provided, must start with UserData/ or ExtraFS/");
-        cli_command[0] = 0;
+        out.print("Invalid path provided, must start with UserData/ or ExtraFS/\n");
         return;
       }
 
@@ -2264,20 +2715,20 @@ void MyMesh::checkCLIRescueCmd() {
         file.read(buffer, file_size);
 
         // print hex
-        mesh::Utils::printHex(Serial, buffer, file_size);
-        Serial.print("\n");
+        mesh::Utils::printHex(out, buffer, file_size);
+        out.print("\n");
 
         file.close();
 
       }
 
-    } else if (memcmp(cli_command, "rm ", 3) == 0) {
+    } else if (memcmp(command, "rm ", 3) == 0) {
       // get path from command e.g: "rm /adv_blobs"
-      const char *path = &cli_command[3];
+      const char *path = &command[3];
       MESH_DEBUG_PRINTLN("Removing file: %s", path);
       // ensure path is not empty, or root dir
       if(!path || strlen(path) == 0 || strcmp(path, "/") == 0){
-        Serial.println("Invalid path provided");
+        out.print("Invalid path provided\n");
       } else {
       bool is_fs2 = false;
       if (memcmp(path, "UserData/", 9) == 0) {
@@ -2297,21 +2748,18 @@ void MyMesh::checkCLIRescueCmd() {
           removed = _store->removeFile(path);
         }
         if(removed){
-          Serial.println("File removed");
+          out.print("File removed\n");
         } else {
-          Serial.println("Failed to remove file");
+          out.print("Failed to remove file\n");
         }
 
       }
 
-    } else if (strcmp(cli_command, "reboot") == 0) {
+    } else if (strcmp(command, "reboot") == 0) {
       board.reboot();  // doesn't return
     } else {
-      Serial.println("  Error: unknown command");
+      out.print("  Error: unknown command\n");
     }
-
-    cli_command[0] = 0;  // reset command buffer
-  }
 }
 
 void MyMesh::checkSerialInterface() {
@@ -2322,7 +2770,12 @@ void MyMesh::checkSerialInterface() {
              && !_serial->isWriteBusy() // don't spam the Serial Interface too quickly!
   ) {
     ContactInfo contact;
-    if (_iter.hasNext(this, contact)) {
+    if (_iter_console_pending) {
+      ContactInfo console;
+      fillConsoleContact(console);
+      writeContactRespFrame(RESP_CODE_CONTACT, console);
+      _iter_console_pending = false;
+    } else if (_iter.hasNext(this, contact)) {
       if (contact.lastmod > _iter_filter_since) { // apply the 'since' filter
         writeContactRespFrame(RESP_CODE_CONTACT, contact);
         if (contact.lastmod > _most_recent_lastmod) {
@@ -2341,8 +2794,185 @@ void MyMesh::checkSerialInterface() {
   }
 }
 
+void MyMesh::lookupClockNodeName(const uint8_t* pub, char* dest, size_t dest_len) {
+  if (dest_len == 0) return;
+  dest[0] = 0;
+  ContactInfo* c = lookupContactByPubKey(pub, PUB_KEY_SIZE);
+  if (c && c->name[0]) {
+    StrHelper::strncpy(dest, c->name, dest_len);
+    return;
+  }
+  for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
+    if (advert_paths[i].recv_timestamp == 0 || !advert_paths[i].name[0]) continue;
+    if (memcmp(advert_paths[i].pubkey_prefix, pub, sizeof(advert_paths[i].pubkey_prefix)) != 0) continue;
+    StrHelper::strncpy(dest, advert_paths[i].name, dest_len);
+    return;
+  }
+  for (int i = 0; i < NEIGHBOR_TABLE_SIZE; i++) {
+    if (neighbors[i].recv_timestamp == 0 || !neighbors[i].name[0]) continue;
+    if (memcmp(neighbors[i].pubkey, pub, PUB_KEY_SIZE) != 0) continue;
+    StrHelper::strncpy(dest, neighbors[i].name, dest_len);
+    return;
+  }
+}
+
+bool MyMesh::resolveClockNode(const uint8_t* prefix, int len, uint8_t dest[32]) {
+  uint8_t found[PUB_KEY_SIZE];
+  bool have = false;
+  int matches = 0;
+  int slots = getTotalContactSlots();
+  for (int i = 0; i < slots; i++) {
+    ContactInfo c;
+    if (!getContactByIdx(i, c)) continue;
+    if (c.id.pub_key[0] == 0 && c.name[0] == 0) continue;
+    if (memcmp(c.id.pub_key, prefix, len) != 0) continue;
+    if (!have || memcmp(found, c.id.pub_key, PUB_KEY_SIZE) != 0) {
+      memcpy(found, c.id.pub_key, PUB_KEY_SIZE);
+      have = true;
+      matches++;
+    }
+  }
+  if (matches != 1) return false;
+  memcpy(dest, found, PUB_KEY_SIZE);
+  return true;
+}
+
+bool MyMesh::sendClockPullTo(const uint8_t* pub) {
+  ContactInfo* c = lookupContactByPubKey(pub, PUB_KEY_SIZE);
+  if (c == NULL) return false;
+
+  uint8_t saved_len = c->out_path_len;
+  uint8_t use_len = saved_len;
+  if (use_len == OUT_PATH_UNKNOWN) {
+    bool zero_hop = false;
+    for (int i = 0; i < ADVERT_PATH_TABLE_SIZE; i++) {
+      if (advert_paths[i].recv_timestamp == 0) continue;
+      if (advert_paths[i].path_len != 0) continue;
+      if (memcmp(advert_paths[i].pubkey_prefix, pub, sizeof(advert_paths[i].pubkey_prefix)) == 0) {
+        zero_hop = true;
+        break;
+      }
+    }
+    if (!zero_hop) return false;
+    use_len = 0;
+    c->out_path_len = 0;
+  }
+
+  uint8_t reply_path[MAX_PATH_SIZE];
+  uint8_t reply_len = use_len;
+  if (use_len == 0) {
+    reply_len = 0;
+  } else {
+    reversePath(reply_path, c->out_path, use_len);
+  }
+
+  uint8_t body[2 + MAX_PATH_SIZE];
+  uint8_t blen = buildClockReqBody(body, reply_len, reply_path);
+  uint32_t tag = 0, est = 0;
+  int rc = sendAnonReq(*c, body, blen, tag, est);
+  if (saved_len == OUT_PATH_UNKNOWN) c->out_path_len = saved_len;
+  if (rc != MSG_SEND_SENT_DIRECT) return false;
+
+  memcpy(_clock_pull_peer, pub, PUB_KEY_SIZE);
+  _clock_pull_tag = tag;
+  _clock_pull_sent_ms = millis();
+  _clock_pull_deadline = futureMillis(CLOCK_PULL_TIMEOUT_MS);
+  return true;
+}
+
+bool MyMesh::sendClockPull() {
+  if (!clockNodesConfigured(_prefs.clock_nodes)) return false;
+  for (int n = 0; n < CLOCK_NODE_MAX; n++) {
+    int i = (_clock_rr + n) % CLOCK_NODE_MAX;
+    if (!clockNodeSlotUsed(_prefs.clock_nodes[i])) continue;
+    if (sendClockPullTo(_prefs.clock_nodes[i])) {
+      _clock_rr = (i + 1) % CLOCK_NODE_MAX;
+      return true;
+    }
+  }
+  return false;
+}
+
+void MyMesh::onClockResponse(const uint8_t* data, size_t len) {
+  if (_clock_pull_tag == 0 || len < 8) return;
+  uint32_t remote;
+  memcpy(&remote, &data[4], 4);
+  uint32_t rtt = millis() - _clock_pull_sent_ms;
+  _clock_pull_tag = 0;
+
+  uint32_t accepted;
+  if (!acceptRemoteClock(getRTCClock()->getCurrentTime(), _prefs.time_valid != 0, remote, rtt, &accepted)) {
+    return;
+  }
+  getRTCClock()->setCurrentTime(accepted);
+  _prefs.time_valid = 1;
+  savePrefs();
+}
+
+void MyMesh::noteGpsClock() {
+#if ENV_INCLUDE_GPS == 1
+  LocationProvider* gps = sensors.getLocationProvider();
+  if (gps != NULL && gps->consumeClockSet() && !_prefs.time_valid) {
+    _prefs.time_valid = 1;
+    savePrefs();
+  }
+#endif
+}
+
+void MyMesh::checkClockPull(bool force) {
+  noteGpsClock();
+  if (!clockNodesConfigured(_prefs.clock_nodes)) return;
+
+  if (_clock_pull_tag != 0) {
+    if (!millisHasNowPassed(_clock_pull_deadline)) return;
+    _clock_pull_tag = 0;
+    _clock_next_pull = futureMillis(CLOCK_PULL_RETRY_MS);
+  }
+  if (!force && _clock_next_pull != 0 && !millisHasNowPassed(_clock_next_pull)) return;
+
+  if (sendClockPull()) {
+    _clock_next_pull = futureMillis(_prefs.time_valid ? CLOCK_PULL_INTERVAL_MS : CLOCK_PULL_RETRY_MS);
+  } else {
+    _clock_next_pull = futureMillis(CLOCK_PULL_RETRY_MS);
+  }
+}
+
+void MyMesh::onAnonDataRecv(mesh::Packet *packet, const uint8_t *secret, const mesh::Identity &sender,
+                            uint8_t *data, size_t len) {
+  if (!_prefs.time_valid || !packet->isRouteDirect() || len < 6) return;
+  if ((long)(millis() - _clock_reply_after) < 0) return;
+  uint32_t sender_timestamp;
+  memcpy(&sender_timestamp, data, 4);
+  if (data[4] != 0x03) return;
+
+  uint8_t reply_path_len = data[5];
+  if (!mesh::Packet::isValidPathLen(reply_path_len)) return;
+  uint8_t hash_count = reply_path_len & 63;
+  uint8_t hash_size = (reply_path_len >> 6) + 1;
+  if (len < (size_t)(6 + hash_count * hash_size)) return;
+
+  uint8_t reply[8];
+  memcpy(reply, &sender_timestamp, 4);
+  uint32_t now = getRTCClock()->getCurrentTime();
+  memcpy(&reply[4], &now, 4);
+  mesh::Packet* pkt = createDatagram(PAYLOAD_TYPE_RESPONSE, sender, secret, reply, sizeof(reply));
+  if (pkt) {
+    sendDirect(pkt, &data[6], reply_path_len, 300);
+    _clock_reply_after = futureMillis(5000);
+  }
+}
+
+bool MyMesh::pullClock() {
+  if (!clockNodesConfigured(_prefs.clock_nodes)) return false;
+  _clock_pull_tag = 0;
+  if (!sendClockPull()) return false;
+  _clock_next_pull = futureMillis(_prefs.time_valid ? CLOCK_PULL_INTERVAL_MS : CLOCK_PULL_RETRY_MS);
+  return true;
+}
+
 void MyMesh::loop() {
   BaseChatMesh::loop();
+  serviceConsoleAck();
 
   if (_cli_rescue) {
     checkCLIRescueCmd();
@@ -2363,6 +2993,7 @@ void MyMesh::loop() {
 #if ENV_INCLUDE_GPS == 1
   checkBeacon();
 #endif
+  checkClockPull(false);
 }
 
 #if ENV_INCLUDE_GPS == 1
@@ -2594,7 +3225,7 @@ void MyMesh::checkBeacon() {
   }
 
   char text[48];
-  snprintf(text, sizeof(text), "gps %.5f %.5f", sensors.node_lat, sensors.node_lon);
+  snprintf(text, sizeof(text), "geo:%.5f,%.5f", sensors.node_lat, sensors.node_lon);
   uint32_t now = getRTCClock()->getCurrentTime();
   bool sent = false;
 

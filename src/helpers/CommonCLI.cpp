@@ -4,6 +4,7 @@
 #include "AdvertDataHelpers.h"
 #include "TxtDataHelpers.h"
 #include <RTClib.h>
+#include <helpers/ClockSource.h>
 
 #ifndef BRIDGE_MAX_BAUD
 #define BRIDGE_MAX_BAUD 115200
@@ -187,6 +188,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else if (memcmp(command, "clkreboot", 9) == 0) {
       // Reset clock
       getRTCClock()->setCurrentTime(1715770351);  // 15 May 2024, 8:50pm
+      _prefs->time_valid = 0;
+      savePrefs();
       _board->reboot();  // doesn't return
      } else if (memcmp(command, "advert.zerohop", 14) == 0 && (command[14] == 0 || command[14] == ' ')) {
       // send zerohop advert
@@ -200,6 +203,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (sender_timestamp > curr) {
         getRTCClock()->setCurrentTime(sender_timestamp + 1);
+        _prefs->time_valid = 1;
+        savePrefs();
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
         sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
@@ -210,6 +215,57 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       if (!_board->startOTAUpdate(_prefs->node_name, reply)) {
         strcpy(reply, "Error");
       }
+    } else if (memcmp(command, "clock.node", 10) == 0 && (command[10] == 0 || command[10] == ' ')) {
+      const char* arg = (command[10] == ' ') ? &command[11] : "";
+      while (*arg == ' ') arg++;
+      if (memcmp(arg, "remove", 6) == 0 && (arg[6] == 0 || arg[6] == ' ')) {
+        const char* num = (arg[6] == ' ') ? &arg[7] : "";
+        while (*num == ' ') num++;
+        int index = 0;
+        bool digits = num[0] >= '0' && num[0] <= '9';
+        for (const char* p = num; digits && *p; p++) {
+          if (*p < '0' || *p > '9') digits = false;
+          else index = index * 10 + (*p - '0');
+        }
+        if (!digits) {
+          strcpy(reply, "ERR: index required");
+        } else if (clockNodeRemoveAt(_prefs->clock_nodes, index)) {
+          savePrefs();
+          strcpy(reply, "OK - removed");
+        } else {
+          strcpy(reply, "ERR: no such index");
+        }
+      } else if (!clockNodesConfigured(_prefs->clock_nodes)) {
+        strcpy(reply, "> off");
+      } else {
+        char* dp = reply;
+        int shown = 0;
+        int hidden = 0;
+        for (int i = 0; i < CLOCK_NODE_MAX; i++) {
+          if (!clockNodeSlotUsed(_prefs->clock_nodes[i])) continue;
+          char name[32];
+          _callbacks->lookupClockNodeName(_prefs->clock_nodes[i], name, sizeof(name));
+          if (!name[0]) strcpy(name, "?");
+          char line[40];
+          snprintf(line, sizeof(line), "%s%d %.16s", (dp == reply) ? "> " : "\n> ", shown, name);
+          if ((dp - reply) + (int)strlen(line) + 8 >= 140) {
+            hidden++;
+            shown++;
+            continue;
+          }
+          dp += sprintf(dp, "%s", line);
+          shown++;
+        }
+        if (hidden > 0) sprintf(dp, "\n> +%d", hidden);
+      }
+    } else if (strcmp(command, "clock pull") == 0) {
+      if (!clockNodesConfigured(_prefs->clock_nodes)) {
+        strcpy(reply, "ERR: clock.node is off");
+      } else if (_callbacks->pullClock()) {
+        strcpy(reply, "OK");
+      } else {
+        strcpy(reply, "ERR: no direct path yet");
+      }
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
@@ -219,6 +275,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       uint32_t curr = getRTCClock()->getCurrentTime();
       if (secs > curr) {
         getRTCClock()->setCurrentTime(secs);
+        _prefs->time_valid = 1;
+        savePrefs();
         uint32_t now = getRTCClock()->getCurrentTime();
         DateTime dt = DateTime(now);
         sprintf(reply, "OK - clock set: %02d:%02d - %d/%d/%d UTC", dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
@@ -447,7 +505,56 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
   const char* config = &command[4];
-  if (memcmp(config, "dutycycle ", 10) == 0) {
+  if (memcmp(config, "clock.node", 10) == 0 && (config[10] == 0 || config[10] == ' ')) {
+    const char* arg = (config[10] == ' ') ? &config[11] : "";
+    while (*arg == ' ') arg++;
+    if (memcmp(arg, "remove", 6) == 0 && (arg[6] == 0 || arg[6] == ' ')) {
+      const char* num = (arg[6] == ' ') ? &arg[7] : "";
+      while (*num == ' ') num++;
+      int index = 0;
+      bool digits = num[0] >= '0' && num[0] <= '9';
+      for (const char* p = num; digits && *p; p++) {
+        if (*p < '0' || *p > '9') digits = false;
+        else index = index * 10 + (*p - '0');
+      }
+      if (!digits) {
+        strcpy(reply, "ERR: index required");
+      } else if (clockNodeRemoveAt(_prefs->clock_nodes, index)) {
+        savePrefs();
+        strcpy(reply, "OK - removed");
+      } else {
+        strcpy(reply, "ERR: no such index");
+      }
+    } else if (*arg == 0 || strcmp(arg, "off") == 0) {
+      clockNodesClear(_prefs->clock_nodes);
+      savePrefs();
+      strcpy(reply, "OK - clock.node off");
+    } else {
+      uint8_t raw[PUB_KEY_SIZE];
+      uint8_t full[PUB_KEY_SIZE];
+      int hex_len = strlen(arg);
+      int nbytes = hex_len / 2;
+      const uint8_t* key = NULL;
+      if ((hex_len % 2) != 0 || nbytes < 1 || nbytes > PUB_KEY_SIZE || !mesh::Utils::fromHex(raw, nbytes, arg)) {
+        strcpy(reply, "ERR: bad pubkey");
+      } else if (nbytes == PUB_KEY_SIZE) {
+        key = raw;
+      } else if (_callbacks->resolveClockNode(raw, nbytes, full)) {
+        key = full;
+      } else {
+        strcpy(reply, "ERR: pubkey prefix not unique");
+      }
+      if (key) {
+        int rc = clockNodeAdd(_prefs->clock_nodes, key);
+        if (rc < 0) {
+          strcpy(reply, "ERR: clock.node list full");
+        } else {
+          savePrefs();
+          strcpy(reply, rc == 0 ? "OK - already in list" : "OK");
+        }
+      }
+    }
+  } else if (memcmp(config, "dutycycle ", 10) == 0) {
     float dc = atof(&config[10]);
     if (dc < 1 || dc > 100) {
       strcpy(reply, "ERROR: dutycycle must be 1-100");

@@ -1,4 +1,6 @@
 #include "UITask.h"
+#include <helpers/ui/BatteryLevel.h>
+#include <helpers/ui/ClockFont.h>
 #include <math.h>
 #include <helpers/TxtDataHelpers.h>
 #include "../MyMesh.h"
@@ -131,6 +133,52 @@ public:
   }
 };
 
+static void clockYmdFromUnix(uint32_t unix_s, int& year, int& month, int& day, int& wday) {
+  uint32_t days = unix_s / 86400UL;
+  wday = (int)((days + 4) % 7);  // 1970-01-01 was Thursday; 0 = Sunday
+  year = 1970;
+  for (;;) {
+    bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    uint32_t diy = leap ? 366 : 365;
+    if (days < diy) break;
+    days -= diy;
+    year++;
+  }
+  static const uint8_t mdays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  bool leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+  month = 1;
+  for (int i = 0; i < 12; i++) {
+    int dim = mdays[i];
+    if (i == 1 && leap) dim = 29;
+    if (days < (uint32_t)dim) {
+      day = (int)days + 1;
+      return;
+    }
+    days -= dim;
+    month++;
+  }
+  day = 1;
+}
+
+static void formatClockHm(uint32_t t, int16_t tz_mins, char* buf, size_t n) {
+  int64_t local = (int64_t)t + (int64_t)tz_mins * 60;
+  if (local < 0) local = 0;
+  uint32_t mins = ((uint32_t)local / 60UL) % (24UL * 60UL);
+  snprintf(buf, n, "%02u:%02u", (unsigned)(mins / 60UL), (unsigned)(mins % 60UL));
+}
+
+static void formatClockDate(uint32_t t, int16_t tz_mins, uint8_t lang, char* buf, size_t n) {
+  int64_t local = (int64_t)t + (int64_t)tz_mins * 60;
+  if (local < 0) local = 0;
+  int year, month, day, wday;
+  clockYmdFromUnix((uint32_t)local, year, month, day, wday);
+  static const char* en[] = {"Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"};
+  static const char* ru[] = {"Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"};
+  const char* name = (lang == UI_LANG_EN) ? en[wday] : ru[wday];
+  snprintf(buf, n, "%s, %02d.%02d", name, day, month);
+  (void)year;
+}
+
 class HomeScreen : public UIScreen {
   enum HomePage {
     FIRST,
@@ -141,7 +189,6 @@ class HomeScreen : public UIScreen {
     SCAN,
     FSCAN,
     BLUETOOTH,
-    ADVERT,
 #if ENV_INCLUDE_GPS == 1
     GPS,
     BEACON,
@@ -295,9 +342,9 @@ class HomeScreen : public UIScreen {
 #endif
     const int minMilliVolts = BATT_MIN_MILLIVOLTS;
     const int maxMilliVolts = BATT_MAX_MILLIVOLTS;
-    int batteryPercentage = ((batteryMilliVolts - minMilliVolts) * 100) / (maxMilliVolts - minMilliVolts);
-    if (batteryPercentage < 0) batteryPercentage = 0; // Clamp to 0%
-    if (batteryPercentage > 100) batteryPercentage = 100; // Clamp to 100%
+    static BatteryLevelFilter batt_filter;
+    int batteryPercentage = batt_filter.push(batteryMilliVolts, minMilliVolts, maxMilliVolts)
+                            * 100 / BatteryLevelFilter::LEVELS;
 
     // battery icon
     int iconWidth = 24;
@@ -379,6 +426,15 @@ public:
        _shutdown_init(false), scan_peak(-127), fscan_state(FSCAN_IDLE), fscan_n(0),
        sensors_lpp(200) {  }
 
+  bool allowsClock() const {
+    if (_page == HomePage::SCAN || _page == HomePage::FSCAN) return false;
+    if (_page == HomePage::NEIGHBORS) return false;
+#if ENV_INCLUDE_GPS == 1
+    if (_page == HomePage::BEACON) return false;
+#endif
+    return true;
+  }
+
   void poll() override {
     if (_page == HomePage::SCAN || _page == HomePage::FSCAN) {
       _task->keepDisplayAwake();
@@ -441,15 +497,19 @@ public:
 
     if (_page == HomePage::FIRST) {
       display.setColor(UIColor::primary_txt);
+      // MSG: still waiting for the phone / still kept on this device
       display.setTextSize(2);
-      sprintf(tmp, "MSG: %d", _task->getMsgCount());
+      sprintf(tmp, "MSG: %d/%d", _task->getMsgCount(), _task->getDeviceStored());
       display.drawTextCentered(display.width() / 2, 22, tmp);
 
+      bool show_date = !display.isEink() && _rtc->getCurrentTime() >= 1000000000UL;
       #ifdef WIFI_SSID
         IPAddress ip = WiFi.localIP();
         snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
         display.setTextSize(1);
-        display.drawTextCentered(display.width() / 2, 54, tmp);
+        int ip_y = display.height() - 22;
+        if (display.height() <= 64) ip_y = show_date ? -1 : 54;
+        if (ip_y >= 0) display.drawTextCentered(display.width() / 2, ip_y, tmp);
       #endif
       if (_task->hasConnection()) {
         display.setColor(UIColor::warning_txt);
@@ -458,17 +518,34 @@ public:
 
       } else if (the_mesh.getBLEPin() != 0) { // BT pin
         display.setColor(UIColor::warning_txt);
-        display.setTextSize(2);
+        bool room = !show_date || display.height() > 64;
+        display.setTextSize(room ? 2 : 1);
         sprintf(tmp, "Pin:%d", the_mesh.getBLEPin());
         display.drawTextCentered(display.width() / 2, 43, tmp);
       }
+      if (show_date) {
+        int16_t tz = _node_prefs ? _node_prefs->tz_offset_mins : 0;
+        uint32_t now = _rtc->getCurrentTime();
+        char hm[8];
+        char date_buf[24];
+        char line[36];
+        formatClockHm(now, tz, hm, sizeof(hm));
+        formatClockDate(now, tz, _node_prefs ? _node_prefs->ui_lang : UI_LANG_RU,
+                        date_buf, sizeof(date_buf));
+        snprintf(line, sizeof(line), "%s  %s", hm, date_buf);
+        display.setTextSize(1);
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextCentered(display.width() / 2, display.height() - 11, line);
+      }
     } else if (_page == HomePage::RECENT) {
       the_mesh.getRecentlyHeard(recent, UI_RECENT_LIST_SIZE);
+      int shown = 0;
       display.setColor(UIColor::primary_txt);
       int y = 20;
       for (int i = 0; i < UI_RECENT_LIST_SIZE; i++, y += 11) {
         auto a = &recent[i];
         if (a->name[0] == 0) continue;  // empty slot
+        shown++;
         int secs = _rtc->getCurrentTime() - a->recv_timestamp;
         if (secs < 60) {
           sprintf(tmp, "%ds", secs);
@@ -486,6 +563,15 @@ public:
         display.drawTextEllipsized(0, y, max_name_width, filtered_recent_name);
         display.setCursor(display.width() - timestamp_width - 1, y);
         display.print(tmp);
+      }
+      if (shown == 0) {
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextCentered(display.width() / 2, 28, "no adverts");
+      }
+      // last slot stays free until the list is full, so the send hint fits there
+      if (recent[UI_RECENT_LIST_SIZE - 1].name[0] == 0) {
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextCentered(display.width() / 2, 20 + (UI_RECENT_LIST_SIZE - 1) * 11, "advert: " PRESS_LABEL);
       }
     } else if (_page == HomePage::NEIGHBORS) {
       int n = the_mesh.getNeighbors(neighbor_list, NEIGHBOR_TABLE_SIZE);
@@ -694,11 +780,6 @@ public:
       display.setColor(UIColor::secondary_txt);
       display.setTextSize(1);
       display.drawTextCentered(display.width() / 2, 64 - 11, "toggle: " PRESS_LABEL);
-    } else if (_page == HomePage::ADVERT) {
-      display.setColor(UIColor::corp_blue);
-      display.drawXbm((display.width() - 32) / 2, 18, advert_icon, 32, 32);
-      display.setColor(UIColor::secondary_txt);
-      display.drawTextCentered(display.width() / 2, 64 - 11, "advert: " PRESS_LABEL);
 #if ENV_INCLUDE_GPS == 1
     } else if (_page == HomePage::GPS) {
       LocationProvider* nmea = sensors.getLocationProvider();
@@ -891,6 +972,12 @@ public:
       // e-ink skips the progress bar, finishing the scan requests a redraw
       return display.isEink() ? 5000 : FSCAN_REFRESH_MILLIS;
     }
+    if (_page == HomePage::FIRST && !display.isEink() && _rtc->getCurrentTime() >= 1000000000UL) {
+      uint32_t sec = _rtc->getCurrentTime() % 60UL;
+      int wait = (int)((60UL - sec) * 1000UL);
+      if (wait < 1000) wait = 1000;
+      return wait;
+    }
     if (_page == HomePage::NEIGHBORS) return 1000;
 #if ENV_INCLUDE_GPS == 1
     if (_page == HomePage::BEACON) return 1000;
@@ -1025,7 +1112,7 @@ public:
       }
       return true;
     }
-    if (c == KEY_ENTER && _page == HomePage::ADVERT) {
+    if (c == KEY_ENTER && _page == HomePage::RECENT) {
       _task->notify(UIEventType::ack);
       if (the_mesh.advert()) {
         _task->showAlert("Advert sent!", 1000);
@@ -1072,6 +1159,10 @@ public:
       _shutdown_init = true;  // need to wait for button to be released
       return true;
     }
+    // long press on the main page reopens messages already previewed or dismissed
+    if (c == KEY_ENTER && _page == HomePage::FIRST) {
+      return _task->reopenMsgPreview();
+    }
     return false;
   }
 };
@@ -1084,10 +1175,16 @@ class MsgPreviewScreen : public UIScreen {
     uint32_t timestamp;
     char origin[62];
     char msg[MAX_TEXT_LEN + 1];
+    bool group;
   };
   #define MAX_UNREAD_MSGS   32
   int num_unread;
-  int head = MAX_UNREAD_MSGS - 1; // index of latest unread message
+  int stored = 0;   // messages still held in the ring after they are read or dismissed
+  int groups = 0;
+  int chats = 0;
+  int head = MAX_UNREAD_MSGS - 1;   // message currently on screen
+  int latest = MAX_UNREAD_MSGS - 1; // most recently received message
+  bool replay = false;
   MsgEntry unread[MAX_UNREAD_MSGS];
 
   // long messages are split into screen-sized pages that rotate automatically
@@ -1111,14 +1208,123 @@ class MsgPreviewScreen : public UIScreen {
     page_until = millis() + MSG_PAGE_MILLIS;
   }
 
+  int oldestIndex() const {
+    if (stored <= 0) return latest;
+    return (latest + MAX_UNREAD_MSGS - (stored - 1)) % MAX_UNREAD_MSGS;
+  }
+
+  // oldest message that is still counted as unread
+  int oldestUnread() const {
+    if (num_unread <= 0) return latest;
+    return (latest + MAX_UNREAD_MSGS - (num_unread - 1)) % MAX_UNREAD_MSGS;
+  }
+
+  void dropHead() {
+    if (stored <= 0) return;
+    int oldest = oldestIndex();
+    int pos = 0;
+    for (int idx = oldest; idx != head && pos < stored; pos++) {
+      idx = (idx + 1) % MAX_UNREAD_MSGS;
+    }
+    if (pos >= stored) return;
+
+    bool was_group = unread[head].group;
+    for (int i = pos; i < stored - 1; i++) {
+      int dst = (oldest + i) % MAX_UNREAD_MSGS;
+      unread[dst] = unread[(dst + 1) % MAX_UNREAD_MSGS];
+    }
+    stored--;
+    if (num_unread > 0) num_unread--;
+    if (was_group) { if (groups > 0) groups--; }
+    else if (chats > 0) chats--;
+
+    if (stored == 0 || num_unread == 0) {
+      num_unread = 0;
+      if (stored == 0) groups = chats = 0;
+      _task->gotoHomeScreen();
+      return;
+    }
+    latest = (oldest + stored - 1) % MAX_UNREAD_MSGS;
+    head = (pos >= stored) ? latest : (oldest + pos) % MAX_UNREAD_MSGS;
+    resetPage();
+  }
+
 public:
+  // The phone took the oldest message that was also shown here. Remove that copy.
+  bool dropOldest() {
+    if (stored <= 0) return true;
+    int oldest = oldestIndex();
+    bool viewing = (head == oldest);
+    bool was_group = unread[oldest].group;
+    bool counted = (num_unread > 0 && num_unread == stored);
+
+    for (int i = 0; i < stored - 1; i++) {
+      int dst = (oldest + i) % MAX_UNREAD_MSGS;
+      unread[dst] = unread[(dst + 1) % MAX_UNREAD_MSGS];
+    }
+    stored--;
+    if (counted) {
+      num_unread--;
+      if (was_group) { if (groups > 0) groups--; }
+      else if (chats > 0) chats--;
+    }
+    if (stored == 0) {
+      num_unread = 0;
+      groups = chats = 0;
+      return true;
+    }
+    latest = (oldest + stored - 1) % MAX_UNREAD_MSGS;
+    if (viewing) {
+      head = oldest;
+      resetPage();
+    } else {
+      head = (head + MAX_UNREAD_MSGS - 1) % MAX_UNREAD_MSGS;
+    }
+    return false;
+  }
+
   MsgPreviewScreen(UITask* task, mesh::RTCClock* rtc) : _task(task), _rtc(rtc) { num_unread = 0; }
 
-  void addPreview(uint8_t path_len, const char* from_name, const char* msg) {
-    head = (head + 1) % MAX_UNREAD_MSGS;
-    if (num_unread < MAX_UNREAD_MSGS) num_unread++;
+  int groupCount() const { return groups; }
+  int chatCount() const { return chats; }
+  int unreadCount() const { return num_unread; }
+  int storedCount() const { return stored; }
 
-    auto p = &unread[head];
+  bool reopen() {
+    if (stored == 0) return false;
+    num_unread = stored;
+    head = oldestUnread();
+    groups = chats = 0;
+    for (int i = 0; i < stored; i++) {
+      int idx = (latest + MAX_UNREAD_MSGS - i) % MAX_UNREAD_MSGS;
+      if (unread[idx].group) groups++;
+      else chats++;
+    }
+    replay = true;
+    resetPage();
+    return true;
+  }
+
+  void addPreview(uint8_t path_len, const char* from_name, const char* msg, bool group) {
+    int prev_unread = num_unread;
+    int slot = (latest + 1) % MAX_UNREAD_MSGS;
+    bool full = stored == MAX_UNREAD_MSGS;
+    bool head_overwritten = full && head == slot;
+    if (full && num_unread == MAX_UNREAD_MSGS) {
+      if (unread[slot].group) { if (groups > 0) groups--; }
+      else if (chats > 0) chats--;
+    } else if (!full) {
+      stored++;
+      num_unread++;
+    } else if (num_unread < MAX_UNREAD_MSGS) {
+      num_unread++;
+    }
+    latest = slot;
+    replay = false;
+
+    auto p = &unread[latest];
+    p->group = group;
+    if (group) groups++; else chats++;
     p->timestamp = _rtc->getCurrentTime();
     if (path_len == 0xFF) {
       sprintf(p->origin, "(D) %s:", from_name);
@@ -1126,7 +1332,11 @@ public:
       sprintf(p->origin, "(%d) %s:", (uint32_t) path_len, from_name);
     }
     StrHelper::strncpy(p->msg, msg, sizeof(p->msg));
-    resetPage();
+    // start at the oldest unread; a message that arrives mid-read waits at the end
+    if (prev_unread == 0 || head_overwritten) {
+      head = oldestUnread();
+      resetPage();
+    }
   }
 
   int render(DisplayDriver& display) override {
@@ -1184,7 +1394,7 @@ public:
     } else {
       display.setCursor(0, 0);
       display.setColor(UIColor::corp_blue);
-      sprintf(tmp, "Unread: %d", num_unread);
+      sprintf(tmp, "%s: %d", replay ? "Recent" : "Unread", num_unread);
       display.print(tmp);
 
       sprintf(tmp, "%s%s", page_tag, age);
@@ -1210,12 +1420,20 @@ public:
 
   bool handleInput(char c) override {
     if (c == KEY_NEXT || c == KEY_RIGHT) {
-      head = (head + MAX_UNREAD_MSGS - 1) % MAX_UNREAD_MSGS;
+      bool was_group = unread[head].group;
       num_unread--;
-      resetPage();
+      if (was_group) { if (groups > 0) groups--; }
+      else if (chats > 0) chats--;
       if (num_unread == 0) {
         _task->gotoHomeScreen();
+      } else {
+        head = (head + 1) % MAX_UNREAD_MSGS;  // older message first, then newer
+        resetPage();
       }
+      return true;
+    }
+    if (c == KEY_SELECT) {  // triple click: drop this message from the buffer
+      dropHead();
       return true;
     }
     if (c == KEY_PREV || c == KEY_DOWN) {   // manual page flip (double click on single-button boards)
@@ -1228,12 +1446,135 @@ public:
     }
     if (c == KEY_ENTER) {
       num_unread = 0;  // clear unread queue
+      groups = chats = 0;
       _task->gotoHomeScreen();
       return true;
     }
     return false;
   }
 };
+
+static void clockDraw(DisplayDriver& display, const ClockFace& face, int x, int y, const char* text) {
+  for (const char* s = text; *s; ) {
+    uint16_t cp;
+    s = clockNext(s, cp);
+    ClockGlyph g;
+    if (!clockFind(face, cp, g)) continue;
+    if (g.w && g.h) display.blit1(x, y + g.top, g.w, g.h, face.bits + g.offset);
+    x += g.advance;
+  }
+}
+
+class ClockScreen : public UIScreen {
+  UITask* _task;
+  mesh::RTCClock* _rtc;
+  MsgPreviewScreen* _preview;
+
+  NodePrefs* _prefs;
+
+  static void formatTime(uint32_t t, int16_t tz_mins, char* buf) {
+    if (t < 1000000000UL) {
+      strcpy(buf, "--:--");
+      return;
+    }
+    int64_t local = (int64_t)t + (int64_t)tz_mins * 60;
+    if (local < 0) local = 0;
+    uint32_t mins = ((uint32_t)local / 60UL) % (24UL * 60UL);
+    sprintf(buf, "%02u:%02u", (unsigned)(mins / 60UL), (unsigned)(mins % 60UL));
+  }
+
+public:
+  ClockScreen(UITask* task, mesh::RTCClock* rtc, MsgPreviewScreen* preview, NodePrefs* prefs)
+    : _task(task), _rtc(rtc), _preview(preview), _prefs(prefs) {}
+
+  int render(DisplayDriver& display) override {
+    display.setColor(UIColor::primary_txt);
+    int fw = display.frameWidth();
+    int fh = display.frameHeight();
+    const ClockFace& digits = (fw >= 220) ? CLOCK_DIGIT_WIDE : CLOCK_DIGIT_NARROW;
+
+    char time_buf[8];
+    uint32_t now = _rtc->getCurrentTime();
+    int16_t tz = _prefs ? _prefs->tz_offset_mins : 0;
+    formatTime(now, tz, time_buf);
+
+    char date_buf[24] = "";
+    int header_h = 0;
+    if (now >= 1000000000UL) {
+      formatClockDate(now, tz, _prefs ? _prefs->ui_lang : UI_LANG_RU, date_buf, sizeof(date_buf));
+      int topd, botd;
+      clockInk(CLOCK_HEADER, date_buf, topd, botd);
+      int inkd = botd - topd;
+      int y = 4 - topd;
+      if (y < 1) y = 1;
+      clockDraw(display, CLOCK_HEADER, (fw - clockWidth(CLOCK_HEADER, date_buf)) / 2, y, date_buf);
+      header_h = inkd + 8;
+    }
+
+    char line1[24] = "";
+    char line2[24] = "";
+    int groups = _preview->groupCount();
+    int chats = _preview->chatCount();
+    bool en = _prefs && _prefs->ui_lang == UI_LANG_EN;
+    if (groups > 0) sprintf(line1, en ? "Groups: %d" : "Группы: %d", groups);
+    if (chats > 0) sprintf(line2, en ? "Chat: %d" : "Чаты: %d", chats);
+    bool two = line1[0] && line2[0];
+    char both[40];
+    if (two) sprintf(both, "%s    %s", line1, line2);
+
+    int footer_h = 0;
+    if (line1[0] || line2[0]) {
+      const char* shown = two ? both : (line1[0] ? line1 : line2);
+      bool stack = two && clockWidth(CLOCK_FOOTER, both) > fw - 8;
+      int top0, bot0, top1 = 0, bot1 = 0;
+      clockInk(CLOCK_FOOTER, stack ? line1 : shown, top0, bot0);
+      int ink = bot0 - top0;
+      if (stack) {
+        clockInk(CLOCK_FOOTER, line2, top1, bot1);
+        ink += 4 + (bot1 - top1);
+      }
+      int y = fh - 6 - ink;
+      if (!stack) {
+        clockDraw(display, CLOCK_FOOTER, (fw - clockWidth(CLOCK_FOOTER, shown)) / 2, y - top0, shown);
+      } else {
+        clockDraw(display, CLOCK_FOOTER, (fw - clockWidth(CLOCK_FOOTER, line1)) / 2, y - top0, line1);
+        int y2 = y + (bot0 - top0) + 4;
+        clockDraw(display, CLOCK_FOOTER, (fw - clockWidth(CLOCK_FOOTER, line2)) / 2, y2 - top1, line2);
+      }
+      footer_h = ink + 12;
+    }
+
+    int top, bot;
+    clockInk(digits, time_buf, top, bot);
+    int ink = bot - top;
+    int area = fh - footer_h - header_h;
+    int y = header_h + (area - ink) / 2 - top;
+    if (y < 2) y = 2;
+    clockDraw(display, digits, (fw - clockWidth(digits, time_buf)) / 2, y, time_buf);
+
+    if (now < 1000000000UL) return 60000;
+    uint32_t sec = now % 60UL;
+    int wait = (int)((60UL - sec) * 1000UL);
+    if (wait < 1000) wait = 1000;
+    return wait;
+  }
+
+  bool handleInput(char c) override {
+    if (c == KEY_ENTER && _preview->reopen()) {
+      _task->showMsgPreview();
+      return true;
+    }
+    if (_preview->unreadCount() > 0) _task->showMsgPreview();
+    else _task->gotoHomeScreen();
+    return true;
+  }
+};
+
+bool UITask::reopenMsgPreview() {
+  if (!((MsgPreviewScreen *) msg_preview)->reopen()) return false;
+  showMsgPreview();
+  return true;
+}
 
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
   _display = display;
@@ -1269,6 +1610,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   splash = new SplashScreen(this);
   home = new HomeScreen(this, &rtc_clock, sensors, node_prefs);
   msg_preview = new MsgPreviewScreen(this, &rtc_clock);
+  clock = (display != NULL && display->isEink())
+      ? new ClockScreen(this, &rtc_clock, (MsgPreviewScreen*)msg_preview, node_prefs) : NULL;
+  _idle_since = millis();
   setCurrScreen(splash);
 }
 
@@ -1313,18 +1657,41 @@ switch(t){
 }
 
 
-void UITask::msgRead(int msgcount) {
-  _msgcount = msgcount;
-  if (msgcount == 0) {
+int UITask::getDeviceStored() const {
+  if (!msg_preview) return 0;
+  return ((MsgPreviewScreen *) msg_preview)->storedCount();
+}
+
+void UITask::clearTakenMsg() {
+  if (!msg_preview) return;
+  bool empty = ((MsgPreviewScreen *) msg_preview)->dropOldest();
+  if (empty && curr == msg_preview) {
     gotoHomeScreen();
+  } else if (curr == msg_preview || curr == clock || curr == home) {
+    _next_refresh = 100;
   }
 }
 
-void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount) {
+void UITask::msgRead(int msgcount) {
+  _msgcount = msgcount;
+  // The phone drains the offline queue as soon as a message arrives. That must
+  // not dismiss the e-ink clock; the footer count already updated in newMsg.
+  if (msgcount == 0 && curr != clock) {
+    gotoHomeScreen();
+  } else if (curr == home) {
+    _next_refresh = 100;
+  }
+}
+
+void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, int msgcount, bool group) {
   _msgcount = msgcount;
 
-  ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text);
-  setCurrScreen(msg_preview);
+  ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text, group);
+  if (curr == clock) {
+    _next_refresh = 100;
+  } else {
+    setCurrScreen(msg_preview);
+  }
 
   if (_display != NULL) {
     if (!_display->isOn() && !hasConnection()) {
@@ -1361,6 +1728,7 @@ void UITask::userLedHandler() {
 void UITask::setCurrScreen(UIScreen* c) {
   curr = c;
   _next_refresh = 100;
+  if (c == home) _idle_since = millis();
 }
 
 /*
@@ -1477,6 +1845,7 @@ void UITask::loop() {
 
   if (c != 0 && curr) {
     curr->handleInput(c);
+    _idle_since = millis();
     _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
     _next_refresh = 100;  // trigger refresh
   }
@@ -1522,6 +1891,13 @@ void UITask::loop() {
       _display->turnOff();
     }
 #endif
+  }
+
+  if (_display != NULL && _display->isEink() && clock != NULL && curr == home) {
+    if (((HomeScreen*)home)->allowsClock() && (long)(millis() - _idle_since) >= 60000L) {
+      _display->clean();
+      setCurrScreen(clock);
+    }
   }
 
 #ifdef PIN_VIBRATION
@@ -1587,7 +1963,7 @@ char UITask::handleTripleClick(char c) {
   MESH_DEBUG_PRINTLN("UITask: triple click triggered");
   c = checkDisplayOn(c);
   if (c == 0) return 0;
-  if (curr == home) return c; // home screen: beacon interval, otherwise buzzer
+  if (curr == home || curr == msg_preview) return c;
   toggleBuzzer();
   return 0;
 }
