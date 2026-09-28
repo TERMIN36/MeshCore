@@ -51,9 +51,17 @@ class GxEPDDisplay : public DisplayDriver {
   int textLineStep() const;
   int baselinePx(int y) const;
   void cleanScreen();
+  const uint8_t* frameBuf() const;
+  uint16_t frameBytes() const;
   CRC32 display_crc;
   int last_display_crc_value = 0;
-  uint16_t _partial_updates = 0;   // since the last full refresh
+  uint8_t* _prev = nullptr;
+  uint16_t _prev_len = 0;
+  bool _have_prev = false;
+  bool _after_clean = false;
+  bool _force_full = false;
+  uint8_t _refresh_mode = 0;       // see DisplayDriver::setRefreshMode
+  uint16_t _partial_updates = 0;   // small updates since the last full refresh
 
 public:
 #if defined(EINK_DISPLAY_MODEL)
@@ -67,6 +75,8 @@ public:
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }
   void clean() override;
+  void markFull() override { _force_full = true; }
+  void setRefreshMode(uint8_t mode) override { _refresh_mode = mode > 2 ? 0 : mode; }
   void turnOn() override;
   void turnOff() override;
   void clear() override;

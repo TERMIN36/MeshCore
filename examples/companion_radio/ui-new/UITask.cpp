@@ -196,6 +196,7 @@ class HomeScreen : public UIScreen {
 #if UI_SENSORS_PAGE == 1
     SENSORS,
 #endif
+    SETUP,
     SHUTDOWN,
     Count    // keep as last
   };
@@ -205,6 +206,8 @@ class HomeScreen : public UIScreen {
   SensorManager* _sensors;
   NodePrefs* _node_prefs;
   uint8_t _page;
+  uint8_t _setup_row;
+  bool _setup_edit;
   bool _shutdown_init;
   AdvertPath recent[UI_RECENT_LIST_SIZE];
   NeighborInfo neighbor_list[NEIGHBOR_TABLE_SIZE];
@@ -402,10 +405,32 @@ class HomeScreen : public UIScreen {
   // The gps setting is published only after the module is detected.
   // Its value is "1" only while that module is switched on.
   bool isPageVisible(uint8_t page) const {
+    if (page == HomePage::SETUP) return _task->isEink();
 #if ENV_INCLUDE_GPS == 1
     if (page == HomePage::BEACON) return _task->getGPSState();
 #endif
     return true;
+  }
+
+  void stepSetupRow(int dir) {
+    int next = (int)_setup_row + dir;
+    if (next < 0) next = 1;
+    if (next > 1) next = 0;
+    _setup_row = (uint8_t)next;
+  }
+
+  void changeSetupValue() {
+    if (!_node_prefs) return;
+    if (_setup_row == 0) {
+      _node_prefs->clock_saver = _node_prefs->clock_saver ? 0 : 1;
+    } else {
+      uint8_t mode = _node_prefs->eink_refresh;
+      if (mode >= EINK_REFRESH_COUNT) mode = 0;
+      _node_prefs->eink_refresh = (uint8_t)((mode + 1) % EINK_REFRESH_COUNT);
+    }
+    the_mesh.savePrefs();
+    _task->syncDisplayRefresh();
+    _task->notify(UIEventType::ack);
   }
 
   uint8_t stepPage(int dir) {
@@ -423,10 +448,11 @@ class HomeScreen : public UIScreen {
 public:
   HomeScreen(UITask* task, mesh::RTCClock* rtc, SensorManager* sensors, NodePrefs* node_prefs)
      : _task(task), _rtc(rtc), _sensors(sensors), _node_prefs(node_prefs), _page(0),
-       _shutdown_init(false), scan_peak(-127), fscan_state(FSCAN_IDLE), fscan_n(0),
+       _setup_row(0), _setup_edit(false), _shutdown_init(false), scan_peak(-127), fscan_state(FSCAN_IDLE), fscan_n(0),
        sensors_lpp(200) {  }
 
   bool allowsClock() const {
+    if (_node_prefs && _node_prefs->clock_saver == 0) return false;
     if (_page == HomePage::SCAN || _page == HomePage::FSCAN) return false;
     if (_page == HomePage::NEIGHBORS) return false;
 #if ENV_INCLUDE_GPS == 1
@@ -953,6 +979,25 @@ public:
       if (sensors_scroll) sensors_scroll_offset = (sensors_scroll_offset+1)%sensors_nb;
       else sensors_scroll_offset = 0;
 #endif
+    } else if (_page == HomePage::SETUP) {
+      uint8_t mode = _node_prefs ? _node_prefs->eink_refresh : EINK_REFRESH_CLEAR;
+      if (mode >= EINK_REFRESH_COUNT) mode = EINK_REFRESH_CLEAR;
+      bool clock_on = _node_prefs && _node_prefs->clock_saver != 0;
+      sprintf(tmp, "%u", (unsigned)mode + 1);
+      const char* rows_l[2] = { "Clock", "ScreenMode" };
+      const char* rows_r[2] = { clock_on ? "on" : "off", tmp };
+      display.setTextSize(1);
+      for (int i = 0; i < 2; i++) {
+        int y = 22 + i * 14;
+        display.setColor(UIColor::primary_txt);
+        if (_setup_edit && (uint8_t)i == _setup_row) display.drawTextLeftAlign(0, y, ">");
+        display.drawTextLeftAlign(10, y, rows_l[i]);
+        display.drawTextRightAlign(display.width() - 8, y, rows_r[i]);
+      }
+      if (display.height() >= 64) {
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextCentered(display.width() / 2, 52, _setup_edit ? "triple click" : PRESS_LABEL);
+      }
     } else if (_page == HomePage::SHUTDOWN) {
       display.setColor(UIColor::corp_blue);
       display.setTextSize(1);
@@ -999,6 +1044,10 @@ public:
 #endif
     }
     if (c == KEY_SELECT) {
+      if (_page == HomePage::SETUP && _setup_edit) {
+        changeSetupValue();
+        return true;
+      }
 #if ENV_INCLUDE_GPS == 1
       if (_page == HomePage::BEACON && the_mesh.cycleBeaconInterval()) {
         char mode[20];
@@ -1016,9 +1065,21 @@ public:
       _task->toggleBuzzer();
       return true;
     }
+    if ((c == KEY_UP || c == KEY_DOWN) && _page == HomePage::SETUP && _setup_edit) {
+      stepSetupRow(c == KEY_UP ? -1 : 1);
+      return true;
+    }
     if (c == KEY_LEFT || c == KEY_PREV) {
       if (_page == HomePage::FSCAN) stopFreqScan();
+      if (_page == HomePage::SETUP && _setup_edit) {
+        stepSetupRow(-1);
+        return true;
+      }
       _page = stepPage(-1);
+      if (_page == HomePage::SETUP) {
+        _setup_row = 0;
+        _setup_edit = false;
+      }
       if (_page == HomePage::NEIGHBORS) {
         neighbors_scroll_offset = 0;
         neighbors_next_scroll = 0;
@@ -1027,32 +1088,45 @@ public:
     }
     if (c == KEY_NEXT || c == KEY_RIGHT) {
       if (_page == HomePage::FSCAN) stopFreqScan();
+      if (_page == HomePage::SETUP && _setup_edit) {
+        stepSetupRow(1);
+        return true;
+      }
       _page = stepPage(1);
-      if (_page == HomePage::RECENT) {
-        _task->showAlert("Recent adverts", 800);
+      if (_page == HomePage::SETUP) {
+        _setup_row = 0;
+        _setup_edit = false;
       }
       if (_page == HomePage::NEIGHBORS) {
         neighbors_scroll_offset = 0;
         neighbors_next_scroll = 0;
-        _task->showAlert("Neighbors", 800);
       }
-      if (_page == HomePage::RADIO) {
-        _task->showAlert("Radio", 800);
-      }
-      if (_page == HomePage::POWER) {
-        _task->showAlert("Power", 800);
-      }
-      if (_page == HomePage::SCAN) {
-        _task->showAlert("Noise scan", 800);
-      }
-      if (_page == HomePage::FSCAN) {
-        _task->showAlert("Freq scan", 800);
-      }
+      // Page-name plaques force a second full refresh on e-ink.
+      if (!_task->isEink()) {
+        if (_page == HomePage::RECENT) {
+          _task->showAlert("Recent adverts", 800);
+        }
+        if (_page == HomePage::NEIGHBORS) {
+          _task->showAlert("Neighbors", 800);
+        }
+        if (_page == HomePage::RADIO) {
+          _task->showAlert("Radio", 800);
+        }
+        if (_page == HomePage::POWER) {
+          _task->showAlert("Power", 800);
+        }
+        if (_page == HomePage::SCAN) {
+          _task->showAlert("Noise scan", 800);
+        }
+        if (_page == HomePage::FSCAN) {
+          _task->showAlert("Freq scan", 800);
+        }
 #if ENV_INCLUDE_GPS == 1
-      if (_page == HomePage::BEACON) {
-        _task->showAlert("Beacon", 800);
-      }
+        if (_page == HomePage::BEACON) {
+          _task->showAlert("Beacon", 800);
+        }
 #endif
+      }
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::FSCAN) {
@@ -1155,6 +1229,10 @@ public:
       return true;
     }
 #endif
+    if (c == KEY_ENTER && _page == HomePage::SETUP) {
+      _setup_edit = !_setup_edit;
+      return true;
+    }
     if (c == KEY_ENTER && _page == HomePage::SHUTDOWN) {
       _shutdown_init = true;  // need to wait for button to be released
       return true;
@@ -1191,6 +1269,8 @@ class MsgPreviewScreen : public UIScreen {
   int page_start = 0;   // offset into the filtered text of the page on screen
   int page_next = 0;    // offset of the following page, 0 when the text ends on this page
   int page_num = 0;
+  int shown_head = -1;  // last message/page actually drawn; -1 forces a full refresh
+  int shown_page = -1;
   unsigned long page_until = 0;
 
   void resetPage() {
@@ -1407,6 +1487,14 @@ public:
       display.drawTextEllipsized(0, 14, display.width(), filtered_origin);
     }
 
+    // A new message or text page replaces most of the ink. The partial wave
+    // leaves the previous letters on the glass, so this frame is a full refresh.
+    // The age counter alone stays partial.
+    if (head != shown_head || page_start != shown_page) {
+      display.markFull();
+      shown_head = head;
+      shown_page = page_start;
+    }
 #if AUTO_OFF_MILLIS==0 // probably e-ink
     if (paged) {
       long wait = (long)(page_until - millis());
@@ -1613,10 +1701,13 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   clock = (display != NULL && display->isEink())
       ? new ClockScreen(this, &rtc_clock, (MsgPreviewScreen*)msg_preview, node_prefs) : NULL;
   _idle_since = millis();
+  syncDisplayRefresh();
   setCurrScreen(splash);
 }
 
 void UITask::showAlert(const char* text, int duration_millis) {
+  // A short plaque appears and then disappears, so e-ink pays for two full refreshes.
+  if (_display && _display->isEink() && duration_millis <= 2000) return;
   strcpy(_alert, text);
   _alert_expiry = millis() + duration_millis;
 }
@@ -1895,7 +1986,6 @@ void UITask::loop() {
 
   if (_display != NULL && _display->isEink() && clock != NULL && curr == home) {
     if (((HomeScreen*)home)->allowsClock() && (long)(millis() - _idle_since) >= 60000L) {
-      _display->clean();
       setCurrScreen(clock);
     }
   }

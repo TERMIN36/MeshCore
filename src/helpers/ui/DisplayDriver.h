@@ -25,6 +25,10 @@ public:
   virtual bool isEink() { return false; } // default to non-eink, override in eink drivers
   // Full panel clear. Drops the ghost of the previous image before a new frame.
   virtual void clean() {}
+  // Next frame uses the full waveform, even if few pixels changed.
+  virtual void markFull() {}
+  // 0: long wave when black turns white. 1: short wave on changed pixels. 2: partial by percent.
+  virtual void setRefreshMode(uint8_t) {}
   virtual void turnOn() = 0;
   virtual void turnOff() = 0;
   virtual void clear() = 0;

@@ -118,7 +118,7 @@ def B(s):
 
 # Home pages compiled in for each target (ui-new HomePage enum).
 PAGES = ["FIRST", "RECENT", "NEIGHBORS", "RADIO", "POWER", "SCAN", "FSCAN",
-         "BLUETOOTH", "GPS", "BEACON", "SHUTDOWN"]
+         "BLUETOOTH", "GPS", "BEACON", "SETUP", "SHUTDOWN"]
 PAGES_NO_GPS = [p for p in PAGES if p not in ("GPS", "BEACON")]
 UPSTREAM_PAGES = ["FIRST", "RECENT", "RADIO", "BLUETOOTH", "GPS", "SHUTDOWN"]
 
@@ -183,6 +183,8 @@ class Driver:
 
 class Oled(Driver):
     """SSD1306Display on top of Adafruit_SSD1306. legacy=True mimics upstream (no Cyrillic)."""
+    # Setup exists only on e-ink. An OLED page dot for it would not match the device.
+    pages = [p for p in PAGES if p != "SETUP"]
 
     def __init__(self, legacy=False):
         self.legacy = legacy
@@ -631,6 +633,24 @@ def scr_radio(d, lna=False):
     d.setCursor(0, 53); d.print("Noise floor: %d" % -108)
 
 
+def scr_setup(d, row=0, clock_on=True, mode=0, editing=False):
+    home_header(d, "SETUP", gps_on=False)
+    rows_l = ("Clock", "ScreenMode")
+    rows_r = ("on" if clock_on else "off", str(mode + 1))
+    d.setTextSize(1)
+    w = d.width()
+    for i in range(2):
+        y = 22 + i * 14
+        d.setColor(WHITE)
+        if editing and i == row:
+            d.drawTextLeftAlign(0, y, ">")
+        d.drawTextLeftAlign(10, y, rows_l[i])
+        d.drawTextRightAlign(w - 8, y, rows_r[i])
+    if d.height() >= 64:
+        d.setColor(WHITE)
+        d.drawTextCentered(w // 2, 52, "triple click" if editing else PRESS_LABEL)
+
+
 def scr_power(d, name, cpu, boost, lna, hold=None, gps_on=False):
     home_header(d, "POWER", gps_on)
     w = d.width()
@@ -808,6 +828,17 @@ SCREENS = [
 # MeshPocket has no GPS, so its companion build has no GPS / Beacon pages.
 EINK_SCREENS = [s for s in SCREENS if s[0][:2] not in ("13", "14", "15", "16")] + [
     ("19_alert", "Всплывающее уведомление", lambda d: (scr_scan(d), d.alert("Peak reset"))),
+    ("21_setup", "Настройки: часы и алгоритм", lambda d: scr_setup(d)),
+]
+
+# States of the e-ink settings page. Labels match the glass: Clock / ScreenMode 1..3.
+SETUP_SHOTS = [
+    ("21_setup", "long press", {}),
+    ("21_setup_clock", "edit Clock", {"editing": True}),
+    ("21_setup_off", "Clock off", {"clock_on": False, "editing": True}),
+    ("21_setup_1", "ScreenMode 1", {"row": 1, "mode": 0, "editing": True}),
+    ("21_setup_2", "ScreenMode 2", {"row": 1, "mode": 1, "editing": True}),
+    ("21_setup_3", "ScreenMode 3", {"row": 1, "mode": 2, "editing": True}),
 ]
 
 COMPARE = [
@@ -1004,6 +1035,15 @@ def main():
                "MeshCore by Termin36 — OLED 128x64", "gallery.png")
     render_set(out, "meshpocket", EINK_SCREENS, Eink, to_image_eink, 3,
                "MeshCore by Termin36 — Heltec MeshPocket, e-ink 2.13\" 250x122", "gallery_meshpocket.png")
+
+    setup_items = []
+    for fname, label, kwargs in SETUP_SHOTS:
+        d = Eink()
+        scr_setup(d, **kwargs)
+        im = to_image_eink(d)
+        im.save(os.path.join(out, "meshpocket", fname + ".png"))
+        setup_items.append((label, im))
+    sheet(setup_items, 3, "Settings — Mesh Pocket 250x122").save(os.path.join(out, "setup.png"))
 
     date_items = []
     for fname, label, fn in HOME_DATE:

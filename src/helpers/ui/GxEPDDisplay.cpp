@@ -1,6 +1,8 @@
 
 #include "GxEPDDisplay.h"
 #include "CyrillicFont.h"
+#include <stdlib.h>
+#include <string.h>
 
 #ifdef EXP_PIN_BACKLIGHT
   #include <PCA9557.h>
@@ -12,15 +14,45 @@
 #endif
 
 #ifndef EINK_FULL_REFRESH_EVERY
-  #define EINK_FULL_REFRESH_EVERY 20   // partial updates leave ghosting, a full refresh clears it
-#endif
-#ifndef EINK_CLEAN_BLACK_FIRST
-  #define EINK_CLEAN_BLACK_FIRST 0
+  // Partial updates slowly gray the whites. Force a full refresh anyway.
+  #define EINK_FULL_REFRESH_EVERY 30
 #endif
 
 #ifdef ESP32
   SPIClass SPI1 = SPIClass(FSPI);
 #endif
+
+#if defined(EINK_DISPLAY_MODEL)
+  using EinkPanel = GxEPD2_BW<EINK_DISPLAY_MODEL, EINK_DISPLAY_MODEL::HEIGHT>;
+#else
+  using EinkPanel = GxEPD2_BW<GxEPD2_150_BN, 200>;
+#endif
+
+static constexpr uint16_t kFrameBytes =
+#if defined(EINK_DISPLAY_MODEL)
+  (EINK_DISPLAY_MODEL::WIDTH / 8) * EINK_DISPLAY_MODEL::HEIGHT;
+#else
+  (GxEPD2_150_BN::WIDTH / 8) * 200;
+#endif
+
+// GxEPD2 keeps the frame buffer private. This takes its address anyway.
+struct EinkBufferTag {
+  typedef uint8_t (EinkPanel::*type)[kFrameBytes];
+  friend type einkBufferPtr(EinkBufferTag);
+};
+template<typename Tag, typename Tag::type M>
+struct StealMember {
+  friend typename Tag::type einkBufferPtr(Tag) { return M; }
+};
+template struct StealMember<EinkBufferTag, &EinkPanel::_buffer>;
+
+const uint8_t* GxEPDDisplay::frameBuf() const {
+  return (const uint8_t*)&(const_cast<EinkPanel&>(display).*einkBufferPtr(EinkBufferTag()));
+}
+
+uint16_t GxEPDDisplay::frameBytes() const {
+  return kFrameBytes;
+}
 
 // Color scheme
 ColorVal UIColor::window_bkg = GxEPD_WHITE;
@@ -61,17 +93,14 @@ void GxEPDDisplay::clean() {
   last_display_crc_value = 0;
 }
 
-// Full white fill (~3.5 s per full refresh on SSD1680 panels). Unlike
-// display(false), which drives the panel through the inverse of the current
-// image, this leaves both controller buffers white, so the next partial update
-// redraws the whole frame instead of only the pixels that changed.
-// EINK_CLEAN_BLACK_FIRST adds a black fill before it: cleaner, twice as slow.
+// Write white into both controller buffers and refresh the panel.
+// display(false) is a full update of the current image: it passes through
+// the inverse, and the next partial update then redraws only pixels that
+// differ from the old picture, so the previous background stays on screen.
 void GxEPDDisplay::cleanScreen() {
-#if EINK_CLEAN_BLACK_FIRST
-  display.clearScreen(0x00);
-#endif
   display.clearScreen(0xFF);
   _partial_updates = 0;
+  _after_clean = true;
 }
 
 void GxEPDDisplay::turnOn() {
@@ -411,11 +440,75 @@ uint16_t GxEPDDisplay::getTextWidth(const char* str) {
   return ceil((px + 1) / scale_x);
 }
 
+// Bit 1 is white. A black pixel can turn white only on the long waveform.
+static bool blacksMustWhiten(const uint8_t* prev, const uint8_t* now, uint16_t n) {
+  for (uint16_t i = 0; i < n; i++) {
+    if (now[i] & (uint8_t)~prev[i]) return true;
+  }
+  return false;
+}
+
+// Full refresh when more than this fraction of the panel changes.
+// The alert plaque is about 30% of the glass; 36% keeps a margin above it.
+static uint16_t partialLimit() {
+  uint32_t pixels = (uint32_t)kFrameBytes * 8u;
+  uint32_t limit = pixels * 36u / 100u;
+  if (limit < 1) limit = 1;
+  if (limit > 65535u) limit = 65535u;
+  return (uint16_t)limit;
+}
+
+static uint16_t changedPixels(const uint8_t* a, const uint8_t* b, uint16_t n, uint16_t limit) {
+  uint16_t count = 0;
+  for (uint16_t i = 0; i < n; i++) {
+    count += (uint16_t)__builtin_popcount((unsigned)(a[i] ^ b[i]));
+    if (count > limit) return count;
+  }
+  return count;
+}
+
 void GxEPDDisplay::endFrame() {
   uint32_t crc = display_crc.finalize();
-  if (crc != last_display_crc_value) {
-    if (++_partial_updates >= EINK_FULL_REFRESH_EVERY) cleanScreen();
-    display.display(true);
-    last_display_crc_value = crc;
+  if (crc == last_display_crc_value) return;
+
+  const uint8_t* buf = frameBuf();
+  uint16_t n = frameBytes();
+  if (_prev == nullptr || _prev_len != n) {
+    free(_prev);
+    _prev = (uint8_t*)malloc(n);
+    _prev_len = _prev ? n : 0;
+    _have_prev = false;
   }
+
+  // 0: long wave when a black pixel must turn white.
+  // 1: short wave on only the pixels that differ, both directions.
+  // 2: long wave only when the change is larger than partialLimit().
+  bool full = true;
+  if (_after_clean) {
+    full = false;
+  } else if (_have_prev && _prev) {
+    if (_refresh_mode == 1) {
+      full = false;
+    } else if (_refresh_mode == 2) {
+      uint16_t limit = partialLimit();
+      full = changedPixels(_prev, buf, n, limit) > limit;
+    } else {
+      full = blacksMustWhiten(_prev, buf, n);
+    }
+    if (!full && ++_partial_updates >= EINK_FULL_REFRESH_EVERY) full = true;
+  }
+  if (_force_full) full = true;
+  _force_full = false;
+  if (full) {
+    display.display(false);
+    _partial_updates = 0;
+  } else {
+    display.display(true);
+  }
+  if (_prev) {
+    memcpy(_prev, buf, n);
+    _have_prev = true;
+  }
+  _after_clean = false;
+  last_display_crc_value = crc;
 }

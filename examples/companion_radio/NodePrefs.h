@@ -19,6 +19,12 @@
 #define UI_LANG_RU            0
 #define UI_LANG_EN            1
 
+// ScreenMode on the settings page. GxEPDDisplay::setRefreshMode reads these.
+#define EINK_REFRESH_CLEAR    0  // long wave when a black pixel must turn white
+#define EINK_REFRESH_SHORT    1  // short wave on only the pixels that change
+#define EINK_REFRESH_PERCENT  2  // partial update by a percent of the panel
+#define EINK_REFRESH_COUNT    3
+
 class NodePrefs : public ConfigSerializer {  // persisted to file
 public:
   float airtime_factor = 0;
@@ -58,6 +64,8 @@ public:
   uint8_t default_scope_key[16];
   int16_t tz_offset_mins = 0;  // local time = UTC + this many minutes
   uint8_t ui_lang = UI_LANG_RU;  // weekday line on the e-ink clock
+  uint8_t clock_saver = 1;       // 1 = e-ink clock screensaver
+  uint8_t eink_refresh = EINK_REFRESH_CLEAR;
   uint8_t time_valid = 0;        // 1 once GPS, phone, manual set, or a trusted node has set the clock
   uint8_t clock_nodes[CLOCK_NODE_MAX][32];  // pubkeys to poll for time; empty slots are zeros
 
@@ -142,6 +150,8 @@ private:
       def("tel_env", _parent->telemetry_mode_env);
       def("tz", _parent->tz_offset_mins);  // minutes east of UTC
       def("lang", _parent->ui_lang);       // 0 = ru, 1 = en
+      def("clk", _parent->clock_saver);   // e-ink clock screensaver
+      def("eref", _parent->eink_refresh); // e-ink refresh choice, see EINK_REFRESH_*
       def("tvalid", _parent->time_valid);
       for (int i = 0; i < CLOCK_NODE_MAX; i++) {
         char key[8];

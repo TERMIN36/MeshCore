@@ -86,6 +86,10 @@ public:
   int  getMsgCount() const { return _msgcount; }
   int  getDeviceStored() const;
   bool hasDisplay() const { return _display != NULL; }
+  bool isEink() const { return _display != NULL && _display->isEink(); }
+  void syncDisplayRefresh() {
+    if (_display && _node_prefs) _display->setRefreshMode(_node_prefs->eink_refresh);
+  }
   bool isButtonPressed() const;
 
   bool isBuzzerQuiet() { 
