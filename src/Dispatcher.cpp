@@ -268,6 +268,7 @@ void Dispatcher::processRecvPacket(Packet* pkt) {
     uint8_t priority = (action >> 24) - 1;
     uint32_t _delay = action & 0xFFFFFF;
 
+    onForward(pkt);
     _mgr->queueOutbound(pkt, priority, futureMillis(_delay));
   }
 }
@@ -330,12 +331,15 @@ void Dispatcher::checkSend() {
       if (!success) {
         MESH_DEBUG_PRINTLN("%s Dispatcher::loop(): ERROR: send start failed!", getLogDateTime());
 
+        onTxAttempt(outbound);
         logTxFail(outbound, outbound->getRawLength());
-  
+
         releasePacket(outbound);  // return to pool
         outbound = NULL;
         return;
       }
+      // Bridges publish while the radio is still on air. Completion still calls logTx.
+      onTxAttempt(outbound);
       outbound_expiry = futureMillis(max_airtime);
 
     #if MESH_PACKET_LOGGING

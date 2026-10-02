@@ -37,6 +37,11 @@
 #include <helpers/RoutingPolicy.h>
 #include "RateLimiter.h"
 #include <helpers/ClockSource.h>
+#include "helpers/bridges/MqttBridge.h"
+#include "WifiStation.h"
+#include "NtpClock.h"
+#include "MqttReach.h"
+#include "RepeaterWeb.h"
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -130,7 +135,17 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
 #elif defined(WITH_ESPNOW_BRIDGE)
   ESPNowBridge bridge;
 #endif
+  MqttBridge _mqtt;
+  WifiStation _wifi;
+  NtpClock _ntp;
+  MqttReach _reach;
+  RepeaterWeb _web;
+  bool _mqtt_cert_load = false;
+  char* _mqtt_cert_buf = nullptr;
+  size_t _mqtt_cert_len = 0;
+  bool _mqtt_ca_on_file = false;
 
+  void sampleEnvironment(uint16_t& batt_mv, int16_t& temp_c_x10);
   void putNeighbour(const mesh::Identity& id, uint32_t timestamp, float snr, const char* name);
   uint8_t handleLoginReq(const mesh::Identity& sender, const uint8_t* secret, uint32_t sender_timestamp, const uint8_t* data, bool is_flood);
   uint8_t handleAnonRegionsReq(const mesh::Identity& sender, uint32_t sender_timestamp, const uint8_t* data);
@@ -139,7 +154,13 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   int handleRequest(ClientInfo* sender, uint32_t sender_timestamp, uint8_t* payload, size_t payload_len);
   mesh::Packet* createSelfAdvert();
 
+  void offerMqttTx(mesh::Packet* pkt);
   File openAppend(const char* fname);
+  void loadMqttCa();
+  bool beginMqttCertLoad();
+  void acceptMqttCertLine(const char* line, char* reply);
+  void clearMqttCert();
+  int writeMqttCa(const char* pem, size_t len);
   bool isLooped(const mesh::Packet* packet, const uint8_t max_counters[]);
 
 protected:
@@ -154,6 +175,8 @@ protected:
   void logRx(mesh::Packet* pkt, int len, float score) override;
   void logTx(mesh::Packet* pkt, int len) override;
   void logTxFail(mesh::Packet* pkt, int len) override;
+  void onTxAttempt(mesh::Packet* pkt) override;
+  void onForward(mesh::Packet* pkt) override;
   int calcRxDelay(float score, uint32_t air_time) const override;
 
   uint32_t getRetransmitDelay(const mesh::Packet* packet) override;
@@ -245,6 +268,22 @@ public:
 
   void saveIdentity(const mesh::LocalIdentity& new_id) override;
   void clearStats() override;
+  void applyMqttConfig() override;
+  void formatMqttStatus(char* reply) override;
+  bool applyMqttPanel(const char* host, uint16_t port, const char* user, const char* pass, bool set_pass,
+                      const char* pem, size_t pem_len, char* reply, size_t reply_cap);
+  void disableMqtt();
+  void applyWifiConfig() override;
+  void formatWifiStatus(char* reply) override;
+  void applyNtpConfig() override;
+  void formatNtpStatus(char* reply) override;
+  bool syncNtp() override;
+  bool ntpHoldsClock() override;
+  void fillRepeaterPage(RepeaterPageInfo& info);
+  void copyAdminPassword(char* dest, size_t cap) const;
+  bool copyWifiAddress(char* dest, size_t cap) const { return _wifi.copyAddress(dest, cap); }
+  bool hasMqttCert() const override { return _mqtt_ca_on_file; }
+  bool mqttBridgeUp() const { return _mqtt.isUp(); }
 
   void handleCommand(uint32_t sender_timestamp, char* command, char* reply);
   void loop();

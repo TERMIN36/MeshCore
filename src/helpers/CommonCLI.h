@@ -7,6 +7,7 @@
 #include <helpers/RegionMap.h>
 #include <helpers/ConfigSerializer.h>
 #include <helpers/ClockSource.h>
+#include <string.h>
 
 #if defined(WITH_RS232_BRIDGE) || defined(WITH_ESPNOW_BRIDGE)
 #define WITH_BRIDGE
@@ -73,6 +74,22 @@ public:
   uint8_t extra_sf[4];
   uint8_t time_valid = 0;       // 1 once GPS, admin, or a trusted node has set the clock
   uint8_t clock_nodes[CLOCK_NODE_MAX][32];  // pubkeys to poll for time; empty slots are zeros
+  // MQTT bridge. Empty tunnel or disabled leaves the repeater on LoRa only.
+  uint8_t mqtt_enabled = 0;
+  uint8_t mqtt_tls = 0;
+  uint16_t mqtt_port = 1883;
+  char mqtt_tunnel[65] = {};
+  char mqtt_host[64] = {};
+  char mqtt_user[32] = {};
+  char mqtt_pass[40] = {};
+  float mqtt_ant_m = 0;
+  // Station WiFi. MQTT uses this link and does not keep its own SSID.
+  uint8_t wifi_enabled = 0;
+  char wifi_ssid[33] = {};
+  char wifi_wpass[64] = {};
+  // NTP over station WiFi. Empty server means unset; enabling fills pool.ntp.org.
+  uint8_t ntp_enabled = 0;
+  char ntp_server[64] = {};
 
 private:
   class RadioPrefs : public ConfigSerializer {
@@ -169,6 +186,49 @@ private:
   };
   RoomPrefs room;
 
+  class MqttPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("en", _parent->mqtt_enabled);
+      def("tls", _parent->mqtt_tls);
+      def("port", _parent->mqtt_port);
+      def("tunnel", _parent->mqtt_tunnel, sizeof(_parent->mqtt_tunnel));
+      def("host", _parent->mqtt_host, sizeof(_parent->mqtt_host));
+      def("user", _parent->mqtt_user, sizeof(_parent->mqtt_user));
+      def("pass", _parent->mqtt_pass, sizeof(_parent->mqtt_pass));
+      def("ant", _parent->mqtt_ant_m);
+    }
+  public:
+    MqttPrefs(NodePrefs* parent) : _parent(parent) {}
+  };
+  MqttPrefs mqtt;
+
+  class WifiPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("en", _parent->wifi_enabled);
+      def("ssid", _parent->wifi_ssid, sizeof(_parent->wifi_ssid));
+      def("wpass", _parent->wifi_wpass, sizeof(_parent->wifi_wpass));
+    }
+  public:
+    WifiPrefs(NodePrefs* parent) : _parent(parent) {}
+  };
+  WifiPrefs wifi;
+
+  class NtpPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("en", _parent->ntp_enabled);
+      def("server", _parent->ntp_server, sizeof(_parent->ntp_server));
+    }
+  public:
+    NtpPrefs(NodePrefs* parent) : _parent(parent) {}
+  };
+  NtpPrefs ntp;
+
 protected:
   void structure() override {
     def("name", node_name, sizeof(node_name));
@@ -186,6 +246,9 @@ protected:
     def("repeat", repeat);
     def("room", room);
     def("power", power);
+    def("mqtt", mqtt);
+    def("wifi", wifi);
+    def("ntp", ntp);
     for (int i = 0; i < CLOCK_NODE_MAX; i++) {
       char key[8];
       clockNodePrefKey(key, sizeof(key), i);
@@ -194,7 +257,7 @@ protected:
   }
 
 public:
-  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this) {
+  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this), mqtt(this), wifi(this), ntp(this) {
     node_name[0] = 0;
     password[0] = 0;
     guest_password[0] = 0;
@@ -256,6 +319,36 @@ public:
   virtual void restartBridge() {
     // no op by default
   };
+
+  virtual void applyMqttConfig() {
+    // Repeater starts or stops the MQTT bridge. Other roles ignore this.
+  }
+
+  virtual void applyWifiConfig() {
+    // Repeater joins or leaves the configured access point.
+  }
+
+  virtual void formatWifiStatus(char* reply) {
+    if (reply) strcpy(reply, "> off");
+  }
+
+  virtual void applyNtpConfig() {
+    // Repeater starts or stops SNTP. Other roles ignore this.
+  }
+
+  virtual void formatNtpStatus(char* reply) {
+    if (reply) strcpy(reply, "> off");
+  }
+
+  virtual bool syncNtp() { return false; }
+
+  virtual bool ntpHoldsClock() { return false; }
+
+  virtual void formatMqttStatus(char* reply) {
+    if (reply) strcpy(reply, "> off");
+  }
+
+  virtual bool hasMqttCert() const { return false; }
 
   virtual bool setRxBoostedGain(bool enable) {
     return false; // CommonCLI reports unsupported if not overridden by wrapper

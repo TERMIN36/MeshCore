@@ -133,6 +133,9 @@ void setup() {
 }
 
 void loop() {
+#ifdef DISPLAY_CLASS
+  ui_task.pollButton();
+#endif
   // Handle Serial CLI
   int len = strlen(command);
   while (Serial.available() && len < sizeof(command)-1) {

@@ -15,6 +15,9 @@
 #include "soc/rtc.h"
 #include "esp_system.h"
 #include <driver/rtc_io.h>
+#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
+#include <driver/temp_sensor.h>
+#endif
 
 class ESP32Board : public mesh::MainBoard {
 protected:
@@ -51,16 +54,40 @@ public:
   #endif    
   }
 
-  // Temperature from ESP32 MCU
+  // Chip temperature in °C. Averaged as floats: folding temperatureRead() into
+  // uint32_t turned NaN into 0 and divided a real reading by about four.
   float getMCUTemperature() override {
-    uint32_t raw = 0;
-
-    // To get and average the temperature so it is more accurate, especially in low temperature
-    for (int i = 0; i < 4; i++) {
-      raw += temperatureRead();
+#if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
+    static bool started = false;
+    if (!started) {
+      temp_sensor_config_t config = {};
+      config.dac_offset = TSENS_DAC_L2;
+      config.clk_div = 6;
+      if (temp_sensor_set_config(config) != ESP_OK) return NAN;
+      esp_err_t err = temp_sensor_start();
+      if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return NAN;
+      started = true;
     }
-
-    return raw / 4;
+    float sum = 0;
+    int count = 0;
+    for (int i = 0; i < 4; i++) {
+      float sample = NAN;
+      if (temp_sensor_read_celsius(&sample) != ESP_OK || isnan(sample)) continue;
+      sum += sample;
+      count++;
+    }
+    return count ? sum / (float)count : NAN;
+#else
+    float sum = 0;
+    int count = 0;
+    for (int i = 0; i < 4; i++) {
+      float sample = temperatureRead();
+      if (isnan(sample)) continue;
+      sum += sample;
+      count++;
+    }
+    return count ? sum / (float)count : NAN;
+#endif
   }
 
   virtual void powerOff() override;

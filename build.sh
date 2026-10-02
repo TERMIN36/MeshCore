@@ -166,6 +166,19 @@ disable_debug_flags() {
   fi
 }
 
+# Library installs clone from GitHub. A DNS blip would otherwise abort the whole release.
+pio_retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    if pio "$@"; then
+      return 0
+    fi
+    echo "pio $* failed (attempt ${attempt}), retrying in 20s..."
+    sleep 20
+  done
+  return 1
+}
+
 # build firmware for the provided pio env in $1
 build_firmware() {
   # get env platform for post build actions
@@ -190,6 +203,15 @@ build_firmware() {
   # e.g: RAK_4631_Repeater-v1.0.0-SHA
   FIRMWARE_FILENAME="$1-${FIRMWARE_VERSION_STRING}"
 
+  # One build.sh run builds many targets. Remember the caller's flags on the first
+  # target and start from them each time, or the version -D flags stack until the
+  # Windows command line limit kills a later compile.
+  if [ -z "${_PIO_FLAGS_SAVED+x}" ]; then
+    _PIO_FLAGS_SAVED=1
+    _PIO_FLAGS_BASE="${PLATFORMIO_BUILD_FLAGS-}"
+  fi
+  export PLATFORMIO_BUILD_FLAGS="${_PIO_FLAGS_BASE-}"
+
   # add firmware version info to end of existing platformio build flags in environment vars
   export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${FIRMWARE_VERSION_STRING}\"'"
 
@@ -197,11 +219,11 @@ build_firmware() {
   disable_debug_flags
 
   # build firmware target
-  pio run -e $1
+  pio_retry run -e $1
 
   # build merge-bin for esp32 fresh install, copy .bins to out folder (e.g: Heltec_v3_room_server-v1.0.0-SHA.bin)
   if [ "$ENV_PLATFORM" == "ESP32_PLATFORM" ]; then
-    pio run -t mergebin -e $1
+    pio_retry run -t mergebin -e $1
     cp .pio/build/$1/firmware.bin out/${FIRMWARE_FILENAME}.bin 2>/dev/null || true
     cp .pio/build/$1/firmware-merged.bin out/${FIRMWARE_FILENAME}-merged.bin 2>/dev/null || true
   fi

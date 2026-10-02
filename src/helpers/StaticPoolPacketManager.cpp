@@ -114,11 +114,13 @@ mesh::Packet* StaticPoolPacketManager::removeOutboundByIdx(int i) {
   return send_queue.removeByIdx(i);
 }
 
-void StaticPoolPacketManager::queueInbound(mesh::Packet* packet, uint32_t scheduled_for) {
+bool StaticPoolPacketManager::queueInbound(mesh::Packet* packet, uint32_t scheduled_for) {
   if (!rx_queue.add(packet, 0, scheduled_for)) {
     MESH_DEBUG_PRINTLN("queueInbound: rx queue full, dropping packet");
     free(packet);
+    return false;
   }
+  return true;
 }
 mesh::Packet* StaticPoolPacketManager::getNextInbound(uint32_t now) {
   return rx_queue.get(now);

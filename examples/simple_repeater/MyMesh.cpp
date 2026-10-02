@@ -1,5 +1,11 @@
 #include "MyMesh.h"
+#include <RTClib.h>
 #include <algorithm>
+#include <stdlib.h>
+#include <string.h>
+
+static const char MQTT_CA_FILE[] = "/mqtt_ca.pem";
+static const size_t MQTT_CA_MAX = 4096;
 
 /* ------------------------------ Config -------------------------------- */
 
@@ -509,12 +515,27 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
   }
 }
 
+void MyMesh::offerMqttTx(mesh::Packet* pkt) {
+  if (_prefs.mqtt_enabled && _prefs.mqtt_tunnel[0]) {
+    _mqtt.onRadioTx(pkt);
+  }
+}
+
+void MyMesh::onTxAttempt(mesh::Packet* pkt) {
+  offerMqttTx(pkt);
+}
+
+void MyMesh::onForward(mesh::Packet* pkt) {
+  offerMqttTx(pkt);
+}
+
 void MyMesh::logTx(mesh::Packet *pkt, int len) {
 #ifdef WITH_BRIDGE
   if (_prefs.bridge_pkt_src == 0) {
     bridge.sendPacket(pkt);
   }
 #endif
+  offerMqttTx(pkt);
 
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
@@ -535,6 +556,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
 }
 
 void MyMesh::logTxFail(mesh::Packet *pkt, int len) {
+  offerMqttTx(pkt);
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
     if (f) {
@@ -1039,6 +1061,11 @@ void MyMesh::begin(FILESYSTEM *fs) {
     bridge.begin();
   }
 #endif
+  _wifi.begin(&_prefs);
+  _ntp.begin(&_prefs);
+  _reach.begin(&_prefs);
+  _mqtt.begin(&_prefs, _mgr, getRTCClock(), self_id.pub_key);
+  loadMqttCa();
 
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
   radio_driver.setTxPower(_prefs.tx_power_dbm);
@@ -1262,7 +1289,224 @@ void MyMesh::clearStats() {
   ((SimpleMeshTables *)getTables())->resetStats();
 }
 
+void MyMesh::loadMqttCa() {
+  if (!_fs->exists(MQTT_CA_FILE)) return;
+#if defined(RP2040_PLATFORM)
+  File f = _fs->open(MQTT_CA_FILE, "r");
+#else
+  File f = _fs->open(MQTT_CA_FILE);
+#endif
+  if (!f) return;
+  char* buf = (char*)malloc(MQTT_CA_MAX);
+  if (!buf) {
+    f.close();
+    return;
+  }
+  size_t n = 0;
+  while (n < MQTT_CA_MAX && f.available()) {
+    int c = f.read();
+    if (c < 0) break;
+    buf[n++] = (char)c;
+  }
+  f.close();
+  if (n < MQTT_CA_MAX && _mqtt.setCaCert(buf, n)) _mqtt_ca_on_file = true;
+  free(buf);
+}
+
+bool MyMesh::beginMqttCertLoad() {
+  free(_mqtt_cert_buf);
+  _mqtt_cert_buf = (char*)malloc(MQTT_CA_MAX);
+  if (!_mqtt_cert_buf) {
+    _mqtt_cert_load = false;
+    _mqtt_cert_len = 0;
+    return false;
+  }
+  _mqtt_cert_len = 0;
+  _mqtt_cert_load = true;
+  return true;
+}
+
+int MyMesh::writeMqttCa(const char* pem, size_t len) {
+  if (!pem || !mqttCaPemOk(pem, len) || !_mqtt.setCaCert(pem, len)) return 1;
+#if defined(NRF52_PLATFORM) || defined(STM32_PLATFORM)
+  _fs->remove(MQTT_CA_FILE);
+  File f = _fs->open(MQTT_CA_FILE, FILE_O_WRITE);
+#else
+  File f = _fs->open(MQTT_CA_FILE, "w");
+#endif
+  bool opened = (bool)f;
+  size_t wrote = 0;
+  if (opened) {
+    wrote = f.write((const uint8_t*)pem, len);
+    f.close();
+  }
+  if (!opened || wrote != len) {
+    _fs->remove(MQTT_CA_FILE);
+    _mqtt.setCaCert(nullptr, 0);
+    _mqtt_ca_on_file = false;
+    return 2;
+  }
+  _mqtt_ca_on_file = true;
+  return 0;
+}
+
+static void copyReply(char* reply, size_t cap, const char* text) {
+  if (!reply || cap == 0) return;
+  strncpy(reply, text, cap - 1);
+  reply[cap - 1] = 0;
+}
+
+bool MyMesh::applyMqttPanel(const char* host, uint16_t port, const char* user, const char* pass, bool set_pass,
+                            const char* pem, size_t pem_len, char* reply, size_t reply_cap) {
+  if (!host || !host[0] || strlen(host) >= sizeof(_prefs.mqtt_host)) {
+    copyReply(reply, reply_cap, "Хост пустой или длиннее 63 символов");
+    return false;
+  }
+  for (const char* p = host; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (c <= ' ' || c >= 127) {
+      copyReply(reply, reply_cap, "В адресе есть недопустимый символ");
+      return false;
+    }
+  }
+  if (port < 1) {
+    copyReply(reply, reply_cap, "Порт должен быть от 1 до 65535");
+    return false;
+  }
+  if (user && strlen(user) >= sizeof(_prefs.mqtt_user)) {
+    copyReply(reply, reply_cap, "Логин длиннее 31 символа");
+    return false;
+  }
+  if (set_pass && pass && strlen(pass) >= sizeof(_prefs.mqtt_pass)) {
+    copyReply(reply, reply_cap, "Пароль длиннее 39 символов");
+    return false;
+  }
+  if (pem_len) {
+    _mqtt_cert_load = false;
+    free(_mqtt_cert_buf);
+    _mqtt_cert_buf = nullptr;
+    _mqtt_cert_len = 0;
+    int stored = writeMqttCa(pem, pem_len);
+    if (stored == 1) {
+      copyReply(reply, reply_cap, "Сертификат не принят");
+      return false;
+    }
+    if (stored != 0) {
+      copyReply(reply, reply_cap, "Сертификат не записан");
+      return false;
+    }
+  } else if (!_mqtt_ca_on_file) {
+    copyReply(reply, reply_cap, "Нужен сертификат");
+    return false;
+  }
+  char tunnel[65];
+  mesh::Utils::toHex(tunnel, self_id.pub_key, PUB_KEY_SIZE);
+  StrHelper::strncpy(_prefs.mqtt_host, host, sizeof(_prefs.mqtt_host));
+  StrHelper::strncpy(_prefs.mqtt_user, user ? user : "", sizeof(_prefs.mqtt_user));
+  if (set_pass) StrHelper::strncpy(_prefs.mqtt_pass, pass ? pass : "", sizeof(_prefs.mqtt_pass));
+  StrHelper::strncpy(_prefs.mqtt_tunnel, tunnel, sizeof(_prefs.mqtt_tunnel));
+  _prefs.mqtt_port = port;
+  _prefs.mqtt_tls = 1;
+  _prefs.mqtt_enabled = 1;
+  savePrefs();
+  applyMqttConfig();
+  copyReply(reply, reply_cap, "MQTT включён");
+  return true;
+}
+
+void MyMesh::disableMqtt() {
+  if (_prefs.mqtt_enabled) {
+    _prefs.mqtt_enabled = 0;
+    savePrefs();
+  }
+  applyMqttConfig();
+}
+
+void MyMesh::acceptMqttCertLine(const char* line, char* reply) {
+  if (StrHelper::isBlank(line)) {
+    _mqtt_cert_load = false;
+    const char* pem = _mqtt_cert_buf;
+    size_t pem_len = _mqtt_cert_len;
+    int stored = pem ? writeMqttCa(pem, pem_len) : 1;
+    free(_mqtt_cert_buf);
+    _mqtt_cert_buf = nullptr;
+    _mqtt_cert_len = 0;
+    if (stored == 1) strcpy(reply, "Error: certificate rejected");
+    else if (stored != 0) strcpy(reply, "Error: certificate not stored");
+    else strcpy(reply, "OK - certificate stored");
+    return;
+  }
+
+  size_t n = strlen(line);
+  if (!_mqtt_cert_buf || _mqtt_cert_len + n + 1 >= MQTT_CA_MAX) {
+    _mqtt_cert_load = false;
+    free(_mqtt_cert_buf);
+    _mqtt_cert_buf = nullptr;
+    _mqtt_cert_len = 0;
+    strcpy(reply, "Error: certificate too long");
+    return;
+  }
+  memcpy(_mqtt_cert_buf + _mqtt_cert_len, line, n);
+  _mqtt_cert_len += n;
+  _mqtt_cert_buf[_mqtt_cert_len++] = '\n';
+  reply[0] = 0;
+}
+
+void MyMesh::clearMqttCert() {
+  _fs->remove(MQTT_CA_FILE);
+  _mqtt.setCaCert(nullptr, 0);
+  _mqtt_ca_on_file = false;
+}
+
+void MyMesh::applyMqttConfig() {
+  _mqtt.applyConfig();
+}
+
+void MyMesh::formatMqttStatus(char* reply) {
+  if (!_prefs.mqtt_enabled) {
+    strcpy(reply, "> off");
+    return;
+  }
+  _mqtt.formatStatus(reply, 160);
+}
+
+void MyMesh::applyWifiConfig() {
+  if (!_prefs.wifi_enabled || !_prefs.wifi_ssid[0]) _web.stop();
+  _wifi.apply();
+}
+
+void MyMesh::formatWifiStatus(char* reply) {
+  if (!_prefs.wifi_enabled) {
+    strcpy(reply, "> off");
+    return;
+  }
+  char ip[16];
+  if (_wifi.copyAddress(ip, sizeof(ip))) snprintf(reply, 160, "> on %s", ip);
+  else strcpy(reply, "> on");
+}
+
+void MyMesh::applyNtpConfig() {
+  _ntp.apply();
+}
+
+void MyMesh::formatNtpStatus(char* reply) {
+  _ntp.formatStatus(reply, 160);
+}
+
+bool MyMesh::syncNtp() {
+  return _ntp.requestSync();
+}
+
+bool MyMesh::ntpHoldsClock() {
+  return _ntp.holdsClock();
+}
+
 void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply) {
+  if (_mqtt_cert_load) {
+    acceptMqttCertLine(command, reply);
+    return;
+  }
+
   if (region_load_active) {
     if (StrHelper::isBlank(command)) {  // empty/blank line, signal to terminate 'load' operation
       region_map = temp_map;  // copy over the temp instance as new current map
@@ -1339,6 +1583,12 @@ void MyMesh::handleCommand(uint32_t sender_timestamp, char *command, char *reply
       Serial.printf("\n");
     }
     reply[0] = 0;
+  } else if (strcmp(command, "load mqtt.cert") == 0) {
+    if (beginMqttCertLoad()) strcpy(reply, "OK - paste PEM, blank line to end");
+    else strcpy(reply, "Error: out of memory");
+  } else if (strcmp(command, "clear mqtt.cert") == 0) {
+    clearMqttCert();
+    strcpy(reply, "OK");
   } else if (memcmp(command, "discover.neighbors", 18) == 0) {
     const char* sub = command + 18;
     while (*sub == ' ') sub++;
@@ -1471,6 +1721,8 @@ void MyMesh::onClockResponse(const uint8_t* data, size_t len) {
   uint32_t rtt = millis() - _clock_pull_sent_ms;
   _clock_pull_tag = 0;
 
+  if (_ntp.holdsClock()) return;
+
   uint32_t accepted;
   if (!acceptRemoteClock(getRTCClock()->getCurrentTime(), _prefs.time_valid != 0, remote, rtt, &accepted)) {
     return;
@@ -1492,6 +1744,13 @@ void MyMesh::noteGpsClock() {
 
 void MyMesh::checkClockPull(bool force) {
   noteGpsClock();
+  if (_ntp.holdsClock()) {
+    _clock_pull_tag = 0;
+    if (!force) {
+      _clock_next_pull = futureMillis(CLOCK_PULL_INTERVAL_MS);
+      return;
+    }
+  }
   if (!clockNodesConfigured(_prefs.clock_nodes)) return;
 
   if (_clock_pull_tag != 0) {
@@ -1509,6 +1768,7 @@ void MyMesh::checkClockPull(bool force) {
 }
 
 bool MyMesh::pullClock() {
+  if (_ntp.holdsClock()) return false;
   if (!clockNodesConfigured(_prefs.clock_nodes)) return false;
   _clock_pull_tag = 0;
   if (!sendClockPull()) return false;
@@ -1516,7 +1776,179 @@ bool MyMesh::pullClock() {
   return true;
 }
 
+void MyMesh::copyAdminPassword(char* dest, size_t cap) const {
+  if (!dest || cap == 0) return;
+  size_t n = cap - 1;
+  if (n > sizeof(_prefs.password)) n = sizeof(_prefs.password);
+  memcpy(dest, _prefs.password, n);
+  dest[n] = 0;
+}
+
+static uint32_t secondsUntil(unsigned long now, unsigned long at) {
+  if (!at) return REPEATER_TIMER_UNSET;
+  if ((long)(now - at) > 0) return 0;
+  return (uint32_t)((at - now) / 1000UL);
+}
+
+void MyMesh::fillRepeaterPage(RepeaterPageInfo& info) {
+  memset(&info, 0, sizeof(info));
+  strncpy(info.name, _prefs.node_name, sizeof(info.name) - 1);
+  strncpy(info.firmware, getFirmwareVer(), sizeof(info.firmware) - 1);
+  strncpy(info.build, getBuildDate(), sizeof(info.build) - 1);
+  const char* board_name = board.getManufacturerName();
+  if (board_name) strncpy(info.board, board_name, sizeof(info.board) - 1);
+  mesh::Utils::toHex(info.id, getSelfId().pub_key, 4);
+  strncpy(info.ssid, _prefs.wifi_ssid, sizeof(info.ssid) - 1);
+  copyWifiAddress(info.ip, sizeof(info.ip));
+  if (!_prefs.mqtt_enabled) strncpy(info.mqtt, "выкл", sizeof(info.mqtt) - 1);
+  else if (_mqtt.isUp()) strncpy(info.mqtt, "подключён", sizeof(info.mqtt) - 1);
+  else strncpy(info.mqtt, "нет связи", sizeof(info.mqtt) - 1);
+  if (_prefs.node_lat != 0.0 || _prefs.node_lon != 0.0) {
+    snprintf(info.lat, sizeof(info.lat), "%.6f", _prefs.node_lat);
+    snprintf(info.lon, sizeof(info.lon), "%.6f", _prefs.node_lon);
+  }
+  info.freq = _prefs.freq;
+  info.bw = _prefs.bw;
+  info.sf = _prefs.sf;
+  info.cr = _prefs.cr;
+  info.tx_dbm = _prefs.tx_power_dbm;
+  info.forwarding = _prefs.disable_fwd ? 0 : 1;
+  sampleEnvironment(info.batt_mv, info.temp_c_x10);
+  info.uptime_secs = _ms->getMillis() / 1000;
+  info.err_flags = _err_flags;
+  info.queue_len = (uint32_t)_mgr->getOutboundTotal();
+  info.noise_floor = _radio->getNoiseFloor();
+  info.last_rssi = (int)radio_driver.getLastRSSI();
+  info.last_snr = radio_driver.getLastSNR();
+  info.tx_air_secs = (uint32_t)(getTotalAirTime() / 1000);
+  info.rx_air_secs = (uint32_t)(getReceiveAirTime() / 1000);
+  info.recv = radio_driver.getPacketsRecv();
+  info.sent = radio_driver.getPacketsSent();
+  info.flood_tx = getNumSentFlood();
+  info.direct_tx = getNumSentDirect();
+  info.flood_rx = getNumRecvFlood();
+  info.direct_rx = getNumRecvDirect();
+  info.recv_errors = radio_driver.getPacketsRecvErrors();
+
+  info.ntp_enabled = _prefs.ntp_enabled;
+  info.ntp_state = _ntp.state();
+  strncpy(info.ntp_server, _prefs.ntp_server, sizeof(info.ntp_server) - 1);
+  info.time_valid = _prefs.time_valid;
+  if (_prefs.time_valid) {
+    DateTime dt(getRTCClock()->getCurrentTime());
+    snprintf(info.clock_text, sizeof(info.clock_text), "%02u:%02u UTC %u.%02u.%u",
+             dt.hour(), dt.minute(), dt.day(), dt.month(), dt.year());
+  } else {
+    strncpy(info.clock_text, "не выставлены", sizeof(info.clock_text) - 1);
+  }
+  info.advert_local_mins = (uint16_t)_prefs.advert_interval * 2;
+  info.advert_flood_hours = _prefs.flood_advert_interval;
+  unsigned long now_ms = _ms->getMillis();
+  info.next_local_secs = _prefs.advert_interval ? secondsUntil(now_ms, next_local_advert) : REPEATER_TIMER_OFF;
+  info.next_flood_secs = _prefs.flood_advert_interval ? secondsUntil(now_ms, next_flood_advert) : REPEATER_TIMER_OFF;
+  info.next_clock_secs = clockNodesConfigured(_prefs.clock_nodes) ? secondsUntil(now_ms, _clock_next_pull) : REPEATER_TIMER_UNSET;
+  for (int i = 0; i < CLOCK_NODE_MAX && info.clock_count < REPEATER_PAGE_CLOCKS; i++) {
+    if (!clockNodeSlotUsed(_prefs.clock_nodes[i])) continue;
+    RepeaterClockSource& dst = info.clocks[info.clock_count++];
+    mesh::Utils::toHex(dst.id, _prefs.clock_nodes[i], 4);
+    lookupClockNodeName(_prefs.clock_nodes[i], dst.name, sizeof(dst.name));
+  }
+
+  info.airtime_factor = _prefs.airtime_factor;
+  info.cad = _prefs.cad_enabled;
+  info.interference = _prefs.interference_threshold;
+  info.agc_secs = (uint16_t)_prefs.agc_reset_interval * 4;
+  info.path_hash_bytes = _prefs.path_hash_mode + 1;
+  info.loop_detect = _prefs.loop_detect;
+  info.flood_max = _prefs.flood_max;
+  info.flood_max_unscoped = _prefs.flood_max_unscoped;
+  info.flood_max_advert = _prefs.flood_max_advert;
+  info.multi_acks = _prefs.multi_acks;
+
+  info.mqtt_enabled = _prefs.mqtt_enabled ? 1 : 0;
+  info.mqtt_tls = _prefs.mqtt_tls;
+  info.mqtt_cert = _mqtt_ca_on_file ? 1 : 0;
+  info.mqtt_port = _prefs.mqtt_port;
+  info.mqtt_ant_m = _prefs.mqtt_ant_m;
+  strncpy(info.mqtt_host, _prefs.mqtt_host, sizeof(info.mqtt_host) - 1);
+  _reach.copyStatus(info.mqtt_ip, sizeof(info.mqtt_ip), info.mqtt_tcp, sizeof(info.mqtt_tcp));
+  strncpy(info.mqtt_user, _prefs.mqtt_user, sizeof(info.mqtt_user) - 1);
+  strncpy(info.mqtt_tunnel, _prefs.mqtt_tunnel, sizeof(info.mqtt_tunnel) - 1);
+
+#if MAX_NEIGHBOURS
+  int order[MAX_NEIGHBOURS];
+  int heard = 0;
+  for (int i = 0; i < MAX_NEIGHBOURS; i++) {
+    if (neighbours[i].heard_timestamp) order[heard++] = i;
+  }
+  for (int i = 1; i < heard; i++) {
+    int key = order[i];
+    int j = i - 1;
+    while (j >= 0 && neighbours[order[j]].heard_timestamp < neighbours[key].heard_timestamp) {
+      order[j + 1] = order[j];
+      j--;
+    }
+    order[j + 1] = key;
+  }
+  uint32_t now = getRTCClock()->getCurrentTime();
+  int take = heard;
+  if (take > REPEATER_PAGE_NEIGHBOURS) take = REPEATER_PAGE_NEIGHBOURS;
+  info.neighbour_count = (uint8_t)take;
+  for (int i = 0; i < take; i++) {
+    const NeighbourInfo& src = neighbours[order[i]];
+    RepeaterNeighbour& dst = info.neighbours[i];
+    strncpy(dst.name, src.name, sizeof(dst.name) - 1);
+    mesh::Utils::toHex(dst.id, src.id.pub_key, 4);
+    dst.snr_q4 = src.snr;
+    dst.secs_ago = now - src.heard_timestamp;
+  }
+#endif
+}
+
+void MyMesh::sampleEnvironment(uint16_t& batt_mv, int16_t& temp_c_x10) {
+  static uint32_t env_at = 0;
+  static uint16_t env_mv = 0;
+  static int16_t env_c_x10 = REPEATER_TEMP_UNKNOWN;
+  uint32_t env_now = _ms->getMillis();
+  if (!env_at || (uint32_t)(env_now - env_at) >= 5000) {
+    env_at = env_now;
+    env_mv = board.getBattMilliVolts();
+    float chip_c = board.getMCUTemperature();
+    if (isnan(chip_c)) env_c_x10 = REPEATER_TEMP_UNKNOWN;
+    else {
+      int scaled = (int)(chip_c * 10.0f + (chip_c >= 0 ? 0.5f : -0.5f));
+      if (scaled < -32767) scaled = -32767;
+      if (scaled > 32767) scaled = 32767;
+      env_c_x10 = (int16_t)scaled;
+    }
+  }
+  batt_mv = env_mv;
+  temp_c_x10 = env_c_x10;
+}
+
 void MyMesh::loop() {
+  uint32_t ntp_unix = 0;
+  if (_ntp.poll(&ntp_unix)) {
+    getRTCClock()->setCurrentTime(ntp_unix);
+    if (!_prefs.time_valid) {
+      _prefs.time_valid = 1;
+      savePrefs();
+    }
+  }
+  _reach.poll(_mqtt.isUp());
+  _web.poll(_prefs.wifi_enabled && _prefs.wifi_ssid[0]);
+  uint16_t batt_mv = 0;
+  int16_t temp_c_x10 = REPEATER_TEMP_UNKNOWN;
+  sampleEnvironment(batt_mv, temp_c_x10);
+  _mqtt.setRadioMetrics((int16_t)_radio->getNoiseFloor(),
+                        (uint32_t)(getTotalAirTime() / 1000),
+                        (uint32_t)(getReceiveAirTime() / 1000),
+                        _ms->getMillis() / 1000,
+                        (uint32_t)_mgr->getOutboundTotal(),
+                        batt_mv,
+                        temp_c_x10,
+                        getFirmwareVer());
+  _mqtt.loop();
 #ifdef WITH_BRIDGE
   bridge.loop();
 #endif
@@ -1567,5 +1999,7 @@ bool MyMesh::hasPendingWork() const {
 #if defined(WITH_BRIDGE)
   if (bridge.isRunning()) return true;  // bridge needs WiFi radio, can't sleep
 #endif
+  if (_prefs.wifi_enabled && _prefs.wifi_ssid[0]) return true;
+  if (_mqtt.blocksSleep()) return true;
   return _mgr->getOutboundTotal() > 0;
 }

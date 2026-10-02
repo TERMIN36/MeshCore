@@ -53,6 +53,7 @@ public:
   uint16_t getBattMilliVolts() override {
     analogReadResolution(10);
     digitalWrite(PIN_ADC_CTRL, adc_active_state);
+    delay(10);
 
     uint32_t raw = 0;
     for (int i = 0; i < 8; i++) {

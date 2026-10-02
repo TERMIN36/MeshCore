@@ -33,6 +33,6 @@ public:
   int getFreeCount() const override;
   mesh::Packet* getOutboundByIdx(int i) override;
   mesh::Packet* removeOutboundByIdx(int i) override;
-  void queueInbound(mesh::Packet* packet, uint32_t scheduled_for) override;
+  bool queueInbound(mesh::Packet* packet, uint32_t scheduled_for) override;
   mesh::Packet* getNextInbound(uint32_t now) override;
 };

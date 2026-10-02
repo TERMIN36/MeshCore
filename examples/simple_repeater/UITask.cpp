@@ -74,7 +74,6 @@ void UITask::renderBatteryIndicator() {
 }
 
 void UITask::renderCurrScreen() {
-  char tmp[80];
   if (millis() < _started_at + BOOT_SCREEN_MILLIS) { // boot screen
     // meshcore logo
     _display->setColor(UIColor::corp_blue);
@@ -111,61 +110,127 @@ void UITask::renderCurrScreen() {
     uint16_t poffWidth = _display->getTextWidth(poweroff_string);
     _display->setCursor((_display->width() - poffWidth) / 2, 48);
     _display->drawTextCentered(_display->width()/2, 48, poweroff_string);
+  } else if (_page == 1) {
+    renderWifiScreen();
   } else {
-    _display->setCursor(0, 0);
-    _display->setTextSize(1);
-    _display->setColor(UIColor::primary_txt);
-    _display->print(_node_prefs->node_name);
-    renderBatteryIndicator();
-
-    // freq / sf
-    _display->setCursor(0, 20);
-    sprintf(tmp, "FREQ: %06.3f SF%d", _node_prefs->freq, _node_prefs->sf);
-    _display->print(tmp);
-
-    // bw / cr
-    _display->setCursor(0, 30);
-    sprintf(tmp, "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
-    _display->print(tmp);
-
-    _display->setCursor(0, 40);
-    if (_board->canControlLoRaFemLna()) {
-      sprintf(tmp, "LNA: %s  NF: %d", _board->isLoRaFemLnaEnabled() ? "on" : "off",
-              radio_driver.getNoiseFloor());
-    } else {
-      sprintf(tmp, "LNA: n/a  NF: %d", radio_driver.getNoiseFloor());
-    }
-    _display->print(tmp);
+    renderStatusScreen();
   }
 }
 
-void UITask::loop() {
+void UITask::renderStatusScreen() {
+  char tmp[80];
+  _display->setCursor(0, 0);
+  _display->setTextSize(1);
+  _display->setColor(UIColor::primary_txt);
+  _display->print(_node_prefs->node_name);
+  renderBatteryIndicator();
+
+  // freq / sf
+  _display->setCursor(0, 20);
+  sprintf(tmp, "FREQ: %06.3f SF%d", _node_prefs->freq, _node_prefs->sf);
+  _display->print(tmp);
+
+  // bw / cr
+  _display->setCursor(0, 30);
+  sprintf(tmp, "BW: %03.2f CR: %d", _node_prefs->bw, _node_prefs->cr);
+  _display->print(tmp);
+
+  _display->setCursor(0, 40);
+  if (_board->canControlLoRaFemLna()) {
+    sprintf(tmp, "LNA: %s  NF: %d", _board->isLoRaFemLnaEnabled() ? "on" : "off",
+            radio_driver.getNoiseFloor());
+  } else {
+    sprintf(tmp, "LNA: n/a  NF: %d", radio_driver.getNoiseFloor());
+  }
+  _display->print(tmp);
+  _display->setCursor(0, 52);
+  if (_node_prefs->mqtt_enabled) {
+    _display->print(the_mesh.mqttBridgeUp() ? "MQTT: up" : "MQTT: down");
+  } else if (_board->canControlLoRaFemLna()) {
+    _display->print("3x: LNA");
+  } else {
+    _display->print("click: WiFi");
+  }
+}
+
+void UITask::renderWifiScreen() {
+  _display->setCursor(0, 0);
+  _display->setTextSize(1);
+  _display->setColor(UIColor::primary_txt);
+  _display->print("WiFi");
+  renderBatteryIndicator();
+
+  _display->setCursor(0, 16);
+  _display->print(_node_prefs->wifi_enabled ? "state: on" : "state: off");
+
+  _display->setCursor(0, 28);
+  if (_node_prefs->wifi_ssid[0]) {
+    char ssid[33];
+    strncpy(ssid, _node_prefs->wifi_ssid, sizeof(ssid) - 1);
+    ssid[sizeof(ssid) - 1] = 0;
+    while (ssid[0] && _display->getTextWidth(ssid) > _display->width()) {
+      ssid[strlen(ssid) - 1] = 0;
+    }
+    _display->print(ssid);
+  } else {
+    _display->print("ssid: -");
+  }
+
+  if (_node_prefs->wifi_enabled) {
+    char ip[16];
+    _display->setCursor(0, 40);
+    if (the_mesh.copyWifiAddress(ip, sizeof(ip))) _display->print(ip);
+    else _display->print("...");
+  }
+
+  _display->setCursor(0, 52);
+  _display->print("3x: on/off");
+}
+
+void UITask::showNextPage() {
+  if (!_display->isOn()) _display->turnOn();
+  _auto_off = millis() + AUTO_OFF_MILLIS;
+  // Splash and the power-off frame own the panel until they finish.
+  if (_powering_off_at == 0 && millis() >= _started_at + BOOT_SCREEN_MILLIS) {
+    _page = _page == 0 ? 1 : 0;
+  }
+  _next_refresh = 0;
+}
+
+void UITask::pollButton() {
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
   int ev = user_btn.check();
-  if (ev == BUTTON_EVENT_CLICK) {
-    if (_display->isOn()) {
-      // TODO: any action ?
-    } else {
-      _display->turnOn();
-    }
-    _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
-  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
+  // A short press is a click. A bouncy press is often reported as a double
+  // click, and that used to be ignored, so the WiFi page never appeared.
+  // E-ink stays visually on after auto-off, so a click must change the page
+  // even when the driver already considers the panel off.
+  if (ev == BUTTON_EVENT_CLICK || ev == BUTTON_EVENT_DOUBLE_CLICK) {
+    showNextPage();
+  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK && _powering_off_at == 0) {
     _display->turnOn();
     _auto_off = millis() + AUTO_OFF_MILLIS;
-    if (_board->canControlLoRaFemLna()) {
+    if (_page == 1) {
+      _node_prefs->wifi_enabled = _node_prefs->wifi_enabled ? 0 : 1;
+      the_mesh.savePrefs();
+      the_mesh.applyWifiConfig();
+    } else if (_board->canControlLoRaFemLna()) {
       bool enable = !_board->isLoRaFemLnaEnabled();
       if (_board->setLoRaFemLnaEnabled(enable)) {
         _node_prefs->radio_fem_rxgain = enable ? 1 : 0;
         the_mesh.savePrefs();
-        _next_refresh = 0;
       }
     }
+    _next_refresh = 0;
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
       _display->turnOn();
       Serial.println("Powering Off");
       _powering_off_at = millis() + POWEROFF_DELAY; 
   }
 #endif
+}
+
+void UITask::loop() {
+  pollButton();
 
   if (_display->isOn()) {
     if (millis() >= _next_refresh) {

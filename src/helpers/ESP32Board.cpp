@@ -11,6 +11,8 @@
 
 #include <SPIFFS.h>
 
+extern "C" void repeaterWebStop() __attribute__((weak));
+
 bool ESP32Board::startOTAUpdate(const char* id, char reply[]) {
   inhibit_sleep = true;   // prevent sleep during OTA
   WiFi.softAP("MeshCore-OTA", NULL);
@@ -22,6 +24,8 @@ bool ESP32Board::startOTAUpdate(const char* id, char reply[]) {
   sprintf(id_buf, "%s (%s)", id, getManufacturerName());
   static char home_buf[90];
   sprintf(home_buf, "<H2>Hi! I am a MeshCore Repeater. ID: %s</H2>", id);
+
+  if (repeaterWebStop) repeaterWebStop();
 
   AsyncWebServer* server = new AsyncWebServer(80);
 

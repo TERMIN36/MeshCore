@@ -96,7 +96,7 @@ public:
   virtual int getFreeCount() const = 0;
   virtual Packet* getOutboundByIdx(int i) = 0;
   virtual Packet* removeOutboundByIdx(int i) = 0;
-  virtual void queueInbound(Packet* packet, uint32_t scheduled_for) = 0;
+  virtual bool queueInbound(Packet* packet, uint32_t scheduled_for) = 0;
   virtual Packet* getNextInbound(uint32_t now) = 0;
 };
 
@@ -161,6 +161,10 @@ protected:
   virtual void logRx(Packet* packet, int len, float score) { }   // hooks for custom logging
   virtual void logTx(Packet* packet, int len) { }
   virtual void logTxFail(Packet* packet, int len) { }
+  // Radio send has been attempted. The packet is still valid; airtime may still be running.
+  virtual void onTxAttempt(Packet* packet) { (void)packet; }
+  // Retransmit is decided and the packet is final. Called before the radio delay.
+  virtual void onForward(Packet* packet) { (void)packet; }
   virtual const char* getLogDateTime() { return ""; }
 
   virtual float getAirtimeBudgetFactor() const;

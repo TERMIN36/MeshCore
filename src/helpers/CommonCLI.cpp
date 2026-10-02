@@ -28,6 +28,15 @@ static bool isValidName(const char *n) {
   return true;
 }
 
+static bool mqttTunnelOk(const char* tunnel) {
+  if (!tunnel || !tunnel[0]) return true;
+  if (strlen(tunnel) >= 65) return false;
+  for (const char* p = tunnel; *p; p++) {
+    if (*p == '+' || *p == '#' || *p <= ' ') return false;
+  }
+  return true;
+}
+
 void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   if (fs->exists("/prefs.json")) {
 #if defined(RP2040_PLATFORM)
@@ -259,13 +268,18 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
         if (hidden > 0) sprintf(dp, "\n> +%d", hidden);
       }
     } else if (strcmp(command, "clock pull") == 0) {
-      if (!clockNodesConfigured(_prefs->clock_nodes)) {
+      if (_callbacks->ntpHoldsClock()) {
+        strcpy(reply, "ERR: ntp holds the clock");
+      } else if (!clockNodesConfigured(_prefs->clock_nodes)) {
         strcpy(reply, "ERR: clock.node is off");
       } else if (_callbacks->pullClock()) {
         strcpy(reply, "OK");
       } else {
         strcpy(reply, "ERR: no direct path yet");
       }
+    } else if (strcmp(command, "ntp sync") == 0) {
+      if (_callbacks->syncNtp()) strcpy(reply, "OK - waiting for server");
+      else strcpy(reply, "ERR: ntp unavailable");
     } else if (memcmp(command, "clock", 5) == 0) {
       uint32_t now = getRTCClock()->getCurrentTime();
       DateTime dt = DateTime(now);
@@ -501,6 +515,19 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
     } else {
       strcpy(reply, "Unknown command");
     }
+}
+
+static bool ntpServerOk(const char* value) {
+  if (!value || !value[0]) return false;
+  size_t n = strlen(value);
+  if (n >= 64) return false;
+  for (size_t i = 0; i < n; i++) {
+    char c = value[i];
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '.' || c == '-' || c == ':';
+    if (!ok) return false;
+  }
+  return true;
 }
 
 void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* reply) {
@@ -905,6 +932,143 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       }
     }
   #endif
+  } else if (memcmp(config, "mqtt.enabled ", 13) == 0) {
+    _prefs->mqtt_enabled = memcmp(&config[13], "on", 2) == 0;
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "mqtt.tunnel ", 12) == 0) {
+    const char* value = &config[12];
+    if (!mqttTunnelOk(value)) {
+      strcpy(reply, "Error: one tunnel, no wildcards");
+    } else {
+      StrHelper::strncpy(_prefs->mqtt_tunnel, value, sizeof(_prefs->mqtt_tunnel));
+      savePrefs();
+      _callbacks->applyMqttConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "mqtt.host ", 10) == 0) {
+    if (strlen(&config[10]) >= sizeof(_prefs->mqtt_host)) {
+      strcpy(reply, "Error: host too long");
+    } else {
+      StrHelper::strncpy(_prefs->mqtt_host, &config[10], sizeof(_prefs->mqtt_host));
+      savePrefs();
+      _callbacks->applyMqttConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "mqtt.port ", 10) == 0) {
+    uint32_t port = _atoi(&config[10]);
+    if (port < 1 || port > 65535) {
+      strcpy(reply, "Error: port 1-65535");
+    } else {
+      _prefs->mqtt_port = (uint16_t)port;
+      savePrefs();
+      _callbacks->applyMqttConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "mqtt.user ", 10) == 0) {
+    if (strlen(&config[10]) >= sizeof(_prefs->mqtt_user)) {
+      strcpy(reply, "Error: user too long");
+    } else {
+      StrHelper::strncpy(_prefs->mqtt_user, &config[10], sizeof(_prefs->mqtt_user));
+      savePrefs();
+      _callbacks->applyMqttConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "mqtt.pass ", 10) == 0) {
+    if (strlen(&config[10]) >= sizeof(_prefs->mqtt_pass)) {
+      strcpy(reply, "Error: password too long");
+    } else {
+      StrHelper::strncpy(_prefs->mqtt_pass, &config[10], sizeof(_prefs->mqtt_pass));
+      savePrefs();
+      _callbacks->applyMqttConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "wifi.ssid ", 10) == 0) {
+    if (strlen(&config[10]) >= sizeof(_prefs->wifi_ssid)) {
+      strcpy(reply, "Error: ssid too long");
+    } else {
+      StrHelper::strncpy(_prefs->wifi_ssid, &config[10], sizeof(_prefs->wifi_ssid));
+      savePrefs();
+      _callbacks->applyWifiConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (strcmp(config, "wifi.password") == 0) {
+    _prefs->wifi_wpass[0] = 0;
+    savePrefs();
+    _callbacks->applyWifiConfig();
+    strcpy(reply, "OK");
+  } else if (memcmp(config, "wifi.password ", 14) == 0) {
+    if (strlen(&config[14]) >= sizeof(_prefs->wifi_wpass)) {
+      strcpy(reply, "Error: password too long");
+    } else {
+      StrHelper::strncpy(_prefs->wifi_wpass, &config[14], sizeof(_prefs->wifi_wpass));
+      savePrefs();
+      _callbacks->applyWifiConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "wifi ", 5) == 0) {
+    const char* value = &config[5];
+    if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+      strcpy(reply, "Error: on or off");
+    } else {
+      _prefs->wifi_enabled = strcmp(value, "on") == 0;
+      savePrefs();
+      _callbacks->applyWifiConfig();
+      if (_prefs->wifi_enabled && !_prefs->wifi_ssid[0]) strcpy(reply, "OK - set wifi.ssid");
+      else strcpy(reply, "OK");
+    }
+  } else if (strcmp(config, "ntp.server") == 0) {
+    strcpy(reply, "Error: bad server");
+  } else if (memcmp(config, "ntp.server ", 11) == 0) {
+    const char* value = &config[11];
+    if (!ntpServerOk(value)) {
+      strcpy(reply, "Error: bad server");
+    } else {
+      StrHelper::strncpy(_prefs->ntp_server, value, sizeof(_prefs->ntp_server));
+      savePrefs();
+      _callbacks->applyNtpConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "ntp ", 4) == 0) {
+    const char* value = &config[4];
+    char mode[8];
+    size_t i = 0;
+    while (*value && *value != ' ' && i + 1 < sizeof(mode)) mode[i++] = *value++;
+    mode[i] = 0;
+    while (*value == ' ') value++;
+    if (strcmp(mode, "on") != 0 && strcmp(mode, "off") != 0) {
+      strcpy(reply, "Error: on or off");
+    } else if (*value && !ntpServerOk(value)) {
+      strcpy(reply, "Error: bad server");
+    } else {
+      if (*value) StrHelper::strncpy(_prefs->ntp_server, value, sizeof(_prefs->ntp_server));
+      else if (strcmp(mode, "on") == 0 && !_prefs->ntp_server[0]) strcpy(_prefs->ntp_server, "pool.ntp.org");
+      _prefs->ntp_enabled = strcmp(mode, "on") == 0;
+      savePrefs();
+      _callbacks->applyNtpConfig();
+      if (_prefs->ntp_enabled && !_prefs->wifi_enabled) strcpy(reply, "OK - wifi is off");
+      else strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "mqtt.tls ", 9) == 0) {
+    _prefs->mqtt_tls = memcmp(&config[9], "on", 2) == 0;
+    savePrefs();
+    _callbacks->applyMqttConfig();
+    if (_prefs->mqtt_tls && _prefs->mqtt_port == 1883) {
+      strcpy(reply, "OK - use mqtt.port 8883 if the broker expects TLS");
+    } else {
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "mqtt.ant ", 9) == 0) {
+    float meters = (float)atof(&config[9]);
+    if (meters < 0) {
+      strcpy(reply, "Error: antenna height >= 0");
+    } else {
+      _prefs->mqtt_ant_m = meters;
+      savePrefs();
+      _callbacks->applyMqttConfig();
+      strcpy(reply, "OK");
+    }
   } else {
     strcpy(reply, "unknown config: ");
     StrHelper::strncpy(&reply[16], config, 160-17);
@@ -1088,6 +1252,36 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (tmp == reply) {
       sprintf(reply, "No extra SF configured");
     }
+  } else if (strcmp(config, "mqtt") == 0) {
+    _callbacks->formatMqttStatus(reply);
+  } else if (strcmp(config, "mqtt.enabled") == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_enabled ? "on" : "off");
+  } else if (strcmp(config, "mqtt.tunnel") == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_tunnel);
+  } else if (strcmp(config, "mqtt.host") == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_host);
+  } else if (strcmp(config, "mqtt.port") == 0) {
+    sprintf(reply, "> %u", (unsigned)_prefs->mqtt_port);
+  } else if (strcmp(config, "mqtt.user") == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_user);
+  } else if (strcmp(config, "mqtt.pass") == 0) {
+    strcpy(reply, _prefs->mqtt_pass[0] ? "> set" : "> off");
+  } else if (strcmp(config, "mqtt.ant") == 0) {
+    sprintf(reply, "> %s", StrHelper::ftoa(_prefs->mqtt_ant_m));
+  } else if (strcmp(config, "mqtt.tls") == 0) {
+    sprintf(reply, "> %s", _prefs->mqtt_tls ? "on" : "off");
+  } else if (strcmp(config, "mqtt.cert") == 0) {
+    strcpy(reply, _callbacks->hasMqttCert() ? "> set" : "> off");
+  } else if (strcmp(config, "wifi") == 0) {
+    _callbacks->formatWifiStatus(reply);
+  } else if (strcmp(config, "wifi.ssid") == 0) {
+    sprintf(reply, "> %s", _prefs->wifi_ssid);
+  } else if (strcmp(config, "wifi.password") == 0) {
+    strcpy(reply, _prefs->wifi_wpass[0] ? "> set" : "> off");
+  } else if (strcmp(config, "ntp") == 0) {
+    _callbacks->formatNtpStatus(reply);
+  } else if (strcmp(config, "ntp.server") == 0) {
+    sprintf(reply, "> %s", _prefs->ntp_server);
   } else {
     sprintf(reply, "??: %s", config);
   }
