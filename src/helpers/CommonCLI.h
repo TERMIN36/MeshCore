@@ -90,6 +90,15 @@ public:
   // NTP over station WiFi. Empty server means unset; enabling fills pool.ntp.org.
   uint8_t ntp_enabled = 0;
   char ntp_server[64] = {};
+  // MeshCoreTel site uplink. Independent of the MQTT bridge. Empty IATA stays offline.
+  // Port 0 means the site defaults: mqtt.meshcoretel.ru:1883, meshcore/meshcore.
+  uint8_t tel_enabled = 0;
+  uint8_t tel_tx = 0;
+  uint16_t tel_port = 0;
+  char tel_iata[8] = {};
+  char tel_host[64] = {};
+  char tel_user[32] = {};
+  char tel_pass[40] = {};
 
 private:
   class RadioPrefs : public ConfigSerializer {
@@ -229,6 +238,23 @@ private:
   };
   NtpPrefs ntp;
 
+  class TelPrefs : public ConfigSerializer {
+    NodePrefs* _parent;
+  protected:
+    void structure() override {
+      def("en", _parent->tel_enabled);
+      def("tx", _parent->tel_tx);
+      def("port", _parent->tel_port);
+      def("iata", _parent->tel_iata, sizeof(_parent->tel_iata));
+      def("host", _parent->tel_host, sizeof(_parent->tel_host));
+      def("user", _parent->tel_user, sizeof(_parent->tel_user));
+      def("pass", _parent->tel_pass, sizeof(_parent->tel_pass));
+    }
+  public:
+    TelPrefs(NodePrefs* parent) : _parent(parent) {}
+  };
+  TelPrefs tel;
+
 protected:
   void structure() override {
     def("name", node_name, sizeof(node_name));
@@ -249,6 +275,7 @@ protected:
     def("mqtt", mqtt);
     def("wifi", wifi);
     def("ntp", ntp);
+    def("tel", tel);
     for (int i = 0; i < CLOCK_NODE_MAX; i++) {
       char key[8];
       clockNodePrefKey(key, sizeof(key), i);
@@ -257,7 +284,7 @@ protected:
   }
 
 public:
-  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this), mqtt(this), wifi(this), ntp(this) {
+  NodePrefs() : ConfigSerializer(), bridge(this), gps(this), radio(this), power(this), repeat(this), room(this), mqtt(this), wifi(this), ntp(this), tel(this) {
     node_name[0] = 0;
     password[0] = 0;
     guest_password[0] = 0;
@@ -346,6 +373,14 @@ public:
 
   virtual void formatMqttStatus(char* reply) {
     if (reply) strcpy(reply, "> off");
+  }
+
+  virtual void applyTelConfig() {
+    // Repeater opens the MeshCoreTel uplink. Other roles ignore this.
+  }
+
+  virtual void formatTelStatus(char* reply) {
+    if (reply) strcpy(reply, "> unsupported");
   }
 
   virtual bool hasMqttCert() const { return false; }

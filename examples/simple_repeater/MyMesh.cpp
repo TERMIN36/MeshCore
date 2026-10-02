@@ -495,6 +495,8 @@ void MyMesh::logRx(mesh::Packet *pkt, int len, float score) {
     bridge.sendPacket(pkt);
   }
 #endif
+  _tel.onRadio(pkt, false, (int)_radio->getLastRSSI(), _radio->getLastSNR(), (int)(score * 1000),
+               (int)_radio->getEstAirtimeFor(len));
 
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
@@ -536,6 +538,7 @@ void MyMesh::logTx(mesh::Packet *pkt, int len) {
   }
 #endif
   offerMqttTx(pkt);
+  _tel.onRadio(pkt, true, (int)_radio->getLastRSSI(), _radio->getLastSNR(), -1, -1);
 
   if (_logging) {
     File f = openAppend(PACKET_LOG_FILE);
@@ -1065,6 +1068,7 @@ void MyMesh::begin(FILESYSTEM *fs) {
   _ntp.begin(&_prefs);
   _reach.begin(&_prefs);
   _mqtt.begin(&_prefs, _mgr, getRTCClock(), self_id.pub_key);
+  _tel.begin(&_prefs, getRTCClock(), self_id.pub_key);
   loadMqttCa();
 
   radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
@@ -1414,6 +1418,231 @@ bool MyMesh::applyMqttPanel(const char* host, uint16_t port, const char* user, c
   return true;
 }
 
+static void telBroker(const NodePrefs& prefs, char* host, size_t host_cap, uint16_t* port, char* user, size_t user_cap,
+                      char* pass, size_t pass_cap) {
+  const char* h = "mqtt.meshcoretel.ru";
+  const char* u = "meshcore";
+  const char* pw = "meshcore";
+  uint16_t po = 1883;
+  if (prefs.tel_port) {
+    po = prefs.tel_port;
+    if (prefs.tel_host[0]) h = prefs.tel_host;
+    u = prefs.tel_user;
+    pw = prefs.tel_pass;
+  }
+  if (host && host_cap) {
+    strncpy(host, h, host_cap - 1);
+    host[host_cap - 1] = 0;
+  }
+  if (user && user_cap) {
+    strncpy(user, u ? u : "", user_cap - 1);
+    user[user_cap - 1] = 0;
+  }
+  if (pass && pass_cap) {
+    strncpy(pass, pw ? pw : "", pass_cap - 1);
+    pass[pass_cap - 1] = 0;
+  }
+  if (port) *port = po;
+}
+
+static bool telHostOk(const char* host) {
+  if (!host || !host[0] || strlen(host) >= 64) return false;
+  for (const char* p = host; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-';
+    if (!ok) return false;
+  }
+  return true;
+}
+
+static bool cleanTelIata(const char* in, char* out, size_t out_n) {
+  if (!in || !out || out_n < 2) return false;
+  size_t n = 0;
+  for (; in[n]; n++) {
+    if (n >= 7 || n + 1 >= out_n) return false;
+    unsigned char c = (unsigned char)in[n];
+    if (c >= 'a' && c <= 'z') c = (unsigned char)(c - 'a' + 'A');
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return false;
+    out[n] = (char)c;
+  }
+  out[n] = 0;
+  return n >= 2 && strcmp(out, "UNSET") != 0;
+}
+
+bool MyMesh::applyTelPanel(bool enable, const char* iata, const char* host, uint16_t port, const char* user,
+                           const char* broker_pass, bool tx, char* reply, size_t reply_cap) {
+  char cleaned[8];
+  cleaned[0] = 0;
+  if (iata && iata[0] && !cleanTelIata(iata, cleaned, sizeof(cleaned))) {
+    copyReply(reply, reply_cap, "IATA: 2–7 букв или цифр");
+    return false;
+  }
+  if (!telHostOk(host)) {
+    copyReply(reply, reply_cap, "Укажите брокер");
+    return false;
+  }
+  if (port < 1) {
+    copyReply(reply, reply_cap, "Порт должен быть от 1 до 65535");
+    return false;
+  }
+  if (user && strlen(user) >= sizeof(_prefs.tel_user)) {
+    copyReply(reply, reply_cap, "Логин длиннее 31 символа");
+    return false;
+  }
+  if (broker_pass && strlen(broker_pass) >= sizeof(_prefs.tel_pass)) {
+    copyReply(reply, reply_cap, "Пароль брокера длиннее 39 символов");
+    return false;
+  }
+
+  StrHelper::strncpy(_prefs.tel_iata, cleaned, sizeof(_prefs.tel_iata));
+  StrHelper::strncpy(_prefs.tel_host, host, sizeof(_prefs.tel_host));
+  StrHelper::strncpy(_prefs.tel_user, user ? user : "", sizeof(_prefs.tel_user));
+  StrHelper::strncpy(_prefs.tel_pass, broker_pass ? broker_pass : "", sizeof(_prefs.tel_pass));
+  _prefs.tel_port = port;
+  _prefs.tel_enabled = enable ? 1 : 0;
+  _prefs.tel_tx = tx ? 1 : 0;
+  bool started_ntp = false;
+  if (enable && !_prefs.ntp_enabled) {
+    _prefs.ntp_enabled = 1;
+    if (!_prefs.ntp_server[0]) strcpy(_prefs.ntp_server, "pool.ntp.org");
+    started_ntp = true;
+  }
+  savePrefs();
+  applyTelConfig();
+  if (started_ntp) applyNtpConfig();
+  copyReply(reply, reply_cap, enable ? "MeshCoreTel включён" : "MeshCoreTel выключен");
+  return true;
+}
+
+static bool nodeNameOk(const char* name) {
+  if (!name || strlen(name) >= 32) return false;
+  for (const char* p = name; *p; p++) {
+    if (*p == '[' || *p == ']' || *p == '\\' || *p == ':' || *p == ',' || *p == '?' || *p == '*') return false;
+  }
+  return true;
+}
+
+bool MyMesh::applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t reply_cap) {
+  if (!(in.freq >= 150.0f && in.freq <= 2500.0f && in.bw >= 7.0f && in.bw <= 500.0f &&
+        in.sf >= 5 && in.sf <= 12 && in.cr >= 5 && in.cr <= 8)) {
+    copyReply(reply, reply_cap, "Частота 150–2500 МГц, полоса 7–500 кГц, SF 5–12, CR 4/5–4/8");
+    return false;
+  }
+  if (in.tx_dbm < -9 || in.tx_dbm > 30) {
+    copyReply(reply, reply_cap, "Мощность TX: от −9 до 30 дБм");
+    return false;
+  }
+  if (in.airtime < 0.0f || in.airtime > 9.0f) {
+    copyReply(reply, reply_cap, "Коэффициент эфира: от 0 до 9");
+    return false;
+  }
+  if (in.rx_delay < 0.0f || in.rx_delay > 20.0f || in.tx_delay < 0.0f || in.tx_delay > 2.0f ||
+      in.direct_tx_delay < 0.0f || in.direct_tx_delay > 2.0f) {
+    copyReply(reply, reply_cap, "Задержка RX 0–20, задержки TX 0–2");
+    return false;
+  }
+  if (in.flood_max > 64 || in.flood_max_unscoped > 64 || in.flood_max_advert > 64) {
+    copyReply(reply, reply_cap, "Максимум flood: от 0 до 64");
+    return false;
+  }
+  if (in.path_hash_mode > 2 || in.loop_detect > LOOP_DETECT_STRICT || in.multi_acks > 1 || in.agc_secs > 1020) {
+    copyReply(reply, reply_cap, "Неверные параметры политики радио");
+    return false;
+  }
+
+  bool fem_rx_fail = false;
+  bool fem_tx_fail = false;
+  if (in.fem_rx_set) {
+    if (!board.canControlLoRaFemLna() || !board.setLoRaFemLnaEnabled(in.fem_rx != 0)) fem_rx_fail = true;
+    else _prefs.radio_fem_rxgain = in.fem_rx ? 1 : 0;
+  }
+  if (in.fem_tx_set) {
+    if (!board.canControlLoRaFemPaGain() || !board.setLoRaFemPaGainEnabled(in.fem_tx != 0)) fem_tx_fail = true;
+    else _prefs.radio_fem_txgain = in.fem_tx ? 1 : 0;
+  }
+
+  _prefs.freq = in.freq;
+  _prefs.bw = in.bw;
+  _prefs.sf = in.sf;
+  _prefs.cr = in.cr;
+  _prefs.tx_power_dbm = in.tx_dbm;
+  _prefs.rx_boosted_gain = in.rx_gain ? 1 : 0;
+  _prefs.disable_fwd = in.forwarding ? 0 : 1;
+  _prefs.cad_enabled = in.cad ? 1 : 0;
+  _prefs.interference_threshold = in.interference;
+  _prefs.airtime_factor = in.airtime;
+  _prefs.rx_delay_base = in.rx_delay;
+  _prefs.tx_delay_factor = in.tx_delay;
+  _prefs.direct_tx_delay_factor = in.direct_tx_delay;
+  _prefs.flood_max = in.flood_max;
+  _prefs.flood_max_unscoped = in.flood_max_unscoped;
+  _prefs.flood_max_advert = in.flood_max_advert;
+  _prefs.path_hash_mode = in.path_hash_mode;
+  _prefs.loop_detect = in.loop_detect;
+  _prefs.multi_acks = in.multi_acks ? 1 : 0;
+  _prefs.agc_reset_interval = (uint8_t)(in.agc_secs / 4);
+
+  set_radio_at = 0;
+  revert_radio_at = 0;
+  radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  setTxPower(_prefs.tx_power_dbm);
+  bool rx_fail = _prefs.rx_boosted_gain && !setRxBoostedGain(true);
+  if (!_prefs.rx_boosted_gain) setRxBoostedGain(false);
+  savePrefs();
+
+  if (fem_rx_fail || fem_tx_fail || rx_fail) {
+    copyReply(reply, reply_cap, "Сохранено. Часть усилителей эта плата не применила");
+  } else {
+    copyReply(reply, reply_cap, "Настройки радио сохранены");
+  }
+  return true;
+}
+
+bool MyMesh::applyNodePanel(const RepeaterNodeForm& in, char* reply, size_t reply_cap) {
+  if (!nodeNameOk(in.name)) {
+    copyReply(reply, reply_cap, "В имени нельзя использовать [ ] \\ : , ? *");
+    return false;
+  }
+  if (strlen(in.owner) >= sizeof(_prefs.owner_info)) {
+    copyReply(reply, reply_cap, "Описание владельца длиннее 119 символов");
+    return false;
+  }
+  uint16_t mins = in.advert_mins;
+  if ((mins > 0 && mins < 60) || mins > 240) {
+    copyReply(reply, reply_cap, "Локальное объявление: 0 или 60–240 минут");
+    return false;
+  }
+  if ((in.flood_hours > 0 && in.flood_hours < 3) || in.flood_hours > 168) {
+    copyReply(reply, reply_cap, "Flood-объявление: 0 или 3–168 часов");
+    return false;
+  }
+  double lat = 0;
+  double lon = 0;
+  if (in.lat[0] || in.lon[0]) {
+    char* lat_end = nullptr;
+    char* lon_end = nullptr;
+    lat = strtod(in.lat, &lat_end);
+    lon = strtod(in.lon, &lon_end);
+    if (!in.lat[0] || !lat_end || *lat_end || lat < -90.0 || lat > 90.0 ||
+        !in.lon[0] || !lon_end || *lon_end || lon < -180.0 || lon > 180.0) {
+      copyReply(reply, reply_cap, "Широта −90…90, долгота −180…180");
+      return false;
+    }
+  }
+
+  StrHelper::strncpy(_prefs.node_name, in.name, sizeof(_prefs.node_name));
+  StrHelper::strncpy(_prefs.owner_info, in.owner, sizeof(_prefs.owner_info));
+  _prefs.node_lat = lat;
+  _prefs.node_lon = lon;
+  _prefs.advert_interval = (uint8_t)(mins / 2);
+  _prefs.flood_advert_interval = in.flood_hours;
+  savePrefs();
+  updateAdvertTimer();
+  updateFloodAdvertTimer();
+  copyReply(reply, reply_cap, "Настройки узла сохранены");
+  return true;
+}
+
 void MyMesh::disableMqtt() {
   if (_prefs.mqtt_enabled) {
     _prefs.mqtt_enabled = 0;
@@ -1468,6 +1697,25 @@ void MyMesh::formatMqttStatus(char* reply) {
     return;
   }
   _mqtt.formatStatus(reply, 160);
+}
+
+void MyMesh::applyTelConfig() {
+  _tel.applyConfig();
+}
+
+void MyMesh::formatTelStatus(char* reply) {
+  const char* label = "retry";
+  switch (_tel.phase()) {
+    case TelLink::Off: label = "off"; break;
+    case TelLink::NeedIata: label = "need iata"; break;
+    case TelLink::WaitWifi: label = "wait wifi"; break;
+    case TelLink::WaitTime: label = "wait time"; break;
+    case TelLink::Connecting: label = "conn"; break;
+    case TelLink::Up: label = "up"; break;
+    case TelLink::Retry: label = "retry"; break;
+  }
+  snprintf(reply, 160, "> %s iata:%s tx:%s", label, _prefs.tel_iata[0] ? _prefs.tel_iata : "-",
+           _prefs.tel_tx ? "on" : "off");
 }
 
 void MyMesh::applyWifiConfig() {
@@ -1803,6 +2051,22 @@ void MyMesh::fillRepeaterPage(RepeaterPageInfo& info) {
   if (!_prefs.mqtt_enabled) strncpy(info.mqtt, "выкл", sizeof(info.mqtt) - 1);
   else if (_mqtt.isUp()) strncpy(info.mqtt, "подключён", sizeof(info.mqtt) - 1);
   else strncpy(info.mqtt, "нет связи", sizeof(info.mqtt) - 1);
+  const char* tel_label = "повтор";
+  switch (_tel.phase()) {
+    case TelLink::Off: tel_label = "выкл"; break;
+    case TelLink::NeedIata: tel_label = "нужен IATA"; break;
+    case TelLink::WaitWifi: tel_label = "ждёт Wi‑Fi"; break;
+    case TelLink::WaitTime: tel_label = "ждёт время"; break;
+    case TelLink::Connecting: tel_label = "подключение"; break;
+    case TelLink::Up: tel_label = "подключён"; break;
+    case TelLink::Retry: tel_label = "повтор"; break;
+  }
+  strncpy(info.tel, tel_label, sizeof(info.tel) - 1);
+  strncpy(info.tel_iata, _prefs.tel_iata, sizeof(info.tel_iata) - 1);
+  telBroker(_prefs, info.tel_host, sizeof(info.tel_host), &info.tel_port, info.tel_user, sizeof(info.tel_user),
+            info.tel_pass, sizeof(info.tel_pass));
+  info.tel_enabled = _prefs.tel_enabled ? 1 : 0;
+  info.tel_tx = _prefs.tel_tx ? 1 : 0;
   if (_prefs.node_lat != 0.0 || _prefs.node_lon != 0.0) {
     snprintf(info.lat, sizeof(info.lat), "%.6f", _prefs.node_lat);
     snprintf(info.lon, sizeof(info.lon), "%.6f", _prefs.node_lon);
@@ -1855,6 +2119,15 @@ void MyMesh::fillRepeaterPage(RepeaterPageInfo& info) {
   }
 
   info.airtime_factor = _prefs.airtime_factor;
+  info.rx_delay = _prefs.rx_delay_base;
+  info.tx_delay = _prefs.tx_delay_factor;
+  info.direct_tx_delay = _prefs.direct_tx_delay_factor;
+  info.rx_gain = _prefs.rx_boosted_gain ? 1 : 0;
+  info.fem_rx = _prefs.radio_fem_rxgain ? 1 : 0;
+  info.fem_tx = _prefs.radio_fem_txgain ? 1 : 0;
+  info.fem_rx_ok = board.canControlLoRaFemLna() ? 1 : 0;
+  info.fem_tx_ok = board.canControlLoRaFemPaGain() ? 1 : 0;
+  strncpy(info.owner, _prefs.owner_info, sizeof(info.owner) - 1);
   info.cad = _prefs.cad_enabled;
   info.interference = _prefs.interference_threshold;
   info.agc_secs = (uint16_t)_prefs.agc_reset_interval * 4;
@@ -1949,6 +2222,30 @@ void MyMesh::loop() {
                         temp_c_x10,
                         getFirmwareVer());
   _mqtt.loop();
+  TelView tel_view{};
+  tel_view.enabled = _prefs.tel_enabled != 0;
+  tel_view.unix_time = getRTCClock()->getCurrentTime();
+  tel_view.time_ok = _prefs.time_valid && tel_view.unix_time >= 1735689600UL;
+  strncpy(tel_view.iata, _prefs.tel_iata, sizeof(tel_view.iata) - 1);
+  telBroker(_prefs, tel_view.host, sizeof(tel_view.host), &tel_view.port, tel_view.user, sizeof(tel_view.user),
+            tel_view.pass, sizeof(tel_view.pass));
+  strncpy(tel_view.name, _prefs.node_name, sizeof(tel_view.name) - 1);
+  const char* tel_model = board.getManufacturerName();
+  if (tel_model) strncpy(tel_view.model, tel_model, sizeof(tel_view.model) - 1);
+  strncpy(tel_view.firmware, getFirmwareVer(), sizeof(tel_view.firmware) - 1);
+  tel_view.freq = _prefs.freq;
+  tel_view.bw = _prefs.bw;
+  tel_view.sf = _prefs.sf;
+  tel_view.cr = _prefs.cr;
+  tel_view.battery_mv = batt_mv;
+  tel_view.uptime_secs = _ms->getMillis() / 1000;
+  tel_view.error_flags = _err_flags;
+  tel_view.queue_len = (uint32_t)_mgr->getOutboundTotal();
+  tel_view.noise_floor = _radio->getNoiseFloor();
+  tel_view.tx_air_secs = (uint32_t)(getTotalAirTime() / 1000);
+  tel_view.rx_air_secs = (uint32_t)(getReceiveAirTime() / 1000);
+  tel_view.recv_errors = radio_driver.getPacketsRecvErrors();
+  _tel.loop(tel_view);
 #ifdef WITH_BRIDGE
   bridge.loop();
 #endif
@@ -2001,5 +2298,6 @@ bool MyMesh::hasPendingWork() const {
 #endif
   if (_prefs.wifi_enabled && _prefs.wifi_ssid[0]) return true;
   if (_mqtt.blocksSleep()) return true;
+  if (_tel.blocksSleep()) return true;
   return _mgr->getOutboundTotal() > 0;
 }

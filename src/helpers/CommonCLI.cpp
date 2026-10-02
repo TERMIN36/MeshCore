@@ -28,6 +28,32 @@ static bool isValidName(const char *n) {
   return true;
 }
 
+static bool telIataOff(const char* value) {
+  return value && (strcmp(value, "off") == 0 || strcmp(value, "OFF") == 0 || strcmp(value, "UNSET") == 0);
+}
+
+static bool telArmClock(NodePrefs* prefs) {
+  if (!prefs || prefs->ntp_enabled) return false;
+  prefs->ntp_enabled = 1;
+  if (!prefs->ntp_server[0]) strcpy(prefs->ntp_server, "pool.ntp.org");
+  return true;
+}
+
+static bool telIataOk(const char* in, char* out, size_t out_n) {
+  if (!in || !out || out_n < 2) return false;
+  size_t n = 0;
+  for (; in[n]; n++) {
+    if (n >= 7 || n + 1 >= out_n) return false;
+    unsigned char c = (unsigned char)in[n];
+    if (c >= 'a' && c <= 'z') c = (unsigned char)(c - 'a' + 'A');
+    if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9'))) return false;
+    out[n] = (char)c;
+  }
+  out[n] = 0;
+  if (n < 2 || strcmp(out, "UNSET") == 0) return false;
+  return true;
+}
+
 static bool mqttTunnelOk(const char* tunnel) {
   if (!tunnel || !tunnel[0]) return true;
   if (strlen(tunnel) >= 65) return false;
@@ -932,6 +958,91 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       }
     }
   #endif
+  } else if (memcmp(config, "mqtt.iata ", 10) == 0 || memcmp(config, "tel.iata ", 9) == 0) {
+    const char* value = config[0] == 'm' ? &config[10] : &config[9];
+    if (telIataOff(value)) {
+      _prefs->tel_enabled = 0;
+      savePrefs();
+      _callbacks->applyTelConfig();
+      strcpy(reply, "OK");
+    } else {
+      char cleaned[8];
+      if (!telIataOk(value, cleaned, sizeof(cleaned))) {
+        strcpy(reply, "Error: iata 2-7 letters");
+      } else {
+        StrHelper::strncpy(_prefs->tel_iata, cleaned, sizeof(_prefs->tel_iata));
+        _prefs->tel_enabled = 1;
+        bool started_ntp = telArmClock(_prefs);
+        savePrefs();
+        _callbacks->applyTelConfig();
+        if (started_ntp) _callbacks->applyNtpConfig();
+        strcpy(reply, "OK");
+      }
+    }
+  } else if (memcmp(config, "tel.tx ", 7) == 0) {
+    const char* value = &config[7];
+    if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+      strcpy(reply, "Error: on or off");
+    } else {
+      _prefs->tel_tx = strcmp(value, "on") == 0;
+      savePrefs();
+      _callbacks->applyTelConfig();
+      strcpy(reply, "OK");
+    }
+  } else if (memcmp(config, "tel ", 4) == 0) {
+    const char* cursor = &config[4];
+    char mode[8];
+    size_t i = 0;
+    while (*cursor && *cursor != ' ' && i + 1 < sizeof(mode)) mode[i++] = *cursor++;
+    mode[i] = 0;
+    while (*cursor == ' ') cursor++;
+    if (strcmp(mode, "on") != 0 && strcmp(mode, "off") != 0) {
+      strcpy(reply, "Error: on or off");
+    } else {
+      bool bad = false;
+      bool set_iata = false;
+      char cleaned[8];
+      cleaned[0] = 0;
+      if (*cursor && *cursor != ' ') {
+        char raw[16];
+        size_t k = 0;
+        while (*cursor && *cursor != ' ' && k + 1 < sizeof(raw)) raw[k++] = *cursor++;
+        raw[k] = 0;
+        while (*cursor == ' ') cursor++;
+        if (strcmp(raw, "-") != 0) {
+          if (!telIataOk(raw, cleaned, sizeof(cleaned))) {
+            strcpy(reply, "Error: iata 2-7 letters");
+            bad = true;
+          } else {
+            set_iata = true;
+          }
+        }
+      }
+      bool set_tx = false;
+      bool tx_on = false;
+      if (!bad && *cursor) {
+        if (strcmp(cursor, "txon") == 0) {
+          set_tx = true;
+          tx_on = true;
+        } else if (strcmp(cursor, "txoff") == 0) {
+          set_tx = true;
+        } else {
+          strcpy(reply, "Error: txon or txoff");
+          bad = true;
+        }
+      }
+      if (!bad) {
+        if (set_iata) StrHelper::strncpy(_prefs->tel_iata, cleaned, sizeof(_prefs->tel_iata));
+        if (set_tx) _prefs->tel_tx = tx_on ? 1 : 0;
+        _prefs->tel_enabled = strcmp(mode, "on") == 0;
+        bool started_ntp = _prefs->tel_enabled && telArmClock(_prefs);
+        savePrefs();
+        _callbacks->applyTelConfig();
+        if (started_ntp) _callbacks->applyNtpConfig();
+        if (_prefs->tel_enabled && !_prefs->tel_iata[0]) strcpy(reply, "OK - set mqtt.iata");
+        else strcpy(reply, "OK");
+      }
+    }
   } else if (memcmp(config, "mqtt.enabled ", 13) == 0) {
     _prefs->mqtt_enabled = memcmp(&config[13], "on", 2) == 0;
     savePrefs();
@@ -989,20 +1100,22 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       strcpy(reply, "Error: ssid too long");
     } else {
       StrHelper::strncpy(_prefs->wifi_ssid, &config[10], sizeof(_prefs->wifi_ssid));
+      if (_prefs->wifi_ssid[0]) _prefs->wifi_enabled = 1;
       savePrefs();
       _callbacks->applyWifiConfig();
       strcpy(reply, "OK");
     }
-  } else if (strcmp(config, "wifi.password") == 0) {
+  } else if (strcmp(config, "wifi.password") == 0 || strcmp(config, "wifi.pwd") == 0) {
     _prefs->wifi_wpass[0] = 0;
     savePrefs();
     _callbacks->applyWifiConfig();
     strcpy(reply, "OK");
-  } else if (memcmp(config, "wifi.password ", 14) == 0) {
-    if (strlen(&config[14]) >= sizeof(_prefs->wifi_wpass)) {
+  } else if (memcmp(config, "wifi.password ", 14) == 0 || memcmp(config, "wifi.pwd ", 9) == 0) {
+    const char* value = config[6] == 'w' ? &config[9] : &config[14];
+    if (strlen(value) >= sizeof(_prefs->wifi_wpass)) {
       strcpy(reply, "Error: password too long");
     } else {
-      StrHelper::strncpy(_prefs->wifi_wpass, &config[14], sizeof(_prefs->wifi_wpass));
+      StrHelper::strncpy(_prefs->wifi_wpass, value, sizeof(_prefs->wifi_wpass));
       savePrefs();
       _callbacks->applyWifiConfig();
       strcpy(reply, "OK");
@@ -1252,6 +1365,12 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     if (tmp == reply) {
       sprintf(reply, "No extra SF configured");
     }
+  } else if (strcmp(config, "tel") == 0) {
+    _callbacks->formatTelStatus(reply);
+  } else if (strcmp(config, "tel.iata") == 0 || strcmp(config, "mqtt.iata") == 0) {
+    sprintf(reply, "> %s", _prefs->tel_iata);
+  } else if (strcmp(config, "tel.tx") == 0) {
+    sprintf(reply, "> %s", _prefs->tel_tx ? "on" : "off");
   } else if (strcmp(config, "mqtt") == 0) {
     _callbacks->formatMqttStatus(reply);
   } else if (strcmp(config, "mqtt.enabled") == 0) {
@@ -1276,7 +1395,7 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     _callbacks->formatWifiStatus(reply);
   } else if (strcmp(config, "wifi.ssid") == 0) {
     sprintf(reply, "> %s", _prefs->wifi_ssid);
-  } else if (strcmp(config, "wifi.password") == 0) {
+  } else if (strcmp(config, "wifi.password") == 0 || strcmp(config, "wifi.pwd") == 0) {
     strcpy(reply, _prefs->wifi_wpass[0] ? "> set" : "> off");
   } else if (strcmp(config, "ntp") == 0) {
     _callbacks->formatNtpStatus(reply);

@@ -39,6 +39,11 @@ struct RepeaterPageInfo {
   char ip[16];
   char ntp_server[64];
   char mqtt[24];
+  char tel[24];
+  char tel_iata[8];
+  char tel_host[64];
+  char tel_user[32];
+  char tel_pass[40];
   char lat[16];
   char lon[16];
   char clock_text[32];
@@ -47,14 +52,23 @@ struct RepeaterPageInfo {
   char mqtt_tcp[24];
   char mqtt_user[32];
   char mqtt_tunnel[65];
+  char owner[120];
   float freq;
   float bw;
   float airtime_factor;
+  float rx_delay;
+  float tx_delay;
+  float direct_tx_delay;
   float mqtt_ant_m;
   uint8_t sf;
   uint8_t cr;
   int8_t tx_dbm;
   uint8_t forwarding;
+  uint8_t rx_gain;
+  uint8_t fem_rx;
+  uint8_t fem_tx;
+  uint8_t fem_rx_ok;
+  uint8_t fem_tx_ok;
   uint8_t time_valid;
   uint8_t ntp_enabled;
   uint8_t ntp_state;
@@ -67,6 +81,9 @@ struct RepeaterPageInfo {
   uint8_t flood_max_advert;
   uint8_t multi_acks;
   uint8_t mqtt_enabled;
+  uint8_t tel_enabled;
+  uint8_t tel_tx;
+  uint16_t tel_port;
   uint8_t mqtt_tls;
   uint8_t mqtt_cert;
   uint8_t clock_count;
@@ -97,6 +114,43 @@ struct RepeaterPageInfo {
   uint32_t recv_errors;
   RepeaterClockSource clocks[REPEATER_PAGE_CLOCKS];
   RepeaterNeighbour neighbours[REPEATER_PAGE_NEIGHBOURS];
+};
+
+// Posted from the status page and applied on the main loop.
+struct RepeaterRadioForm {
+  float freq;
+  float bw;
+  float airtime;
+  float rx_delay;
+  float tx_delay;
+  float direct_tx_delay;
+  int8_t tx_dbm;
+  uint8_t sf;
+  uint8_t cr;
+  uint8_t rx_gain;
+  uint8_t fem_rx;
+  uint8_t fem_tx;
+  uint8_t fem_rx_set;
+  uint8_t fem_tx_set;
+  uint8_t forwarding;
+  uint8_t cad;
+  uint8_t interference;
+  uint8_t flood_max;
+  uint8_t flood_max_unscoped;
+  uint8_t flood_max_advert;
+  uint8_t path_hash_mode;
+  uint8_t loop_detect;
+  uint8_t multi_acks;
+  uint16_t agc_secs;
+};
+
+struct RepeaterNodeForm {
+  char name[32];
+  char owner[120];
+  char lat[16];
+  char lon[16];
+  uint16_t advert_mins;
+  uint8_t flood_hours;
 };
 
 // HTTP status page. Starts once the station has an address, stops when WiFi is off, and binds again if the address changes.

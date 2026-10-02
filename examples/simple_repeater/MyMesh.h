@@ -42,6 +42,7 @@
 #include "NtpClock.h"
 #include "MqttReach.h"
 #include "RepeaterWeb.h"
+#include "TelUplink.h"
 
 #ifdef WITH_BRIDGE
 extern AbstractBridge* bridge;
@@ -136,6 +137,7 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   ESPNowBridge bridge;
 #endif
   MqttBridge _mqtt;
+  TelUplink _tel;
   WifiStation _wifi;
   NtpClock _ntp;
   MqttReach _reach;
@@ -270,9 +272,15 @@ public:
   void clearStats() override;
   void applyMqttConfig() override;
   void formatMqttStatus(char* reply) override;
+  void applyTelConfig() override;
+  void formatTelStatus(char* reply) override;
   bool applyMqttPanel(const char* host, uint16_t port, const char* user, const char* pass, bool set_pass,
                       const char* pem, size_t pem_len, char* reply, size_t reply_cap);
   void disableMqtt();
+  bool applyTelPanel(bool enable, const char* iata, const char* host, uint16_t port, const char* user, const char* broker_pass,
+                     bool tx, char* reply, size_t reply_cap);
+  bool applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t reply_cap);
+  bool applyNodePanel(const RepeaterNodeForm& in, char* reply, size_t reply_cap);
   void applyWifiConfig() override;
   void formatWifiStatus(char* reply) override;
   void applyNtpConfig() override;

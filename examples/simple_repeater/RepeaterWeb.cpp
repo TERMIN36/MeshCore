@@ -19,7 +19,7 @@ extern MyMesh the_mesh;
 #include <Update.h>
 #endif
 
-static const size_t PAGE_BYTES = 40960;
+static const size_t PAGE_BYTES = 57344;
 static const size_t LIVE_HTML_BYTES = 20480;
 static const size_t LIVE_JSON_BYTES = 24576;
 
@@ -63,10 +63,57 @@ static std::atomic<uint32_t> mqtt_seq{0};
 static std::atomic<uint32_t> mqtt_off_seq{0};
 static std::atomic<uint8_t> mqtt_off{0};
 static char mqtt_note[120];
+static char tel_note[120];
+
+struct TelJob {
+  char iata[8];
+  char host[64];
+  char user[32];
+  char bpass[40];
+  uint16_t port;
+  uint8_t enable;
+  uint8_t tx;
+  uint32_t seq;
+};
+
+static std::atomic<TelJob*> tel_job{nullptr};
+static std::atomic<uint32_t> tel_seq{0};
+static std::atomic<uint8_t> tel_hold{0};
+static uint8_t tel_hold_en;
+static uint8_t tel_hold_tx;
+static uint16_t tel_hold_port;
+static char tel_hold_iata[8];
+static char tel_hold_host[64];
+static char tel_hold_user[32];
+static char tel_hold_bpass[40];
+
+static char radio_note[120];
+static char node_note[120];
+static std::atomic<RepeaterRadioForm*> radio_job{nullptr};
+static std::atomic<RepeaterNodeForm*> node_job{nullptr};
+static std::atomic<uint8_t> radio_hold{0};
+static std::atomic<uint8_t> node_hold{0};
+static RepeaterRadioForm radio_hold_form;
+static RepeaterNodeForm node_hold_form;
 
 static void setMqttNote(const char* text) {
   strncpy(mqtt_note, text ? text : "", sizeof(mqtt_note) - 1);
   mqtt_note[sizeof(mqtt_note) - 1] = 0;
+}
+
+static void setTelNote(const char* text) {
+  strncpy(tel_note, text ? text : "", sizeof(tel_note) - 1);
+  tel_note[sizeof(tel_note) - 1] = 0;
+}
+
+static void setRadioNote(const char* text) {
+  strncpy(radio_note, text ? text : "", sizeof(radio_note) - 1);
+  radio_note[sizeof(radio_note) - 1] = 0;
+}
+
+static void setNodeNote(const char* text) {
+  strncpy(node_note, text ? text : "", sizeof(node_note) - 1);
+  node_note[sizeof(node_note) - 1] = 0;
 }
 
 static void syncSession() {
@@ -331,6 +378,45 @@ static void copyCommand(char* dest, size_t cap, const String& value) {
   dest[n] = 0;
 }
 
+static void serviceTelJob() {
+  TelJob* job = tel_job.exchange(nullptr);
+  if (!job) return;
+  char reply[120];
+  reply[0] = 0;
+  the_mesh.applyTelPanel(job->enable != 0, job->iata, job->host, job->port, job->user, job->bpass, job->tx != 0, reply,
+                         sizeof(reply));
+  setTelNote(reply[0] ? reply : "Настройки не применены");
+  tel_hold.store(0, std::memory_order_release);
+  free(job);
+  last_snapshot_ms = 0;
+}
+
+static void serviceRadioJob() {
+  RepeaterRadioForm* job = radio_job.exchange(nullptr);
+  if (!job) return;
+  char reply[120];
+  reply[0] = 0;
+  the_mesh.applyRadioPanel(*job, reply, sizeof(reply));
+  setRadioNote(reply[0] ? reply : "Настройки радио не применены");
+  free(job);
+  publishSnapshot();
+  last_snapshot_ms = millis();
+  radio_hold.store(0, std::memory_order_release);
+}
+
+static void serviceNodeJob() {
+  RepeaterNodeForm* job = node_job.exchange(nullptr);
+  if (!job) return;
+  char reply[120];
+  reply[0] = 0;
+  the_mesh.applyNodePanel(*job, reply, sizeof(reply));
+  setNodeNote(reply[0] ? reply : "Настройки узла не применены");
+  free(job);
+  publishSnapshot();
+  last_snapshot_ms = millis();
+  node_hold.store(0, std::memory_order_release);
+}
+
 static void serviceCommand() {
   uint32_t submitted = submit_seq.load(std::memory_order_acquire);
   if (submitted == result_seq.load(std::memory_order_relaxed)) return;
@@ -456,13 +542,6 @@ static void formatCountdown(char* dest, size_t cap, uint32_t secs) {
   formatUptime(dest, cap, secs);
 }
 
-static const char* loopLabel(uint8_t mode) {
-  if (mode == 0) return "выкл";
-  if (mode == 1) return "минимальный";
-  if (mode == 2) return "умеренный";
-  return "строгий";
-}
-
 static void actionButton(char*& cursor, size_t& left, const char* act, const char* label, const char* confirm) {
   appendRaw(cursor, left, "<form method=\"post\" action=\"/act\"");
   if (confirm) {
@@ -557,18 +636,6 @@ static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left
   rowFmt(cursor, left, "Шум", "%d дБм", info.noise_floor);
   rowFmt(cursor, left, "Последний RSSI", "%d дБм", info.last_rssi);
   rowFmt(cursor, left, "Последний SNR", "%.1f дБ", info.last_snr);
-  appendRaw(cursor, left, "</table></section><section><h2>Политика радио</h2><table>");
-  rowFmt(cursor, left, "Коэффициент эфира", "%.2f", info.airtime_factor);
-  rowFmt(cursor, left, "Максимум flood", "%u", info.flood_max);
-  rowFmt(cursor, left, "Максимум flood без области", "%u", info.flood_max_unscoped);
-  rowFmt(cursor, left, "Максимум flood для объявлений", "%u", info.flood_max_advert);
-  row(cursor, left, "CAD", info.cad ? "вкл" : "выкл");
-  rowFmt(cursor, left, "Порог помех", "%u", info.interference);
-  if (info.agc_secs) rowFmt(cursor, left, "Сброс AGC", "%u с", info.agc_secs);
-  else row(cursor, left, "Сброс AGC", "выкл");
-  rowFmt(cursor, left, "Path hash", "%u байт", info.path_hash_bytes);
-  row(cursor, left, "Обнаружение петель", loopLabel(info.loop_detect));
-  rowFmt(cursor, left, "Повторы ACK", "%u", info.multi_acks);
   appendRaw(cursor, left, "</table></section><section><h2>Соседи</h2>");
   if (!info.neighbour_count) {
     appendRaw(cursor, left, "<p class=\"sub\">Пока никого не слышно.</p>");
@@ -617,6 +684,11 @@ static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left
   row(cursor, left, "Сертификат", info.mqtt_cert ? "есть" : "нет");
   if (info.mqtt_ant_m != 0.0f) rowFmt(cursor, left, "Антенна", "%.1f м", info.mqtt_ant_m);
   else row(cursor, left, "Антенна", "нет");
+  row(cursor, left, "MeshCoreTel", info.tel[0] ? info.tel : "выкл");
+  if (info.tel_host[0]) rowFmt(cursor, left, "Брокер", "%s:%u", info.tel_host, info.tel_port ? info.tel_port : 1883);
+  else row(cursor, left, "Брокер", "—");
+  row(cursor, left, "Логин", info.tel_user[0] ? info.tel_user : "—");
+  row(cursor, left, "IATA", info.tel_iata[0] ? info.tel_iata : "—");
   appendRaw(cursor, left, "</table>");
   if (mqtt_note[0]) {
     appendRaw(cursor, left, "<p class=\"note\">");
@@ -631,6 +703,210 @@ static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left
   }
   appendRaw(cursor, left, "</section>");
   return left > 1;
+}
+
+static bool nearFloat(float a, float b) {
+  float d = a - b;
+  if (d < 0) d = -d;
+  return d < 0.06f;
+}
+
+static void textField(char*& cursor, size_t& left, const char* label, const char* name, const char* value,
+                      const char* extra, bool wide) {
+  appendRaw(cursor, left, wide ? "<label class=\"field span2\">" : "<label class=\"field\">");
+  appendEscaped(cursor, left, label);
+  appendRaw(cursor, left, "<input name=\"");
+  appendRaw(cursor, left, name);
+  appendRaw(cursor, left, "\" value=\"");
+  appendEscaped(cursor, left, value ? value : "");
+  appendRaw(cursor, left, "\"");
+  if (extra && extra[0]) {
+    appendRaw(cursor, left, " ");
+    appendRaw(cursor, left, extra);
+  }
+  appendRaw(cursor, left, "></label>");
+}
+
+static void checkField(char*& cursor, size_t& left, const char* name, const char* label, bool on) {
+  appendRaw(cursor, left, "<label class=\"switch span2\"><input type=\"checkbox\" name=\"");
+  appendRaw(cursor, left, name);
+  appendRaw(cursor, left, "\" value=\"on\"");
+  if (on) appendRaw(cursor, left, " checked");
+  appendRaw(cursor, left, "><i></i><span>");
+  appendEscaped(cursor, left, label);
+  appendRaw(cursor, left, "</span></label>");
+}
+
+static void selectOpen(char*& cursor, size_t& left, const char* label, const char* name) {
+  appendRaw(cursor, left, "<label class=\"field\"><span>");
+  appendEscaped(cursor, left, label);
+  appendRaw(cursor, left, "</span><select name=\"");
+  appendRaw(cursor, left, name);
+  appendRaw(cursor, left, "\">");
+}
+
+static void selectOption(char*& cursor, size_t& left, const char* value, const char* label, bool on) {
+  appendRaw(cursor, left, "<option value=\"");
+  appendEscaped(cursor, left, value);
+  appendRaw(cursor, left, "\"");
+  if (on) appendRaw(cursor, left, " selected");
+  appendRaw(cursor, left, ">");
+  appendEscaped(cursor, left, label);
+  appendRaw(cursor, left, "</option>");
+}
+
+static void selectClose(char*& cursor, size_t& left) {
+  appendRaw(cursor, left, "</select></label>");
+}
+
+static void noteLine(char*& cursor, size_t& left, const char* id, const char* text) {
+  appendRaw(cursor, left, "<p id=\"");
+  appendRaw(cursor, left, id);
+  appendRaw(cursor, left, "\" class=\"note\"");
+  if (!text || !text[0]) appendRaw(cursor, left, " hidden");
+  appendRaw(cursor, left, ">");
+  appendEscaped(cursor, left, text ? text : "");
+  appendRaw(cursor, left, "</p>");
+}
+
+static void radioFromPage(RepeaterRadioForm& form, const RepeaterPageInfo& info) {
+  memset(&form, 0, sizeof(form));
+  form.freq = info.freq;
+  form.bw = info.bw;
+  form.airtime = info.airtime_factor;
+  form.rx_delay = info.rx_delay;
+  form.tx_delay = info.tx_delay;
+  form.direct_tx_delay = info.direct_tx_delay;
+  form.tx_dbm = info.tx_dbm;
+  form.sf = info.sf;
+  form.cr = info.cr;
+  form.rx_gain = info.rx_gain;
+  form.fem_rx = info.fem_rx;
+  form.fem_tx = info.fem_tx;
+  form.forwarding = info.forwarding;
+  form.cad = info.cad;
+  form.interference = info.interference;
+  form.flood_max = info.flood_max;
+  form.flood_max_unscoped = info.flood_max_unscoped;
+  form.flood_max_advert = info.flood_max_advert;
+  form.path_hash_mode = info.path_hash_bytes ? (uint8_t)(info.path_hash_bytes - 1) : 0;
+  if (form.path_hash_mode > 2) form.path_hash_mode = 2;
+  form.loop_detect = info.loop_detect;
+  form.multi_acks = info.multi_acks ? 1 : 0;
+  form.agc_secs = info.agc_secs;
+}
+
+static void renderRadioForm(const RepeaterPageInfo& info, char*& cursor, size_t& left) {
+  RepeaterRadioForm form;
+  if (radio_hold.load(std::memory_order_acquire)) form = radio_hold_form;
+  else radioFromPage(form, info);
+  char num[24];
+  appendRaw(cursor, left,
+            "<section id=\"radio\"><h2>Настройки радио</h2>"
+            "<p class=\"sub\">Частота, полоса, SF и CR применяются сразу. Соседи должны стоять на тех же параметрах.</p>"
+            "<form class=\"setup grid\" method=\"post\" action=\"/radio\" autocomplete=\"off\">");
+  snprintf(num, sizeof(num), "%.3f", form.freq);
+  textField(cursor, left, "Частота, МГц", "freq", num, "inputmode=\"decimal\" maxlength=\"8\"", false);
+  selectOpen(cursor, left, "Полоса, кГц", "bw");
+  static const float kBw[] = {7.8f, 10.4f, 15.6f, 20.8f, 31.25f, 41.67f, 62.5f, 125.0f, 250.0f, 500.0f};
+  bool matched = false;
+  for (float v : kBw) {
+    if (nearFloat(form.bw, v)) matched = true;
+  }
+  if (!matched) {
+    snprintf(num, sizeof(num), "%g", form.bw);
+    selectOption(cursor, left, num, num, true);
+  }
+  for (float v : kBw) {
+    snprintf(num, sizeof(num), "%g", v);
+    selectOption(cursor, left, num, num, matched && nearFloat(form.bw, v));
+  }
+  selectClose(cursor, left);
+  selectOpen(cursor, left, "SF", "sf");
+  for (int s = 5; s <= 12; s++) {
+    snprintf(num, sizeof(num), "%d", s);
+    selectOption(cursor, left, num, num, form.sf == s);
+  }
+  selectClose(cursor, left);
+  selectOpen(cursor, left, "CR", "cr");
+  static const char* crName[] = {"4/5", "4/6", "4/7", "4/8"};
+  for (int c = 5; c <= 8; c++) {
+    snprintf(num, sizeof(num), "%d", c);
+    selectOption(cursor, left, num, crName[c - 5], form.cr == c);
+  }
+  selectClose(cursor, left);
+  snprintf(num, sizeof(num), "%d", (int)form.tx_dbm);
+  textField(cursor, left, "Мощность TX, дБм", "tx", num, "inputmode=\"numeric\" maxlength=\"4\"", false);
+  snprintf(num, sizeof(num), "%.2f", form.airtime);
+  textField(cursor, left, "Коэффициент эфира, 0–9", "af", num, "inputmode=\"decimal\" maxlength=\"6\"", false);
+  snprintf(num, sizeof(num), "%.2f", form.rx_delay);
+  textField(cursor, left, "Задержка RX, 0–20", "rxd", num, "inputmode=\"decimal\" maxlength=\"6\"", false);
+  snprintf(num, sizeof(num), "%.2f", form.tx_delay);
+  textField(cursor, left, "Задержка flood, 0–2", "txd", num, "inputmode=\"decimal\" maxlength=\"6\"", false);
+  snprintf(num, sizeof(num), "%.2f", form.direct_tx_delay);
+  textField(cursor, left, "Задержка direct, 0–2", "dtx", num, "inputmode=\"decimal\" maxlength=\"6\"", false);
+  snprintf(num, sizeof(num), "%u", form.interference);
+  textField(cursor, left, "Порог помех, 0 — выкл", "ith", num, "inputmode=\"numeric\" maxlength=\"3\"", false);
+  snprintf(num, sizeof(num), "%u", form.agc_secs);
+  textField(cursor, left, "Сброс AGC, с", "agc", num, "inputmode=\"numeric\" maxlength=\"4\"", false);
+  snprintf(num, sizeof(num), "%u", form.flood_max);
+  textField(cursor, left, "Максимум flood, 0–64", "fmax", num, "inputmode=\"numeric\" maxlength=\"2\"", false);
+  snprintf(num, sizeof(num), "%u", form.flood_max_unscoped);
+  textField(cursor, left, "Flood без области, 0–64", "fmaxu", num, "inputmode=\"numeric\" maxlength=\"2\"", false);
+  snprintf(num, sizeof(num), "%u", form.flood_max_advert);
+  textField(cursor, left, "Flood объявлений, 0–64", "fmaxa", num, "inputmode=\"numeric\" maxlength=\"2\"", false);
+  selectOpen(cursor, left, "Path hash", "hash");
+  selectOption(cursor, left, "0", "1 байт", form.path_hash_mode == 0);
+  selectOption(cursor, left, "1", "2 байта", form.path_hash_mode == 1);
+  selectOption(cursor, left, "2", "3 байта", form.path_hash_mode == 2);
+  selectClose(cursor, left);
+  selectOpen(cursor, left, "Обнаружение петель", "loop");
+  selectOption(cursor, left, "0", "выкл", form.loop_detect == 0);
+  selectOption(cursor, left, "1", "минимальный", form.loop_detect == 1);
+  selectOption(cursor, left, "2", "умеренный", form.loop_detect == 2);
+  selectOption(cursor, left, "3", "строгий", form.loop_detect == 3);
+  selectClose(cursor, left);
+  checkField(cursor, left, "fwd", "Ретрансляция", form.forwarding != 0);
+  checkField(cursor, left, "rxgain", "Усиление приёма", form.rx_gain != 0);
+  if (info.fem_rx_ok) checkField(cursor, left, "femrx", "Усилитель FEM на приёме", form.fem_rx != 0);
+  if (info.fem_tx_ok) checkField(cursor, left, "femtx", "Усилитель FEM на передаче", form.fem_tx != 0);
+  checkField(cursor, left, "cad", "CAD перед передачей", form.cad != 0);
+  checkField(cursor, left, "acks", "Дополнительный ACK", form.multi_acks != 0);
+  appendRaw(cursor, left, "<button class=\"span2\" type=\"submit\">Сохранить радио</button></form>");
+  noteLine(cursor, left, "radio-note", radio_note);
+  appendRaw(cursor, left, "</section>");
+}
+
+static void renderNodeForm(const RepeaterPageInfo& info, char*& cursor, size_t& left) {
+  RepeaterNodeForm form;
+  if (node_hold.load(std::memory_order_acquire)) form = node_hold_form;
+  else {
+    memset(&form, 0, sizeof(form));
+    strncpy(form.name, info.name, sizeof(form.name) - 1);
+    strncpy(form.owner, info.owner, sizeof(form.owner) - 1);
+    strncpy(form.lat, info.lat, sizeof(form.lat) - 1);
+    strncpy(form.lon, info.lon, sizeof(form.lon) - 1);
+    form.advert_mins = info.advert_local_mins;
+    form.flood_hours = info.advert_flood_hours;
+  }
+  char num[16];
+  appendRaw(cursor, left,
+            "<section id=\"node\"><h2>Узел</h2>"
+            "<p class=\"sub\">Имя и координаты попадают в объявление. Ноль в интервале выключает его.</p>"
+            "<form class=\"setup grid\" method=\"post\" action=\"/node\" autocomplete=\"off\">");
+  textField(cursor, left, "Имя", "name", form.name, "maxlength=\"31\"", true);
+  appendRaw(cursor, left, "<label class=\"field span2\">Описание<textarea name=\"owner\" maxlength=\"119\" rows=\"3\">");
+  appendEscaped(cursor, left, form.owner);
+  appendRaw(cursor, left, "</textarea></label>");
+  textField(cursor, left, "Широта", "lat", form.lat, "inputmode=\"decimal\" maxlength=\"15\"", false);
+  textField(cursor, left, "Долгота", "lon", form.lon, "inputmode=\"decimal\" maxlength=\"15\"", false);
+  snprintf(num, sizeof(num), "%u", form.advert_mins);
+  textField(cursor, left, "Локальное объявление, мин", "advert", num, "inputmode=\"numeric\" maxlength=\"3\"", false);
+  snprintf(num, sizeof(num), "%u", form.flood_hours);
+  textField(cursor, left, "Flood-объявление, ч", "flood", num, "inputmode=\"numeric\" maxlength=\"3\"", false);
+  appendRaw(cursor, left, "<button class=\"span2\" type=\"submit\">Сохранить узел</button></form>");
+  noteLine(cursor, left, "node-note", node_note);
+  appendRaw(cursor, left, "</section>");
 }
 
 static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
@@ -676,16 +952,31 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             ".actions{display:flex;flex-wrap:wrap;gap:8px}"
             ".actions form{margin:0}"
             "progress{width:100%;height:8px;margin:0;border:0;border-radius:99px;overflow:hidden;background:var(--panel-2);accent-color:var(--accent)}"
+            "label.switch{position:relative;display:flex;align-items:center;gap:10px;margin:2px 0;color:var(--text);font-size:13px;cursor:pointer}"
+            "label.switch input{position:absolute;opacity:0;width:1px;min-width:0;height:1px;padding:0;border:0}"
+            "label.switch i{width:42px;height:24px;border-radius:99px;background:var(--panel-3);border:1px solid var(--line-strong);position:relative;flex:none}"
+            "label.switch i:before{content:\"\";position:absolute;width:18px;height:18px;border-radius:50%;background:#edf0f3;top:2px;left:2px}"
+            "label.switch input:checked+i{background:var(--accent-2);border-color:var(--accent-2)}"
+            "label.switch input:checked+i:before{left:20px}"
+            "label.switch input:focus-visible+i{outline:2px solid var(--accent)}"
+            "form.setup.grid{grid-template-columns:1fr 1fr}"
+            "form.setup.grid .span2{grid-column:1/-1}"
+            "form.setup.grid label.field input,form.setup.grid label.field select,form.setup.grid label.field textarea{display:block;width:100%;margin-top:4px}"
+            "@media(max-width:640px){form.setup.grid{grid-template-columns:1fr}}"
             "</style></head><body><main><h1 id=\"title\">");
   appendEscaped(cursor, left, info.name[0] ? info.name : "репитер");
   appendRaw(cursor, left, "</h1><p class=\"sub\" id=\"ver\">");
   appendEscaped(cursor, left, info.firmware);
   appendRaw(cursor, left, " · ");
   appendEscaped(cursor, left, info.build);
-  appendRaw(cursor, left, "</p><div id=\"live\">");
+  appendRaw(cursor, left, "</p>");
+  renderRadioForm(info, cursor, left);
+  renderNodeForm(info, cursor, left);
+  appendRaw(cursor, left, "<div id=\"live\">");
   renderLive(info, cursor, left);
+  appendRaw(cursor, left, "</div>");
   appendRaw(cursor, left,
-            "</div><section><h2>Подключение MQTT</h2>"
+            "<section><h2>Подключение MQTT</h2>"
             "<p class=\"sub\">Вставьте строку настройки из панели целиком или заполните поля.</p>"
             "<div class=\"modes\">"
             "<button type=\"button\" id=\"mqtt-tab-b64\" class=\"on\">Строка</button>"
@@ -708,8 +999,41 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "<input name=\"pass\" maxlength=\"39\" type=\"password\" autocomplete=\"new-password\" placeholder=\"пусто — оставить текущий\">"
             "<label class=\"field\">Сертификат</label>"
             "<textarea name=\"ca\" rows=\"6\" placeholder=\"PEM. Пусто — оставить текущий\"></textarea>"
-            "<button type=\"submit\">Сохранить</button></form></section><section id=\"ntp\"><h2>NTP</h2>");
-  appendRaw(cursor, left,
+            "<button type=\"submit\">Сохранить</button></form></section>"
+            "<section id=\"tel\"><h2>MeshCoreTel</h2>"
+            "<p class=\"sub\">Вместе с MQTT, обычный TCP без TLS. Статус уходит раз в 5 минут, принятые пакеты — сразу.</p>"
+            "<form class=\"setup\" method=\"post\" action=\"/tel\" autocomplete=\"off\">"
+            "<label class=\"switch\"><input type=\"checkbox\" name=\"en\" value=\"on\"");
+  bool tel_held = tel_hold.load(std::memory_order_acquire) != 0;
+  bool tel_on = tel_held ? tel_hold_en != 0 : info.tel_enabled != 0;
+  bool tel_tx_on = tel_held ? tel_hold_tx != 0 : info.tel_tx != 0;
+  const char* tel_iata = tel_held ? tel_hold_iata : info.tel_iata;
+  const char* tel_host = tel_held && tel_hold_host[0] ? tel_hold_host : info.tel_host;
+  const char* tel_user = tel_held ? tel_hold_user : info.tel_user;
+  const char* tel_bpass = tel_held ? tel_hold_bpass : info.tel_pass;
+  uint16_t tel_port = tel_held && tel_hold_port ? tel_hold_port : info.tel_port;
+  if (tel_on) appendRaw(cursor, left, " checked");
+  appendRaw(cursor, left, "><i></i><span>Включено</span></label>"
+            "<label class=\"field\">Брокер</label><input name=\"host\" maxlength=\"63\" value=\"");
+  appendEscaped(cursor, left, tel_host);
+  appendRaw(cursor, left, "\"><label class=\"field\">Порт</label><input name=\"port\" maxlength=\"5\" inputmode=\"numeric\" value=\"");
+  appendFmt(cursor, left, "%u", tel_port ? tel_port : 1883);
+  appendRaw(cursor, left, "\"><label class=\"field\">Логин</label><input name=\"user\" maxlength=\"31\" value=\"");
+  appendEscaped(cursor, left, tel_user);
+  appendRaw(cursor, left, "\"><label class=\"field\">Пароль брокера</label><input name=\"bpass\" maxlength=\"39\" type=\"password\" autocomplete=\"new-password\" value=\"");
+  appendEscaped(cursor, left, tel_bpass);
+  appendRaw(cursor, left, "\"><label class=\"field\">IATA</label><input name=\"iata\" maxlength=\"7\" autocapitalize=\"characters\" value=\"");
+  appendEscaped(cursor, left, tel_iata);
+  appendRaw(cursor, left, "\"><label class=\"switch\"><input type=\"checkbox\" name=\"tx\" value=\"on\"");
+  if (tel_tx_on) appendRaw(cursor, left, " checked");
+  appendRaw(cursor, left, "><i></i><span>Отправлять свои передачи</span></label>"
+            "<button type=\"submit\">Сохранить</button></form>");
+  if (tel_note[0]) {
+    appendRaw(cursor, left, "<p class=\"note\">");
+    appendEscaped(cursor, left, tel_note);
+    appendRaw(cursor, left, "</p>");
+  }
+  appendRaw(cursor, left, "</section><section id=\"ntp\"><h2>NTP</h2>"
             "<p class=\"sub\">Нужен Wi-Fi с доступом к серверу по UDP/123. Пока ответ NTP свежий, опрос времени по эфиру не перезаписывает часы.</p>"
             "<form class=\"setup\" method=\"post\" action=\"/ntp\" autocomplete=\"off\">"
             "<select name=\"en\">");
@@ -747,7 +1071,9 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "</div></section><p class=\"sub\">Вход: пользователь admin и пароль администратора. "
             "Те же команды, что и в последовательной консоли. Данные приходят по WebSocket, страница не перезагружается.</p>"
             "<script>(function(){var live=document.getElementById('live'),out=document.getElementById('out'),title=document.getElementById('title');"
-            "function apply(m){if(m.t&&title){title.textContent=m.t;document.title=m.t;}if(m.live&&live)live.innerHTML=m.live;if(out)out.innerHTML=m.out||'';}"
+            "function setNote(id,text){var el=document.getElementById(id);if(!el)return;el.hidden=!text;el.textContent=text||'';}"
+            "function apply(m){if(m.t&&title){title.textContent=m.t;document.title=m.t;}if(m.live&&live)live.innerHTML=m.live;if(out)out.innerHTML=m.out||'';"
+            "if(m.rn!==undefined)setNote('radio-note',m.rn);if(m.nn!==undefined)setNote('node-note',m.nn);}"
             "var b64=document.getElementById('mqtt-b64'),man=document.getElementById('mqtt-manual');"
             "var tb=document.getElementById('mqtt-tab-b64'),tm=document.getElementById('mqtt-tab-manual');"
             "function mqttMode(manual){if(!b64||!man)return;b64.classList.toggle('off',manual);man.classList.toggle('off',!manual);if(tb)tb.classList.toggle('on',!manual);if(tm)tm.classList.toggle('on',manual);}"
@@ -915,6 +1241,10 @@ static void pushLive(bool force) {
   appendJsonEscaped(cursor, left, live_html, strlen(live_html));
   appendRaw(cursor, left, ",\"out\":");
   appendJsonEscaped(cursor, left, console, strlen(console));
+  appendRaw(cursor, left, ",\"rn\":");
+  appendJsonEscaped(cursor, left, radio_note, strlen(radio_note));
+  appendRaw(cursor, left, ",\"nn\":");
+  appendJsonEscaped(cursor, left, node_note, strlen(node_note));
   appendRaw(cursor, left, "}");
   if (left > 64) {
     socket->textAll(live_json);
@@ -1083,6 +1413,202 @@ static void onMqtt(AsyncWebServerRequest* request) {
   request->redirect("/");
 }
 
+static void commaDot(char* text) {
+  for (; text && *text; text++) {
+    if (*text == ',') *text = '.';
+  }
+}
+
+static void readText(AsyncWebServerRequest* request, const char* name, char* dest, size_t cap) {
+  dest[0] = 0;
+  if (request->hasParam(name, true)) copyCommand(dest, cap, request->getParam(name, true)->value());
+}
+
+static bool parseFloatText(char* text, float& out) {
+  commaDot(text);
+  if (!text[0]) return false;
+  char* end = nullptr;
+  out = strtof(text, &end);
+  return end && end != text && *end == 0;
+}
+
+static bool readFloat(AsyncWebServerRequest* request, const char* name, float& out) {
+  char buf[24];
+  readText(request, name, buf, sizeof(buf));
+  return parseFloatText(buf, out);
+}
+
+static bool readLong(AsyncWebServerRequest* request, const char* name, long& out) {
+  char buf[16];
+  readText(request, name, buf, sizeof(buf));
+  if (!buf[0]) return false;
+  char* end = nullptr;
+  out = strtol(buf, &end, 10);
+  return end && end != buf && *end == 0;
+}
+
+static bool webNameOk(const char* name) {
+  if (!name || strlen(name) >= 32) return false;
+  for (const char* p = name; *p; p++) {
+    if (*p == '[' || *p == ']' || *p == '\\' || *p == ':' || *p == ',' || *p == '?' || *p == '*') return false;
+  }
+  return true;
+}
+
+static bool copyOwner(char* dest, size_t cap, const String& value) {
+  if (!cap) return false;
+  const char* s = value.c_str();
+  size_t n = 0;
+  bool started = false;
+  for (size_t i = 0; s[i]; i++) {
+    char c = s[i];
+    if (c == '\r') continue;
+    if (!started && (c == ' ' || c == '\t' || c == '\n')) continue;
+    started = true;
+    if (n + 1 >= cap) return false;
+    dest[n++] = c;
+  }
+  while (n && (dest[n - 1] == ' ' || dest[n - 1] == '\t' || dest[n - 1] == '\n')) n--;
+  dest[n] = 0;
+  return true;
+}
+
+static int queueRadio(const RepeaterRadioForm& form) {
+  if (radio_job.load(std::memory_order_acquire)) return 1;
+  RepeaterRadioForm* job = (RepeaterRadioForm*)malloc(sizeof(RepeaterRadioForm));
+  if (!job) return 2;
+  *job = form;
+  radio_hold_form = form;
+  radio_hold.store(1, std::memory_order_release);
+  RepeaterRadioForm* expected = nullptr;
+  if (!radio_job.compare_exchange_strong(expected, job)) {
+    free(job);
+    return 1;
+  }
+  return 0;
+}
+
+static int queueNode(const RepeaterNodeForm& form) {
+  if (node_job.load(std::memory_order_acquire)) return 1;
+  RepeaterNodeForm* job = (RepeaterNodeForm*)malloc(sizeof(RepeaterNodeForm));
+  if (!job) return 2;
+  *job = form;
+  node_hold_form = form;
+  node_hold.store(1, std::memory_order_release);
+  RepeaterNodeForm* expected = nullptr;
+  if (!node_job.compare_exchange_strong(expected, job)) {
+    free(job);
+    return 1;
+  }
+  return 0;
+}
+
+static void handleRadio(AsyncWebServerRequest* request) {
+  if (!allowed(request)) return;
+  float freq = 0, bw = 0, air = 0, rxd = 0, txd = 0, dtx = 0;
+  long sf = 0, cr = 0, tx = 0, ith = 0, agc = 0, fmax = 0, fmaxu = 0, fmaxa = 0, hash = 0, loop = 0;
+  bool parsed = readFloat(request, "freq", freq) && readFloat(request, "bw", bw) &&
+                readLong(request, "sf", sf) && readLong(request, "cr", cr) && readLong(request, "tx", tx) &&
+                readFloat(request, "af", air) && readFloat(request, "rxd", rxd) &&
+                readFloat(request, "txd", txd) && readFloat(request, "dtx", dtx) &&
+                readLong(request, "ith", ith) && readLong(request, "agc", agc) &&
+                readLong(request, "fmax", fmax) && readLong(request, "fmaxu", fmaxu) &&
+                readLong(request, "fmaxa", fmaxa) && readLong(request, "hash", hash) &&
+                readLong(request, "loop", loop);
+  if (!parsed || !(freq >= 150.0f && freq <= 2500.0f && bw >= 7.0f && bw <= 500.0f && sf >= 5 && sf <= 12 &&
+                   cr >= 5 && cr <= 8 && tx >= -9 && tx <= 30 && air >= 0.0f && air <= 9.0f &&
+                   rxd >= 0.0f && rxd <= 20.0f && txd >= 0.0f && txd <= 2.0f && dtx >= 0.0f && dtx <= 2.0f &&
+                   ith >= 0 && ith <= 255 && agc >= 0 && agc <= 1020 && fmax >= 0 && fmax <= 64 &&
+                   fmaxu >= 0 && fmaxu <= 64 && fmaxa >= 0 && fmaxa <= 64 && hash >= 0 && hash <= 2 &&
+                   loop >= 0 && loop <= 3)) {
+    setRadioNote("Проверьте диапазоны: частота 150–2500, полоса 7–500, SF 5–12, CR 4/5–4/8, мощность −9…30");
+    request->redirect("/#radio");
+    return;
+  }
+  RepeaterRadioForm form;
+  memset(&form, 0, sizeof(form));
+  form.freq = freq;
+  form.bw = bw;
+  form.sf = (uint8_t)sf;
+  form.cr = (uint8_t)cr;
+  form.tx_dbm = (int8_t)tx;
+  form.airtime = air;
+  form.rx_delay = rxd;
+  form.tx_delay = txd;
+  form.direct_tx_delay = dtx;
+  form.interference = (uint8_t)ith;
+  form.agc_secs = (uint16_t)((agc / 4) * 4);
+  form.flood_max = (uint8_t)fmax;
+  form.flood_max_unscoped = (uint8_t)fmaxu;
+  form.flood_max_advert = (uint8_t)fmaxa;
+  form.path_hash_mode = (uint8_t)hash;
+  form.loop_detect = (uint8_t)loop;
+  form.forwarding = request->hasParam("fwd", true) ? 1 : 0;
+  form.rx_gain = request->hasParam("rxgain", true) ? 1 : 0;
+  form.cad = request->hasParam("cad", true) ? 1 : 0;
+  form.multi_acks = request->hasParam("acks", true) ? 1 : 0;
+  uint32_t slot = page_slot.load(std::memory_order_acquire);
+  form.fem_rx_set = page_buf[slot].fem_rx_ok;
+  form.fem_tx_set = page_buf[slot].fem_tx_ok;
+  form.fem_rx = (form.fem_rx_set && request->hasParam("femrx", true)) ? 1 : 0;
+  form.fem_tx = (form.fem_tx_set && request->hasParam("femtx", true)) ? 1 : 0;
+  int queued = queueRadio(form);
+  if (queued == 2) setRadioNote("Не хватило памяти");
+  else if (queued) setRadioNote("Предыдущие настройки ещё сохраняются");
+  else setRadioNote("Сохраняем настройки радио…");
+  request->redirect("/#radio");
+}
+
+static void handleNode(AsyncWebServerRequest* request) {
+  if (!allowed(request)) return;
+  RepeaterNodeForm form;
+  memset(&form, 0, sizeof(form));
+  readText(request, "name", form.name, sizeof(form.name));
+  if (!webNameOk(form.name)) {
+    setNodeNote("В имени нельзя использовать [ ] \\ : , ? *");
+    request->redirect("/#node");
+    return;
+  }
+  if (request->hasParam("owner", true) &&
+      !copyOwner(form.owner, sizeof(form.owner), request->getParam("owner", true)->value())) {
+    setNodeNote("Описание владельца длиннее 119 символов");
+    request->redirect("/#node");
+    return;
+  }
+  readText(request, "lat", form.lat, sizeof(form.lat));
+  readText(request, "lon", form.lon, sizeof(form.lon));
+  commaDot(form.lat);
+  commaDot(form.lon);
+  if (form.lat[0] || form.lon[0]) {
+    char* lat_end = nullptr;
+    char* lon_end = nullptr;
+    double lat = strtod(form.lat, &lat_end);
+    double lon = strtod(form.lon, &lon_end);
+    if (!form.lat[0] || !lat_end || *lat_end || lat < -90.0 || lat > 90.0 ||
+        !form.lon[0] || !lon_end || *lon_end || lon < -180.0 || lon > 180.0) {
+      setNodeNote("Широта −90…90, долгота −180…180");
+      request->redirect("/#node");
+      return;
+    }
+  }
+  long mins = 0;
+  long hours = 0;
+  if (!readLong(request, "advert", mins) || !readLong(request, "flood", hours) ||
+      mins < 0 || (mins > 0 && mins < 60) || mins > 240 ||
+      hours < 0 || (hours > 0 && hours < 3) || hours > 168) {
+    setNodeNote("Локальное объявление: 0 или 60–240 мин. Flood: 0 или 3–168 ч");
+    request->redirect("/#node");
+    return;
+  }
+  form.advert_mins = (uint16_t)((mins / 2) * 2);
+  form.flood_hours = (uint8_t)hours;
+  int queued = queueNode(form);
+  if (queued == 2) setNodeNote("Не хватило памяти");
+  else if (queued) setNodeNote("Предыдущие настройки ещё сохраняются");
+  else setNodeNote("Сохраняем настройки узла…");
+  request->redirect("/#node");
+}
+
 static void handleCmd(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
   if (!request->hasParam("cmd", true)) {
@@ -1109,6 +1635,67 @@ static bool ntpHostOk(const char* value) {
     if (!ok) return false;
   }
   return true;
+}
+
+static void handleTel(AsyncWebServerRequest* request) {
+  if (!allowed(request)) return;
+  TelJob* job = (TelJob*)malloc(sizeof(TelJob));
+  if (!job) {
+    setTelNote("Не хватило памяти");
+    request->redirect("/");
+    return;
+  }
+  memset(job, 0, sizeof(TelJob));
+  job->enable = request->hasParam("en", true) && request->getParam("en", true)->value() == "on";
+  job->tx = request->hasParam("tx", true) && request->getParam("tx", true)->value() == "on";
+  if (request->hasParam("iata", true)) copyCommand(job->iata, sizeof(job->iata), request->getParam("iata", true)->value());
+  if (request->hasParam("host", true)) copyCommand(job->host, sizeof(job->host), request->getParam("host", true)->value());
+  if (request->hasParam("user", true)) copyCommand(job->user, sizeof(job->user), request->getParam("user", true)->value());
+  if (request->hasParam("bpass", true)) copyCommand(job->bpass, sizeof(job->bpass), request->getParam("bpass", true)->value());
+  job->port = 0;
+  if (request->hasParam("port", true)) {
+    char port_text[8];
+    port_text[0] = 0;
+    copyCommand(port_text, sizeof(port_text), request->getParam("port", true)->value());
+    long port = 0;
+    bool digits = port_text[0] != 0;
+    for (const char* p = port_text; digits && *p; p++) {
+      if (*p < '0' || *p > '9') digits = false;
+      else {
+        port = port * 10 + (*p - '0');
+        if (port > 65535) digits = false;
+      }
+    }
+    if (!digits || port < 1) {
+      free(job);
+      setTelNote("Порт должен быть от 1 до 65535");
+      request->redirect("/");
+      return;
+    }
+    job->port = (uint16_t)port;
+  }
+  job->seq = tel_seq.fetch_add(1, std::memory_order_acq_rel) + 1;
+  tel_hold_en = job->enable;
+  tel_hold_tx = job->tx;
+  tel_hold_port = job->port;
+  strncpy(tel_hold_iata, job->iata, sizeof(tel_hold_iata) - 1);
+  tel_hold_iata[sizeof(tel_hold_iata) - 1] = 0;
+  strncpy(tel_hold_host, job->host, sizeof(tel_hold_host) - 1);
+  tel_hold_host[sizeof(tel_hold_host) - 1] = 0;
+  strncpy(tel_hold_user, job->user, sizeof(tel_hold_user) - 1);
+  tel_hold_user[sizeof(tel_hold_user) - 1] = 0;
+  strncpy(tel_hold_bpass, job->bpass, sizeof(tel_hold_bpass) - 1);
+  tel_hold_bpass[sizeof(tel_hold_bpass) - 1] = 0;
+  tel_hold.store(1, std::memory_order_release);
+  TelJob* expected = nullptr;
+  if (!tel_job.compare_exchange_strong(expected, job)) {
+    free(job);
+    setTelNote("Предыдущие настройки ещё сохраняются");
+    request->redirect("/");
+    return;
+  }
+  setTelNote("Сохраняем настройки…");
+  request->redirect("/");
 }
 
 static void handleNtp(AsyncWebServerRequest* request) {
@@ -1397,6 +1984,9 @@ void RepeaterWeb::poll(bool enabled) {
 #endif
   serviceCommand();
   serviceMqttJob();
+  serviceTelJob();
+  serviceRadioJob();
+  serviceNodeJob();
 
   uint32_t ip = 0;
   if (WiFi.status() == WL_CONNECTED) ip = (uint32_t)WiFi.localIP();
@@ -1428,7 +2018,10 @@ void RepeaterWeb::poll(bool enabled) {
   server->addHandler(socket);
   server->on("/", HTTP_GET, sendPage);
   server->on("/cmd", HTTP_POST, handleCmd);
+  server->on("/radio", HTTP_POST, handleRadio);
+  server->on("/node", HTTP_POST, handleNode);
   server->on("/ntp", HTTP_POST, handleNtp);
+  server->on("/tel", HTTP_POST, handleTel);
   server->on("/act", HTTP_POST, handleAct);
   server->on("/mqtt", HTTP_POST, onMqtt);
 #ifndef DISABLE_WIFI_OTA
