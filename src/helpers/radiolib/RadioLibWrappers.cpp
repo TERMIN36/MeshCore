@@ -2,6 +2,51 @@
 #define RADIOLIB_STATIC_ONLY 1
 #include "RadioLibWrappers.h"
 
+#if defined(ESP32)
+#include <esp_pm.h>
+#endif
+
+// Hardware CAD is a few symbols. This still covers SF12 at 62.5 kHz, and it
+// returns the main loop to WiFi and MQTT if the radio never raises DIO.
+static const unsigned long CAD_SCAN_TIMEOUT_MS = 800;
+
+// Automatic light sleep can start on yield/delay while CAD is in progress.
+// The LoRa DIO pin is not a wakeup source for that sleep, so hold the CPU awake.
+class CadLightLock {
+#if defined(ESP32)
+  esp_pm_lock_handle_t _lock;
+  bool _held;
+#endif
+public:
+  CadLightLock()
+#if defined(ESP32)
+    : _lock(nullptr), _held(false)
+#endif
+  {
+#if defined(ESP32)
+    static esp_pm_lock_handle_t shared = nullptr;
+    if (!shared) {
+      if (esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "cad", &shared) != ESP_OK) {
+        shared = nullptr;
+        return;
+      }
+    }
+    _lock = shared;
+    _held = esp_pm_lock_acquire(_lock) == ESP_OK;
+#endif
+  }
+
+  ~CadLightLock() {
+#if defined(ESP32)
+    if (_held) esp_pm_lock_release(_lock);
+#endif
+  }
+};
+
+static bool irqPinValid(uint32_t pin) {
+  return pin != (uint32_t)-1 && pin <= 255;
+}
+
 #define STATE_IDLE       0
 #define STATE_RX         1
 #define STATE_TX_WAIT    3
@@ -86,6 +131,11 @@ void RadioLibWrapper::resetAGC() {
 }
 
 void RadioLibWrapper::loop() {
+  // Automatic light sleep misses a rising edge on DIO. The line stays high
+  // until the IRQ flags are cleared, so a level check recovers the packet.
+  uint32_t irq = _board->getIRQGpio();
+  if (irqPinValid(irq) && digitalRead((uint8_t)irq) == HIGH) setFlag();
+
   if (_nf_paused) return;
   if (state == STATE_RX && _num_floor_samples < NUM_NOISE_FLOOR_SAMPLES) {
     if (!isReceivingPacket()) {
@@ -191,7 +241,33 @@ void RadioLibWrapper::onSendFinished() {
 }
 
 int16_t RadioLibWrapper::performChannelScan() {
-  return _radio->scanChannel();
+  // scanChannel() waits forever for DIO. A missed edge (light sleep does not
+  // wake on this pin) would freeze the loop, including MQTT.
+  CadLightLock awake;
+  int16_t state = _radio->startChannelScan();
+  if (state != RADIOLIB_ERR_NONE) return state;
+
+  uint32_t irq = _board->getIRQGpio();
+  bool use_pin = irqPinValid(irq);
+  const unsigned long deadline = millis() + CAD_SCAN_TIMEOUT_MS;
+  int16_t result = RADIOLIB_ERR_UNKNOWN;
+  while ((long)(millis() - deadline) < 0) {
+    if (use_pin) {
+      if (digitalRead((uint8_t)irq) == HIGH) {
+        result = _radio->getChannelScanResult();
+        break;
+      }
+    } else {
+      result = _radio->getChannelScanResult();
+      if (result != RADIOLIB_ERR_UNKNOWN) break;
+    }
+    delay(1);
+  }
+  if (result == RADIOLIB_ERR_UNKNOWN) {
+    _radio->standby();
+    return RADIOLIB_ERR_RX_TIMEOUT;
+  }
+  return result;
 }
 
 bool RadioLibWrapper::isChannelActive() {
@@ -201,11 +277,14 @@ bool RadioLibWrapper::isChannelActive() {
   // cad: hardware channel activity detection
   if (_cad_enabled) {
     int16_t result = performChannelScan();
-    // scanChannel() triggers DIO interrupt (CAD done) which sets STATE_INT_READY
+    // CAD done raises the same DIO interrupt as RX/TX and sets STATE_INT_READY
     // via setFlag() ISR. Clear it before restarting RX so recvRaw() doesn't
     // try to read a non-existent packet and count a spurious recv error.
     state = STATE_IDLE;
     startRecv();
+    // A timed-out scan did not see a packet. Treat the channel as free so
+    // the 4 s busy-channel limit is not spent retrying a stuck radio.
+    if (result == RADIOLIB_ERR_RX_TIMEOUT) return false;
     if (result != RADIOLIB_CHANNEL_FREE) return true;
   }
 

@@ -282,6 +282,8 @@ public:
   bool applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t reply_cap);
   bool applyNodePanel(const RepeaterNodeForm& in, char* reply, size_t reply_cap);
   void applyWifiConfig() override;
+  uint8_t applyWifiPowerMode() override;
+  bool wifiLightSleep() const { return _wifi.powerMode() == WIFI_POWER_LIGHT; }
   void formatWifiStatus(char* reply) override;
   void applyNtpConfig() override;
   void formatNtpStatus(char* reply) override;

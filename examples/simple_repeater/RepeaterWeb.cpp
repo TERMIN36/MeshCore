@@ -89,6 +89,9 @@ static char tel_hold_bpass[40];
 
 static char radio_note[120];
 static char node_note[120];
+static char power_note[120];
+static std::atomic<uint8_t> power_job{0xFF};
+static std::atomic<uint8_t> power_hold{0xFF};
 static std::atomic<RepeaterRadioForm*> radio_job{nullptr};
 static std::atomic<RepeaterNodeForm*> node_job{nullptr};
 static std::atomic<uint8_t> radio_hold{0};
@@ -109,6 +112,11 @@ static void setTelNote(const char* text) {
 static void setRadioNote(const char* text) {
   strncpy(radio_note, text ? text : "", sizeof(radio_note) - 1);
   radio_note[sizeof(radio_note) - 1] = 0;
+}
+
+static void setPowerNote(const char* text) {
+  strncpy(power_note, text ? text : "", sizeof(power_note) - 1);
+  power_note[sizeof(power_note) - 1] = 0;
 }
 
 static void setNodeNote(const char* text) {
@@ -417,6 +425,24 @@ static void serviceNodeJob() {
   node_hold.store(0, std::memory_order_release);
 }
 
+static void servicePowerJob() {
+  uint8_t mode = power_job.exchange(0xFF, std::memory_order_acq_rel);
+  if (mode > WIFI_POWER_LIGHT) return;
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  bool station = prefs && prefs->wifi_enabled && prefs->wifi_ssid[0];
+  if (prefs) prefs->wifi_ps = mode;
+  the_mesh.savePrefs();
+  uint8_t active = the_mesh.applyWifiPowerMode();
+  if (!station) setPowerNote("Сохранено. Включится вместе с Wi‑Fi.");
+  else if (mode == WIFI_POWER_LIGHT && active != WIFI_POWER_LIGHT) {
+    setPowerNote("Сон процессора недоступен в этой сборке. Включён сон модема.");
+  } else if (mode == WIFI_POWER_LIGHT) setPowerNote("Сон модема и процессора включены.");
+  else if (mode == WIFI_POWER_MODEM) setPowerNote("Сон модема включён. Процессор остаётся на рабочей частоте.");
+  else setPowerNote("Энергосбережение выключено.");
+  if (power_job.load(std::memory_order_acquire) == 0xFF) power_hold.store(0xFF, std::memory_order_release);
+  last_snapshot_ms = 0;
+}
+
 static void serviceCommand() {
   uint32_t submitted = submit_seq.load(std::memory_order_acquire);
   if (submitted == result_seq.load(std::memory_order_relaxed)) return;
@@ -673,6 +699,11 @@ static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left
   row(cursor, left, "События ошибок", errors);
   appendRaw(cursor, left, "</table></section><section><h2>Сеть</h2><table>");
   row(cursor, left, "Wi‑Fi", info.ssid);
+  const char* power = "без энергосбережения";
+  if (info.wifi_ps == WIFI_POWER_LIGHT && info.wifi_ps_active == WIFI_POWER_MODEM) power = "сон модема, процессор не спит";
+  else if (info.wifi_ps == WIFI_POWER_MODEM) power = "сон модема";
+  else if (info.wifi_ps == WIFI_POWER_LIGHT) power = "сон модема и процессора";
+  row(cursor, left, "Питание", power);
   row(cursor, left, "Адрес", info.ip);
   row(cursor, left, "MQTT", info.mqtt);
   row(cursor, left, "Хост", info.mqtt_host[0] ? info.mqtt_host : "—");
@@ -909,6 +940,27 @@ static void renderNodeForm(const RepeaterPageInfo& info, char*& cursor, size_t& 
   appendRaw(cursor, left, "</section>");
 }
 
+static void renderPowerForm(const RepeaterPageInfo& info, char*& cursor, size_t& left) {
+  uint8_t held = power_hold.load(std::memory_order_acquire);
+  uint8_t mode = held <= WIFI_POWER_LIGHT ? held : info.wifi_ps;
+  if (mode > WIFI_POWER_LIGHT) mode = WIFI_POWER_NONE;
+  appendRaw(cursor, left,
+            "<section id=\"power\"><h2>Питание</h2>"
+            "<p class=\"sub\">Без энергосбережения радио Wi‑Fi включено постоянно. "
+            "Сон модема гасит его между маяками точки доступа и оставляет процессор на рабочей частоте. "
+            "Сон модема и процессора дополнительно усыпляет CPU между пакетами, если это позволяет сборка. "
+            "Иначе остаётся сон модема. MQTT не отключается. Если брокер начнёт отваливаться, вернитесь к первому режиму.</p>"
+            "<form class=\"setup\" method=\"post\" action=\"/power\" autocomplete=\"off\">");
+  selectOpen(cursor, left, "Режим", "mode");
+  selectOption(cursor, left, "0", "Без энергосбережения", mode == WIFI_POWER_NONE);
+  selectOption(cursor, left, "1", "Сон модема Wi‑Fi", mode == WIFI_POWER_MODEM);
+  selectOption(cursor, left, "2", "Сон модема и процессора", mode == WIFI_POWER_LIGHT);
+  selectClose(cursor, left);
+  appendRaw(cursor, left, "<button type=\"submit\">Сохранить питание</button></form>");
+  noteLine(cursor, left, "power-note", power_note);
+  appendRaw(cursor, left, "</section>");
+}
+
 static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
                        const char* command, const char* reply, char* dest, size_t cap) {
   char* cursor = dest;
@@ -961,6 +1013,7 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "label.switch input:focus-visible+i{outline:2px solid var(--accent)}"
             "form.setup.grid{grid-template-columns:1fr 1fr}"
             "form.setup.grid .span2{grid-column:1/-1}"
+            "form.setup label.field select{display:block;width:100%;margin-top:4px}"
             "form.setup.grid label.field input,form.setup.grid label.field select,form.setup.grid label.field textarea{display:block;width:100%;margin-top:4px}"
             "@media(max-width:640px){form.setup.grid{grid-template-columns:1fr}}"
             "</style></head><body><main><h1 id=\"title\">");
@@ -972,6 +1025,7 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
   appendRaw(cursor, left, "</p>");
   renderRadioForm(info, cursor, left);
   renderNodeForm(info, cursor, left);
+  renderPowerForm(info, cursor, left);
   appendRaw(cursor, left, "<div id=\"live\">");
   renderLive(info, cursor, left);
   appendRaw(cursor, left, "</div>");
@@ -1073,7 +1127,7 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "<script>(function(){var live=document.getElementById('live'),out=document.getElementById('out'),title=document.getElementById('title');"
             "function setNote(id,text){var el=document.getElementById(id);if(!el)return;el.hidden=!text;el.textContent=text||'';}"
             "function apply(m){if(m.t&&title){title.textContent=m.t;document.title=m.t;}if(m.live&&live)live.innerHTML=m.live;if(out)out.innerHTML=m.out||'';"
-            "if(m.rn!==undefined)setNote('radio-note',m.rn);if(m.nn!==undefined)setNote('node-note',m.nn);}"
+            "if(m.rn!==undefined)setNote('radio-note',m.rn);if(m.nn!==undefined)setNote('node-note',m.nn);if(m.pn!==undefined)setNote('power-note',m.pn);}"
             "var b64=document.getElementById('mqtt-b64'),man=document.getElementById('mqtt-manual');"
             "var tb=document.getElementById('mqtt-tab-b64'),tm=document.getElementById('mqtt-tab-manual');"
             "function mqttMode(manual){if(!b64||!man)return;b64.classList.toggle('off',manual);man.classList.toggle('off',!manual);if(tb)tb.classList.toggle('on',!manual);if(tm)tm.classList.toggle('on',manual);}"
@@ -1245,6 +1299,8 @@ static void pushLive(bool force) {
   appendJsonEscaped(cursor, left, radio_note, strlen(radio_note));
   appendRaw(cursor, left, ",\"nn\":");
   appendJsonEscaped(cursor, left, node_note, strlen(node_note));
+  appendRaw(cursor, left, ",\"pn\":");
+  appendJsonEscaped(cursor, left, power_note, strlen(power_note));
   appendRaw(cursor, left, "}");
   if (left > 64) {
     socket->textAll(live_json);
@@ -1698,6 +1754,20 @@ static void handleTel(AsyncWebServerRequest* request) {
   request->redirect("/");
 }
 
+static void handlePower(AsyncWebServerRequest* request) {
+  if (!allowed(request)) return;
+  long mode = -1;
+  if (!readLong(request, "mode", mode) || mode < WIFI_POWER_NONE || mode > WIFI_POWER_LIGHT) {
+    setPowerNote("Неизвестный режим");
+    request->redirect("/#power");
+    return;
+  }
+  power_hold.store((uint8_t)mode, std::memory_order_release);
+  power_job.store((uint8_t)mode, std::memory_order_release);
+  setPowerNote("Сохраняем…");
+  request->redirect("/#power");
+}
+
 static void handleNtp(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
   if (request->hasParam("sync", true)) {
@@ -1987,6 +2057,7 @@ void RepeaterWeb::poll(bool enabled) {
   serviceTelJob();
   serviceRadioJob();
   serviceNodeJob();
+  servicePowerJob();
 
   uint32_t ip = 0;
   if (WiFi.status() == WL_CONNECTED) ip = (uint32_t)WiFi.localIP();
@@ -2020,6 +2091,7 @@ void RepeaterWeb::poll(bool enabled) {
   server->on("/cmd", HTTP_POST, handleCmd);
   server->on("/radio", HTTP_POST, handleRadio);
   server->on("/node", HTTP_POST, handleNode);
+  server->on("/power", HTTP_POST, handlePower);
   server->on("/ntp", HTTP_POST, handleNtp);
   server->on("/tel", HTTP_POST, handleTel);
   server->on("/act", HTTP_POST, handleAct);

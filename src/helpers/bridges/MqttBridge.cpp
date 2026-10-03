@@ -570,7 +570,9 @@ void MqttBridge::pump() {
       for (int n = 0; n < PUB_CAP; n++) publishOne();
     }
     // onRadioTx notifies this task. The timeout is only the idle housekeeping tick.
-    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+    // Light sleep needs a longer idle gap; a waiting packet still wakes this task.
+    uint32_t idle_ms = (_prefs && _prefs->wifi_ps == WIFI_POWER_LIGHT) ? 100 : 20;
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(idle_ms));
   }
 }
 

@@ -37,6 +37,8 @@ struct RepeaterPageInfo {
   char id[12];
   char ssid[33];
   char ip[16];
+  uint8_t wifi_ps;
+  uint8_t wifi_ps_active;
   char ntp_server[64];
   char mqtt[24];
   char tel[24];

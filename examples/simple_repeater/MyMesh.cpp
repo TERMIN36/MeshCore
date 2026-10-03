@@ -1723,6 +1723,11 @@ void MyMesh::applyWifiConfig() {
   _wifi.apply();
 }
 
+uint8_t MyMesh::applyWifiPowerMode() {
+  _wifi.applyPower();
+  return _wifi.powerMode();
+}
+
 void MyMesh::formatWifiStatus(char* reply) {
   if (!_prefs.wifi_enabled) {
     strcpy(reply, "> off");
@@ -2047,6 +2052,8 @@ void MyMesh::fillRepeaterPage(RepeaterPageInfo& info) {
   if (board_name) strncpy(info.board, board_name, sizeof(info.board) - 1);
   mesh::Utils::toHex(info.id, getSelfId().pub_key, 4);
   strncpy(info.ssid, _prefs.wifi_ssid, sizeof(info.ssid) - 1);
+  info.wifi_ps = _prefs.wifi_ps;
+  info.wifi_ps_active = _wifi.powerMode();
   copyWifiAddress(info.ip, sizeof(info.ip));
   if (!_prefs.mqtt_enabled) strncpy(info.mqtt, "выкл", sizeof(info.mqtt) - 1);
   else if (_mqtt.isUp()) strncpy(info.mqtt, "подключён", sizeof(info.mqtt) - 1);

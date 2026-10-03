@@ -1131,6 +1131,22 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       if (_prefs->wifi_enabled && !_prefs->wifi_ssid[0]) strcpy(reply, "OK - set wifi.ssid");
       else strcpy(reply, "OK");
     }
+  } else if (memcmp(config, "wifi.ps", 7) == 0 && (config[7] == 0 || config[7] == ' ')) {
+    const char* value = config[7] == ' ' ? &config[8] : "";
+    while (*value == ' ') value++;
+    uint8_t mode = 0xFF;
+    if (strcmp(value, "off") == 0 || strcmp(value, "none") == 0 || strcmp(value, "0") == 0) mode = WIFI_POWER_NONE;
+    else if (strcmp(value, "modem") == 0 || strcmp(value, "1") == 0) mode = WIFI_POWER_MODEM;
+    else if (strcmp(value, "light") == 0 || strcmp(value, "2") == 0) mode = WIFI_POWER_LIGHT;
+    if (mode == 0xFF) {
+      strcpy(reply, "Error: off, modem or light");
+    } else {
+      _prefs->wifi_ps = mode;
+      savePrefs();
+      uint8_t active = _callbacks->applyWifiPowerMode();
+      if (mode == WIFI_POWER_LIGHT && active == WIFI_POWER_MODEM) strcpy(reply, "OK - modem, light sleep unsupported");
+      else strcpy(reply, "OK");
+    }
   } else if (strcmp(config, "ntp.server") == 0) {
     strcpy(reply, "Error: bad server");
   } else if (memcmp(config, "ntp.server ", 11) == 0) {
@@ -1393,6 +1409,11 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     strcpy(reply, _callbacks->hasMqttCert() ? "> set" : "> off");
   } else if (strcmp(config, "wifi") == 0) {
     _callbacks->formatWifiStatus(reply);
+  } else if (strcmp(config, "wifi.ps") == 0) {
+    const char* name = "off";
+    if (_prefs->wifi_ps == WIFI_POWER_MODEM) name = "modem";
+    else if (_prefs->wifi_ps == WIFI_POWER_LIGHT) name = "light";
+    sprintf(reply, "> %s", name);
   } else if (strcmp(config, "wifi.ssid") == 0) {
     sprintf(reply, "> %s", _prefs->wifi_ssid);
   } else if (strcmp(config, "wifi.password") == 0 || strcmp(config, "wifi.pwd") == 0) {

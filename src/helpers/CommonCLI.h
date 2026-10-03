@@ -22,6 +22,12 @@
 #define LOOP_DETECT_MODERATE  2
 #define LOOP_DETECT_STRICT    3
 
+// Station WiFi power while MQTT is up. None is the always-on radio.
+// Modem sleeps the WiFi radio between beacons. Light adds CPU light sleep.
+#define WIFI_POWER_NONE       0
+#define WIFI_POWER_MODEM      1
+#define WIFI_POWER_LIGHT      2
+
 class NodePrefs : public ConfigSerializer {
 public:
   // in-memory backing data
@@ -85,6 +91,7 @@ public:
   float mqtt_ant_m = 0;
   // Station WiFi. MQTT uses this link and does not keep its own SSID.
   uint8_t wifi_enabled = 0;
+  uint8_t wifi_ps = WIFI_POWER_NONE;
   char wifi_ssid[33] = {};
   char wifi_wpass[64] = {};
   // NTP over station WiFi. Empty server means unset; enabling fills pool.ntp.org.
@@ -218,6 +225,7 @@ private:
   protected:
     void structure() override {
       def("en", _parent->wifi_enabled);
+      def("ps", _parent->wifi_ps);
       def("ssid", _parent->wifi_ssid, sizeof(_parent->wifi_ssid));
       def("wpass", _parent->wifi_wpass, sizeof(_parent->wifi_wpass));
     }
@@ -353,6 +361,11 @@ public:
 
   virtual void applyWifiConfig() {
     // Repeater joins or leaves the configured access point.
+  }
+
+  // wifi_ps is already stored. Returns the mode that is actually running.
+  virtual uint8_t applyWifiPowerMode() {
+    return WIFI_POWER_NONE;
   }
 
   virtual void formatWifiStatus(char* reply) {

@@ -227,6 +227,15 @@ void loop() {
 #ifdef HAS_EXTERNAL_WATCHDOG
   external_watchdog.loop();
 #endif
+#if defined(ESP32)
+  // Automatic light sleep runs while this task is blocked. LoRa stays in RX.
+  // DIO is not a wakeup source for this sleep, so do not sleep while the line
+  // is already high; RadioLibWrapper::loop latches that level on the next pass.
+  if (the_mesh.wifiLightSleep()) {
+    uint32_t irq = board.getIRQGpio();
+    if (irq == (uint32_t)-1 || irq > 255 || digitalRead((uint8_t)irq) == LOW) delay(20);
+  }
+#endif
   if (the_mesh.getNodePrefs()->powersaving_enabled && !the_mesh.hasPendingWork()) {
 #if defined(NRF52_PLATFORM)
     board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
