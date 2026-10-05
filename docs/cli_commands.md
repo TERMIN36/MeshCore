@@ -1189,7 +1189,7 @@ The ESP32 repeater web panel and these commands share one configuration. The web
 
 #### MQTT bridge
 
-TLS tunnel. The tunnel name is this node's public key in hex. The web form accepts a base64 JSON version 1 string (`host`, `port`, `user`, `pass`, `ca`) from the MeshCoreTel panel, or the same fields by hand. A certificate is required.
+Connects the repeater to a [MeshCore-MQTT](https://github.com/TERMIN36/MeshCore-MQTT) broker. This is not the MeshCoreTel site. Devices use MQTT over TLS on port `8883`. After a repeater is created, the `/app` panel shows a setup string once: base64 of JSON version 1 (`host`, `port`, `user`, `pass`, `ca`). The repeater web form accepts that string, or the same fields by hand, and publishes on this node's public key. A certificate is required.
 
 **Usage:**
 - `set mqtt.enabled on|off`
@@ -1209,7 +1209,7 @@ TLS tunnel. The tunnel name is this node's public key in hex. The web form accep
 
 #### MeshCoreTel
 
-A second client, plain TCP, independent of the MQTT bridge. Defaults: `mqtt.meshcoretel.ru:1883`, user `meshcore`, password `meshcore`. Status is retained every 5 minutes on `meshcore/<IATA>/<pubkey>/status`. Heard packets go immediately to `meshcore/<IATA>/<pubkey>/packets`. Own transmissions are included only when `tel.tx` is on. Enabling it also enables NTP (`pool.ntp.org`) when NTP was off, because the site expects a clock.
+A separate plain-TCP client for the MeshCoreTel site. Defaults: `mqtt.meshcoretel.ru:1883`, user `meshcore`, password `meshcore`. Status is retained every 5 minutes on `meshcore/<IATA>/<pubkey>/status`. Heard packets go immediately to `meshcore/<IATA>/<pubkey>/packets`. Own transmissions are included only when `tel.tx` is on. Enabling it also enables NTP (`pool.ntp.org`) when NTP was off, because the site expects a clock.
 
 **Usage:**
 - `set mqtt.iata <CODE>` or `set tel on <CODE> [txon|txoff]`
