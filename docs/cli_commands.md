@@ -1170,6 +1170,67 @@ region save
 
 ---
 
+### Repeater Wi-Fi, MQTT bridge, and MeshCoreTel
+
+The ESP32 repeater web panel and these commands share one configuration. The web panel is `http://<address>` from the Wi-Fi screen. Sign in as `admin` with the repeater admin password.
+
+#### Station Wi-Fi
+
+**Usage:**
+- `set wifi on|off`
+- `set wifi.ssid <name>`
+- `set wifi.password <secret>`
+- `set wifi.ps off|modem|light`
+- `get wifi.ssid`
+- `get wifi.password`
+- `get wifi.ps`
+
+`modem` sleeps the Wi-Fi radio between beacons. `light` also sleeps the CPU when the build allows it. MQTT stays connected in both modes.
+
+#### MQTT bridge
+
+TLS tunnel. The tunnel name is this node's public key in hex. The web form accepts a base64 JSON version 1 string (`host`, `port`, `user`, `pass`, `ca`) from the MeshCoreTel panel, or the same fields by hand. A certificate is required.
+
+**Usage:**
+- `set mqtt.enabled on|off`
+- `set mqtt.host <host>`
+- `set mqtt.port <1-65535>`
+- `set mqtt.user <name>`
+- `set mqtt.pass <secret>`
+- `set mqtt.tunnel <topic>`
+- `set mqtt.tls on|off`
+- `get mqtt.enabled`
+- `get mqtt.host`
+- `get mqtt.port`
+- `get mqtt.user`
+- `get mqtt.tunnel`
+- `get mqtt.tls`
+- `get mqtt.cert`
+
+#### MeshCoreTel
+
+A second client, plain TCP, independent of the MQTT bridge. Defaults: `mqtt.meshcoretel.ru:1883`, user `meshcore`, password `meshcore`. Status is retained every 5 minutes on `meshcore/<IATA>/<pubkey>/status`. Heard packets go immediately to `meshcore/<IATA>/<pubkey>/packets`. Own transmissions are included only when `tel.tx` is on. Enabling it also enables NTP (`pool.ntp.org`) when NTP was off, because the site expects a clock.
+
+**Usage:**
+- `set mqtt.iata <CODE>` or `set tel on <CODE> [txon|txoff]`
+- `set mqtt.iata off` or `set tel off`
+- `set tel.tx on|off`
+- `get tel.iata`
+- `get tel.tx`
+
+IATA is 2–7 letters or digits.
+
+#### NTP
+
+**Usage:**
+- `set ntp on [server]`
+- `set ntp off`
+- `set ntp.server <host>`
+
+While a fresh NTP reply is held, air time queries do not overwrite the clock.
+
+---
+
 ### Ethernet (when Ethernet support is compiled in)
 
 Ethernet support is available on RAK4631 boards with a RAK13800 (W5100S) Ethernet module. Use the `_ethernet` firmware variants (e.g. `RAK_4631_repeater_ethernet`) to enable this feature.

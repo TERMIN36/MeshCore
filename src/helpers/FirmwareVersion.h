@@ -7,7 +7,7 @@
 // Release tags must match it exactly; build.sh appends "-<commit hash>".
 // A candidate tag may add a suffix, for example v1.17.1-0.1.3-rc1.
 #define MESHCORE_BASE_VERSION  "v1.17.1"
-#define FORK_VERSION           "0.1.3"
+#define FORK_VERSION           "0.1.4"
 
 #ifndef FIRMWARE_VERSION
   #define FIRMWARE_VERSION  MESHCORE_BASE_VERSION "-" FORK_VERSION

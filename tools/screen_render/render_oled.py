@@ -807,6 +807,16 @@ def scr_repeater_radio(d, profile="Long", freq=869.495, bw=62.5, sf=11, cr=5):
     d.setCursor(0, 52); d.print("3x profile  hold LNA")
 
 
+def scr_repeater_wifi(d):
+    d.setCursor(0, 0); d.setTextSize(1); d.setColor(WHITE)
+    d.print("WiFi")
+    battery(d, 4100)
+    d.setCursor(0, 16); d.print("state: on")
+    d.setCursor(0, 28); d.print("Home")
+    d.setCursor(0, 40); d.print("192.168.1.40")
+    d.setCursor(0, 52); d.print("3x: on/off")
+
+
 SCREENS = [
     ("01_splash", "Заставка Companion", lambda d: scr_splash(d)),
     ("02_message", "Сообщение на кириллице", scr_message),
@@ -844,6 +854,7 @@ SCREENS = [
         d, "HiNoise", 869.495, 31.25, 10, 7)),
     ("18d_repeater_radio_normal", "Repeater Radio: Normal", lambda d: scr_repeater_radio(
         d, "Normal", 869.525, 250.0, 11, 5)),
+    ("18e_repeater_wifi", "Repeater Wi-Fi", scr_repeater_wifi),
 ]
 
 # MeshPocket has no GPS, so its companion build has no GPS / Beacon pages.
