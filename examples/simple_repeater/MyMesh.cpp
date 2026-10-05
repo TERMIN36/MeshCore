@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/RadioProfiles.h>
 #include <RTClib.h>
 #include <algorithm>
 #include <stdlib.h>
@@ -1522,7 +1523,22 @@ static bool nodeNameOk(const char* name) {
   return true;
 }
 
-bool MyMesh::applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t reply_cap) {
+uint8_t MyMesh::radioProfile() const {
+  return radioProfileOf(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr,
+                         _prefs.home_freq, _prefs.home_bw, _prefs.home_sf, _prefs.home_cr);
+}
+
+void MyMesh::applyRadioProfile(uint8_t profile) {
+  applyRadioProfileChoice(profile, _prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr,
+                          _prefs.home_freq, _prefs.home_bw, _prefs.home_sf, _prefs.home_cr);
+  set_radio_at = 0;
+  revert_radio_at = 0;
+  radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
+  savePrefs();
+}
+
+bool MyMesh::applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t reply_cap, bool& reboot) {
+  reboot = false;
   if (!(in.freq >= 150.0f && in.freq <= 2500.0f && in.bw >= 7.0f && in.bw <= 500.0f &&
         in.sf >= 5 && in.sf <= 12 && in.cr >= 5 && in.cr <= 8)) {
     copyReply(reply, reply_cap, "Частота 150–2500 МГц, полоса 7–500 кГц, SF 5–12, CR 4/5–4/8");
@@ -1561,10 +1577,20 @@ bool MyMesh::applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t re
     else _prefs.radio_fem_txgain = in.fem_tx ? 1 : 0;
   }
 
-  _prefs.freq = in.freq;
-  _prefs.bw = in.bw;
-  _prefs.sf = in.sf;
-  _prefs.cr = in.cr;
+  float prev_freq = _prefs.freq;
+  float prev_bw = _prefs.bw;
+  uint8_t prev_sf = _prefs.sf;
+  uint8_t prev_cr = _prefs.cr;
+  if (in.profile == RADIO_PROFILE_LONG || in.profile == RADIO_PROFILE_HINOISE ||
+      in.profile == RADIO_PROFILE_NORMAL) {
+    applyRadioProfileChoice(in.profile, _prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr,
+                            _prefs.home_freq, _prefs.home_bw, _prefs.home_sf, _prefs.home_cr);
+  } else {
+    _prefs.freq = in.freq;
+    _prefs.bw = in.bw;
+    _prefs.sf = in.sf;
+    _prefs.cr = in.cr;
+  }
   _prefs.tx_power_dbm = in.tx_dbm;
   _prefs.rx_boosted_gain = in.rx_gain ? 1 : 0;
   _prefs.disable_fwd = in.forwarding ? 0 : 1;
@@ -1590,10 +1616,13 @@ bool MyMesh::applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t re
   if (!_prefs.rx_boosted_gain) setRxBoostedGain(false);
   savePrefs();
 
+  reboot = !radioNear(prev_freq, _prefs.freq) || !radioNear(prev_bw, _prefs.bw) ||
+           prev_sf != _prefs.sf || prev_cr != _prefs.cr;
   if (fem_rx_fail || fem_tx_fail || rx_fail) {
-    copyReply(reply, reply_cap, "Сохранено. Часть усилителей эта плата не применила");
+    copyReply(reply, reply_cap, reboot ? "Сохранено. Часть усилителей эта плата не применила. Перезагрузка…"
+                                       : "Сохранено. Часть усилителей эта плата не применила");
   } else {
-    copyReply(reply, reply_cap, "Настройки радио сохранены");
+    copyReply(reply, reply_cap, reboot ? "Настройки радио сохранены. Перезагрузка…" : "Настройки радио сохранены");
   }
   return true;
 }
@@ -1630,15 +1659,33 @@ bool MyMesh::applyNodePanel(const RepeaterNodeForm& in, char* reply, size_t repl
     }
   }
 
+  if (in.ant_kind > ADV_ANT_MAXON) {
+    copyReply(reply, reply_cap, "Неизвестный тип антенны");
+    return false;
+  }
+  if (in.ant_height_dm != ADV_ANT_UNSET && in.ant_height_dm > ADV_ANT_HEIGHT_MASK) {
+    copyReply(reply, reply_cap, "Высота антенны: 0–409.5 м");
+    return false;
+  }
+  if (in.ant_bearing != ADV_ANT_UNSET && in.ant_bearing > 359) {
+    copyReply(reply, reply_cap, "Направление: 0–359°");
+    return false;
+  }
+
   StrHelper::strncpy(_prefs.node_name, in.name, sizeof(_prefs.node_name));
   StrHelper::strncpy(_prefs.owner_info, in.owner, sizeof(_prefs.owner_info));
   _prefs.node_lat = lat;
   _prefs.node_lon = lon;
+  _prefs.ant_kind = in.ant_kind;
+  _prefs.ant_height_dm = in.ant_height_dm;
+  _prefs.ant_bearing = in.ant_bearing;
   _prefs.advert_interval = (uint8_t)(mins / 2);
   _prefs.flood_advert_interval = in.flood_hours;
   savePrefs();
   updateAdvertTimer();
   updateFloodAdvertTimer();
+  if (_prefs.advert_interval) sendSelfAdvertisement(500, false);
+  if (_prefs.flood_advert_interval) sendSelfAdvertisement(3000, true);
   copyReply(reply, reply_cap, "Настройки узла сохранены");
   return true;
 }
@@ -2078,10 +2125,14 @@ void MyMesh::fillRepeaterPage(RepeaterPageInfo& info) {
     snprintf(info.lat, sizeof(info.lat), "%.6f", _prefs.node_lat);
     snprintf(info.lon, sizeof(info.lon), "%.6f", _prefs.node_lon);
   }
+  info.ant_kind = _prefs.ant_kind;
+  info.ant_height_dm = _prefs.ant_height_dm;
+  info.ant_bearing = _prefs.ant_bearing;
   info.freq = _prefs.freq;
   info.bw = _prefs.bw;
   info.sf = _prefs.sf;
   info.cr = _prefs.cr;
+  info.radio_profile = radioProfile();
   info.tx_dbm = _prefs.tx_power_dbm;
   info.forwarding = _prefs.disable_fwd ? 0 : 1;
   sampleEnvironment(info.batt_mv, info.temp_c_x10);

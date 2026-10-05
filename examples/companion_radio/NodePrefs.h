@@ -36,6 +36,10 @@ public:
   uint8_t multi_acks = 0;
   uint8_t manual_add_contacts = 0;
   float bw = 0;
+  float home_freq = 0;     // radio saved before the Long profile
+  float home_bw = 0;
+  uint8_t home_sf = 0;
+  uint8_t home_cr = 0;
   int8_t tx_power_dbm = 0;
   uint8_t telemetry_mode_base = 0;
   uint8_t telemetry_mode_loc = 0;
@@ -78,6 +82,10 @@ private:
       def("bw", _parent->bw);
       def("sf", _parent->sf);
       def("cr", _parent->cr);
+      def("hf", _parent->home_freq);
+      def("hb", _parent->home_bw);
+      def("hs", _parent->home_sf);
+      def("hc", _parent->home_cr);
       //def("cad", _parent->cad_enabled);
       //def("int_thr", _parent->interference_threshold);
       def("rxgain", _parent->rx_boosted_gain);

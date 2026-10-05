@@ -206,12 +206,12 @@ def scr_neighbors(d):
 def scr_radio(d):
     header(d, "Radio")
     d.setTextSize(1); d.setColor("primary")
-    d.setCursor(0, 20); d.print("FQ: 869.525   SF: 11")
-    d.setCursor(0, 31); d.print("BW: 250.00     CR: 5")
-    d.setColor("secondary")
+    d.setCursor(0, 20); d.print("FQ: 869.495   SF: 11")
+    d.setCursor(0, 31); d.print("BW: 62.50      CR: 5")
     d.setCursor(0, 42); d.print("TX: 22dBm  LNA: off")
-    d.setColor("warning")
-    d.setCursor(0, 53); d.print("Noise floor: -108")
+    d.drawTextLeftAlign(0, 53, "Long")
+    d.setColor("secondary")
+    d.drawTextRightAlign(d.width() - 1, 53, "3x: profile")
 
 
 def scr_alert(d):

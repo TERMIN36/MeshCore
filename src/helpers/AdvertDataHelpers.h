@@ -12,9 +12,34 @@
 //FUTURE: 5..15
 
 #define ADV_LATLON_MASK       0x10
-#define ADV_FEAT1_MASK        0x20   // FUTURE
-#define ADV_FEAT2_MASK        0x40   // FUTURE
+#define ADV_FEAT1_MASK        0x20
+#define ADV_FEAT2_MASK        0x40
 #define ADV_NAME_MASK         0x80
+
+// Antenna installation, carried in the two feature words of an advert.
+// feat1: bit 15 set when height is present, bits 12–14 kind (0–7), bits 0–11 height in decimetres.
+//        The word is omitted when kind is 0 and height is absent.
+// feat2: bits 0–8 bearing in degrees (0 = north, clockwise), bit 15 set when a bearing is present.
+//        bits 9–12 are the kind when it is 8…15. Kinds 0–7 leave these bits clear and use feat1.
+#define ADV_ANT_UNSET         0xFFFF
+#define ADV_ANT_HEIGHT_MASK   0x0FFF
+#define ADV_ANT_KIND_SHIFT    12
+#define ADV_ANT_KIND_MASK     0x07
+#define ADV_ANT_KIND_EXT_SHIFT 9
+#define ADV_ANT_KIND_EXT_MASK 0x0F
+#define ADV_ANT_HEIGHT_FLAG   0x8000
+#define ADV_ANT_BEARING_MASK  0x01FF
+#define ADV_ANT_BEARING_FLAG  0x8000
+
+#define ADV_ANT_NONE          0
+#define ADV_ANT_OMNI          1
+#define ADV_ANT_COLLINEAR     2
+#define ADV_ANT_WHIP          3
+#define ADV_ANT_DIPOLE        4
+#define ADV_ANT_YAGI          5
+#define ADV_ANT_PANEL         6
+#define ADV_ANT_MAGNET        7
+#define ADV_ANT_MAXON         8
 
 class AdvertDataBuilder {
   uint8_t _type;
@@ -31,6 +56,8 @@ public:
 
   void setFeat1(uint16_t extra) { _extra1 = extra; }
   void setFeat2(uint16_t extra) { _extra2 = extra; }
+  // kind is ADV_ANT_*. Pass ADV_ANT_UNSET when height or bearing is not set.
+  void setAntenna(uint8_t kind, uint16_t height_dm, uint16_t bearing_deg);
 
   /**
    * \brief  encode the given advertisement data.

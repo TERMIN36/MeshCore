@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include <helpers/RadioProfiles.h>
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
@@ -595,6 +596,21 @@ bool MyMesh::filterRecvFloodPacket(mesh::Packet* packet) {
 
 bool MyMesh::allowPacketForward(const mesh::Packet* packet) {
   return _prefs.isRepeatEn();
+}
+
+uint8_t MyMesh::radioProfile() const {
+  return radioProfileOf(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr,
+                         _prefs.home_freq, _prefs.home_bw, _prefs.home_sf, _prefs.home_cr);
+}
+
+void MyMesh::applyRadioProfile(uint8_t profile) {
+  bool repeat = applyRadioProfileChoice(profile, _prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr,
+                                        _prefs.home_freq, _prefs.home_bw, _prefs.home_sf, _prefs.home_cr);
+  uint32_t khz = (uint32_t)(_prefs.freq * 1000.0f + 0.5f);
+  if (repeat && !isValidClientRepeatFreq(khz)) repeat = false;
+  _prefs.setRepeatEn(repeat);
+  savePrefs();
+  radio_driver.setParams(_prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr);
 }
 
 void MyMesh::sendFloodScoped(const TransportKey& scope, mesh::Packet* pkt, uint32_t delay_millis) {

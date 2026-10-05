@@ -1,6 +1,7 @@
 #include "RepeaterWeb.h"
 
 #include "MyMesh.h"
+#include <helpers/RadioProfiles.h>
 #include "NtpClock.h"
 
 #include <stdarg.h>
@@ -36,6 +37,8 @@ static char result_reply[2][CMD_CAP];
 static std::atomic<uint32_t> submit_seq{0};
 static std::atomic<uint32_t> result_seq{0};
 static std::atomic<uint32_t> result_slot{0};
+static std::atomic<uint32_t> web_reboot_at{0};
+static char web_reboot_cmd[CMD_CAP];
 static std::atomic_flag submit_gate = ATOMIC_FLAG_INIT;
 static RepeaterPageInfo page_buf[2];
 static char admin_pass[2][17];
@@ -95,6 +98,7 @@ static std::atomic<uint8_t> power_hold{0xFF};
 static std::atomic<RepeaterRadioForm*> radio_job{nullptr};
 static std::atomic<RepeaterNodeForm*> node_job{nullptr};
 static std::atomic<uint8_t> radio_hold{0};
+static std::atomic<uint8_t> radio_reboot{0};
 static std::atomic<uint8_t> node_hold{0};
 static RepeaterRadioForm radio_hold_form;
 static RepeaterNodeForm node_hold_form;
@@ -404,8 +408,17 @@ static void serviceRadioJob() {
   if (!job) return;
   char reply[120];
   reply[0] = 0;
-  the_mesh.applyRadioPanel(*job, reply, sizeof(reply));
+  bool reboot = false;
+  bool ok = the_mesh.applyRadioPanel(*job, reply, sizeof(reply), reboot);
   setRadioNote(reply[0] ? reply : "Настройки радио не применены");
+  if (ok && reboot) {
+    strncpy(web_reboot_cmd, "reboot", CMD_CAP - 1);
+    web_reboot_cmd[CMD_CAP - 1] = 0;
+    uint32_t when = millis() + 3000;
+    if (!when) when = 1;
+    web_reboot_at.store(when, std::memory_order_release);
+    radio_reboot.store(1, std::memory_order_release);
+  }
   free(job);
   publishSnapshot();
   last_snapshot_ms = millis();
@@ -455,7 +468,18 @@ static void serviceCommand() {
 
   char reply[CMD_CAP];
   reply[0] = 0;
-  the_mesh.handleCommand(0, command, reply);
+  // Reboot from the page used to reset the chip before the browser followed
+  // the redirect, so a refresh stayed on /act or /cmd and the page 404'd.
+  if (memcmp(command, "reboot", 6) == 0 || memcmp(command, "clkreboot", 9) == 0) {
+    memcpy(web_reboot_cmd, command, CMD_CAP);
+    web_reboot_cmd[CMD_CAP - 1] = 0;
+    uint32_t when = millis() + 2000;
+    if (!when) when = 1;
+    web_reboot_at.store(when, std::memory_order_release);
+    strncpy(reply, "Перезагрузка…", sizeof(reply) - 1);
+  } else {
+    the_mesh.handleCommand(0, command, reply);
+  }
   reply[CMD_CAP - 1] = 0;
 
   uint32_t slot = result_slot.load(std::memory_order_relaxed) ^ 1u;
@@ -603,6 +627,20 @@ static void renderConsoleOut(char*& cursor, size_t& left, bool busy, bool pendin
   }
 }
 
+static const char* antennaKindName(uint8_t kind) {
+  switch (kind) {
+    case ADV_ANT_OMNI: return "всенаправленная";
+    case ADV_ANT_COLLINEAR: return "коллинеар";
+    case ADV_ANT_WHIP: return "штырь";
+    case ADV_ANT_DIPOLE: return "диполь";
+    case ADV_ANT_YAGI: return "яги";
+    case ADV_ANT_PANEL: return "панель";
+    case ADV_ANT_MAGNET: return "магнитная";
+    case ADV_ANT_MAXON: return "Maxon";
+    default: return "не указана";
+  }
+}
+
 static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left) {
   appendRaw(cursor, left, "<section><h2>Узел</h2><table>");
 
@@ -620,6 +658,11 @@ static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left
     row(cursor, left, "Широта", info.lat);
     row(cursor, left, "Долгота", info.lon);
   }
+  row(cursor, left, "Антенна", antennaKindName(info.ant_kind));
+  if (info.ant_height_dm != ADV_ANT_UNSET) rowFmt(cursor, left, "Высота", "%.1f м", info.ant_height_dm / 10.0);
+  else row(cursor, left, "Высота", "не указана");
+  if (info.ant_bearing != ADV_ANT_UNSET) rowFmt(cursor, left, "Направление", "%u°", info.ant_bearing);
+  else row(cursor, left, "Направление", "не указано");
   appendRaw(cursor, left, "</table></section><section><h2>Часы и объявления</h2><table>");
   row(cursor, left, "Часы", info.time_valid ? info.clock_text : "не выставлены");
   const char* ntp_label = "выкл";
@@ -713,8 +756,8 @@ static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left
   row(cursor, left, "Доступность", info.mqtt_tcp[0] ? info.mqtt_tcp : "—");
   row(cursor, left, "TLS", info.mqtt_tls ? "вкл" : "выкл");
   row(cursor, left, "Сертификат", info.mqtt_cert ? "есть" : "нет");
-  if (info.mqtt_ant_m != 0.0f) rowFmt(cursor, left, "Антенна", "%.1f м", info.mqtt_ant_m);
-  else row(cursor, left, "Антенна", "нет");
+  if (info.mqtt_ant_m != 0.0f) rowFmt(cursor, left, "Высота MQTT", "%.1f м", info.mqtt_ant_m);
+  else row(cursor, left, "Высота MQTT", "нет");
   row(cursor, left, "MeshCoreTel", info.tel[0] ? info.tel : "выкл");
   if (info.tel_host[0]) rowFmt(cursor, left, "Брокер", "%s:%u", info.tel_host, info.tel_port ? info.tel_port : 1883);
   else row(cursor, left, "Брокер", "—");
@@ -790,10 +833,11 @@ static void selectClose(char*& cursor, size_t& left) {
   appendRaw(cursor, left, "</select></label>");
 }
 
-static void noteLine(char*& cursor, size_t& left, const char* id, const char* text) {
+static void noteLine(char*& cursor, size_t& left, const char* id, const char* text, bool boot = false) {
   appendRaw(cursor, left, "<p id=\"");
   appendRaw(cursor, left, id);
   appendRaw(cursor, left, "\" class=\"note\"");
+  if (boot) appendRaw(cursor, left, " data-boot=\"1\"");
   if (!text || !text[0]) appendRaw(cursor, left, " hidden");
   appendRaw(cursor, left, ">");
   appendEscaped(cursor, left, text ? text : "");
@@ -834,8 +878,18 @@ static void renderRadioForm(const RepeaterPageInfo& info, char*& cursor, size_t&
   char num[24];
   appendRaw(cursor, left,
             "<section id=\"radio\"><h2>Настройки радио</h2>"
-            "<p class=\"sub\">Частота, полоса, SF и CR применяются сразу. Соседи должны стоять на тех же параметрах.</p>"
+            "<p class=\"sub\">«Дальний» — 869.495 МГц, полоса 62.5, SF11, CR 4/5. "
+            "«HiNoise» — та же частота, полоса 31.25, SF10, CR 4/7, когда шум на весь эфир. "
+            "«Обычный» возвращает параметры, которые были до специального профиля. "
+            "Соседи должны стоять на тех же параметрах. На дальнем и HiNoise компаньон включает ретрансляцию. "
+            "Если меняются частота, полоса, SF или CR, репитер перезагружается сам.</p>"
             "<form class=\"setup grid\" method=\"post\" action=\"/radio\" autocomplete=\"off\">");
+  selectOpen(cursor, left, "Профиль", "profile");
+  selectOption(cursor, left, "custom", "Свой", info.radio_profile == RADIO_PROFILE_CUSTOM);
+  selectOption(cursor, left, "normal", "Обычный", info.radio_profile == RADIO_PROFILE_NORMAL);
+  selectOption(cursor, left, "long", "Дальний", info.radio_profile == RADIO_PROFILE_LONG);
+  selectOption(cursor, left, "hinoise", "HiNoise", info.radio_profile == RADIO_PROFILE_HINOISE);
+  selectClose(cursor, left);
   snprintf(num, sizeof(num), "%.3f", form.freq);
   textField(cursor, left, "Частота, МГц", "freq", num, "inputmode=\"decimal\" maxlength=\"8\"", false);
   selectOpen(cursor, left, "Полоса, кГц", "bw");
@@ -904,7 +958,7 @@ static void renderRadioForm(const RepeaterPageInfo& info, char*& cursor, size_t&
   checkField(cursor, left, "cad", "CAD перед передачей", form.cad != 0);
   checkField(cursor, left, "acks", "Дополнительный ACK", form.multi_acks != 0);
   appendRaw(cursor, left, "<button class=\"span2\" type=\"submit\">Сохранить радио</button></form>");
-  noteLine(cursor, left, "radio-note", radio_note);
+  noteLine(cursor, left, "radio-note", radio_note, radio_reboot.load(std::memory_order_acquire) != 0);
   appendRaw(cursor, left, "</section>");
 }
 
@@ -917,13 +971,17 @@ static void renderNodeForm(const RepeaterPageInfo& info, char*& cursor, size_t& 
     strncpy(form.owner, info.owner, sizeof(form.owner) - 1);
     strncpy(form.lat, info.lat, sizeof(form.lat) - 1);
     strncpy(form.lon, info.lon, sizeof(form.lon) - 1);
+    form.ant_kind = info.ant_kind;
+    form.ant_height_dm = info.ant_height_dm;
+    form.ant_bearing = info.ant_bearing;
     form.advert_mins = info.advert_local_mins;
     form.flood_hours = info.advert_flood_hours;
   }
   char num[16];
   appendRaw(cursor, left,
             "<section id=\"node\"><h2>Узел</h2>"
-            "<p class=\"sub\">Имя и координаты попадают в объявление. Ноль в интервале выключает его.</p>"
+            "<p class=\"sub\">Имя, координаты и антенна попадают в объявление. Ноль в интервале выключает его. "
+            "Направление — азимут: 0° север, по часовой.</p>"
             "<form class=\"setup grid\" method=\"post\" action=\"/node\" autocomplete=\"off\">");
   textField(cursor, left, "Имя", "name", form.name, "maxlength=\"31\"", true);
   appendRaw(cursor, left, "<label class=\"field span2\">Описание<textarea name=\"owner\" maxlength=\"119\" rows=\"3\">");
@@ -931,6 +989,25 @@ static void renderNodeForm(const RepeaterPageInfo& info, char*& cursor, size_t& 
   appendRaw(cursor, left, "</textarea></label>");
   textField(cursor, left, "Широта", "lat", form.lat, "inputmode=\"decimal\" maxlength=\"15\"", false);
   textField(cursor, left, "Долгота", "lon", form.lon, "inputmode=\"decimal\" maxlength=\"15\"", false);
+  selectOpen(cursor, left, "Антенна", "ant");
+  selectOption(cursor, left, "0", "не указана", form.ant_kind == ADV_ANT_NONE);
+  selectOption(cursor, left, "1", "всенаправленная", form.ant_kind == ADV_ANT_OMNI);
+  selectOption(cursor, left, "2", "коллинеар", form.ant_kind == ADV_ANT_COLLINEAR);
+  selectOption(cursor, left, "3", "штырь", form.ant_kind == ADV_ANT_WHIP);
+  selectOption(cursor, left, "4", "диполь", form.ant_kind == ADV_ANT_DIPOLE);
+  selectOption(cursor, left, "5", "яги", form.ant_kind == ADV_ANT_YAGI);
+  selectOption(cursor, left, "6", "панель", form.ant_kind == ADV_ANT_PANEL);
+  selectOption(cursor, left, "7", "магнитная", form.ant_kind == ADV_ANT_MAGNET);
+  selectOption(cursor, left, "8", "Maxon", form.ant_kind == ADV_ANT_MAXON);
+  selectClose(cursor, left);
+  char height[16];
+  height[0] = 0;
+  if (form.ant_height_dm != ADV_ANT_UNSET) snprintf(height, sizeof(height), "%.1f", form.ant_height_dm / 10.0);
+  textField(cursor, left, "Высота, м", "height", height, "inputmode=\"decimal\" maxlength=\"6\" placeholder=\"пусто — не указана\"", false);
+  char bearing[8];
+  bearing[0] = 0;
+  if (form.ant_bearing != ADV_ANT_UNSET) snprintf(bearing, sizeof(bearing), "%u", form.ant_bearing);
+  textField(cursor, left, "Направление, °", "brg", bearing, "inputmode=\"numeric\" maxlength=\"3\" placeholder=\"пусто — не указано\"", false);
   snprintf(num, sizeof(num), "%u", form.advert_mins);
   textField(cursor, left, "Локальное объявление, мин", "advert", num, "inputmode=\"numeric\" maxlength=\"3\"", false);
   snprintf(num, sizeof(num), "%u", form.flood_hours);
@@ -1126,8 +1203,19 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "Те же команды, что и в последовательной консоли. Данные приходят по WebSocket, страница не перезагружается.</p>"
             "<script>(function(){var live=document.getElementById('live'),out=document.getElementById('out'),title=document.getElementById('title');"
             "function setNote(id,text){var el=document.getElementById(id);if(!el)return;el.hidden=!text;el.textContent=text||'';}"
+            "var booting=false;"
+            "function watchBoot(){if(booting)return;booting=true;setNote('radio-note','Настройки радио сохранены. Репитер перезагружается…');"
+            "var started=Date.now(),downSince=0,before=null;"
+            "function finish(){setNote('radio-note','Репитер снова в сети. Обновляю страницу…');setTimeout(function(){location.replace('/?at=radio');},600);}"
+            "function back(up){var outage=downSince?Date.now()-downSince:0;if(!isFinite(up)||outage<4000)return false;if(before!==null&&up+5<before)return true;return up<180&&(before===null||outage>=15000);}"
+            "function probe(){var elapsed=Date.now()-started;"
+            "if(elapsed>90000){setNote('radio-note','Репитер не подтвердил перезагрузку. Обновите страницу.');return;}"
+            "var req=new XMLHttpRequest();var settled=false;req.open('GET','/up?t='+Date.now());req.timeout=3000;"
+            "function fail(){if(settled)return;settled=true;if(!downSince)downSince=Date.now();setNote('radio-note','Репитер перезагружается, жду его в сети…');setTimeout(probe,1000);}"
+            "req.onload=function(){if(settled)return;if(req.status!==200){if(!req.status)fail();else{settled=true;setTimeout(probe,700);}return;}settled=true;var up=parseInt(req.responseText,10);if(downSince&&back(up)){finish();return;}if(!downSince)before=up;setTimeout(probe,700);};"
+            "req.onerror=req.ontimeout=fail;req.send();}setTimeout(probe,800);}"
             "function apply(m){if(m.t&&title){title.textContent=m.t;document.title=m.t;}if(m.live&&live)live.innerHTML=m.live;if(out)out.innerHTML=m.out||'';"
-            "if(m.rn!==undefined)setNote('radio-note',m.rn);if(m.nn!==undefined)setNote('node-note',m.nn);if(m.pn!==undefined)setNote('power-note',m.pn);}"
+            "if(m.rb)watchBoot();if(m.rn!==undefined&&!booting)setNote('radio-note',m.rn);if(m.nn!==undefined)setNote('node-note',m.nn);if(m.pn!==undefined)setNote('power-note',m.pn);}"
             "var b64=document.getElementById('mqtt-b64'),man=document.getElementById('mqtt-manual');"
             "var tb=document.getElementById('mqtt-tab-b64'),tm=document.getElementById('mqtt-tab-manual');"
             "function mqttMode(manual){if(!b64||!man)return;b64.classList.toggle('off',manual);man.classList.toggle('off',!manual);if(tb)tb.classList.toggle('on',!manual);if(tm)tm.classList.toggle('on',manual);}"
@@ -1138,7 +1226,11 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "var same=!!(prev&&ver&&prev===ver.textContent);fwNote.hidden=false;fwNote.classList.add(same?'bad':'ok');"
             "fwNote.textContent=same?'Репитер перезагрузился, но версия прошивки не изменилась.':'Прошивка обновлена. Репитер загрузился с новой версией.';"
             "var fwBox=document.getElementById('fw');if(fwBox&&fwBox.scrollIntoView)fwBox.scrollIntoView();"
-            "if(history.replaceState)history.replaceState(null,'',location.pathname+location.hash);}"
+            "if(history.replaceState)history.replaceState(null,'','/'+(location.hash||''));}"
+            "var rn0=document.getElementById('radio-note');if(rn0&&rn0.getAttribute('data-boot')==='1')watchBoot();"
+            "var at=/[?&]at=([A-Za-z0-9_-]+)/.exec(location.search);"
+            "if(at){var box=document.getElementById(at[1]);if(box&&box.scrollIntoView)box.scrollIntoView();"
+            "if(history.replaceState)history.replaceState(null,'','/#'+at[1]);}"
             "var fw=document.getElementById('fw-form');"
             "if(fw)fw.onsubmit=function(ev){ev.preventDefault();var input=fw.querySelector('input[type=file]');var file=input&&input.files&&input.files[0];"
             "var note=document.getElementById('fw-note'),bar=document.getElementById('fw-bar'),btn=fw.querySelector('button');"
@@ -1151,7 +1243,7 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "function waitBoot(){if(waiting)return;waiting=true;say('Прошивка записана. Начинается перезагрузка…');"
             "if(bar){bar.hidden=false;bar.max=bar.max||100;bar.value=bar.max;}"
             "var started=Date.now(),downSince=0,before=null;"
-            "function finish(){say('Репитер снова в сети. Обновляю страницу…','ok');setTimeout(function(){location.replace(location.pathname+'?fw=1');},600);}"
+            "function finish(){say('Репитер снова в сети. Обновляю страницу…','ok');setTimeout(function(){location.replace('/?fw=1');},600);}"
             "function back(up){var outage=downSince?Date.now()-downSince:0;if(!isFinite(up)||outage<4000)return false;if(before!==null&&up+5<before)return true;return up<180&&(before===null||outage>=15000);}"
             "function probe(){var elapsed=Date.now()-started;"
             "if(elapsed>120000){say('Репитер не подтвердил перезагрузку. Обновите страницу и проверьте версию прошивки.','bad');if(btn)btn.disabled=false;return;}"
@@ -1301,7 +1393,7 @@ static void pushLive(bool force) {
   appendJsonEscaped(cursor, left, node_note, strlen(node_note));
   appendRaw(cursor, left, ",\"pn\":");
   appendJsonEscaped(cursor, left, power_note, strlen(power_note));
-  appendRaw(cursor, left, "}");
+  appendRaw(cursor, left, radio_reboot.load(std::memory_order_acquire) ? ",\"rb\":1}" : ",\"rb\":0}");
   if (left > 64) {
     socket->textAll(live_json);
     last_push_ms = now;
@@ -1578,7 +1670,7 @@ static void handleRadio(AsyncWebServerRequest* request) {
                    fmaxu >= 0 && fmaxu <= 64 && fmaxa >= 0 && fmaxa <= 64 && hash >= 0 && hash <= 2 &&
                    loop >= 0 && loop <= 3)) {
     setRadioNote("Проверьте диапазоны: частота 150–2500, полоса 7–500, SF 5–12, CR 4/5–4/8, мощность −9…30");
-    request->redirect("/#radio");
+    request->redirect("/?at=radio");
     return;
   }
   RepeaterRadioForm form;
@@ -1587,6 +1679,13 @@ static void handleRadio(AsyncWebServerRequest* request) {
   form.bw = bw;
   form.sf = (uint8_t)sf;
   form.cr = (uint8_t)cr;
+  char profile[8];
+  profile[0] = 0;
+  readText(request, "profile", profile, sizeof(profile));
+  if (strcmp(profile, "long") == 0) form.profile = RADIO_PROFILE_LONG;
+  else if (strcmp(profile, "hinoise") == 0) form.profile = RADIO_PROFILE_HINOISE;
+  else if (strcmp(profile, "normal") == 0) form.profile = RADIO_PROFILE_NORMAL;
+  else form.profile = RADIO_PROFILE_CUSTOM;
   form.tx_dbm = (int8_t)tx;
   form.airtime = air;
   form.rx_delay = rxd;
@@ -1612,7 +1711,7 @@ static void handleRadio(AsyncWebServerRequest* request) {
   if (queued == 2) setRadioNote("Не хватило памяти");
   else if (queued) setRadioNote("Предыдущие настройки ещё сохраняются");
   else setRadioNote("Сохраняем настройки радио…");
-  request->redirect("/#radio");
+  request->redirect("/?at=radio");
 }
 
 static void handleNode(AsyncWebServerRequest* request) {
@@ -1622,13 +1721,13 @@ static void handleNode(AsyncWebServerRequest* request) {
   readText(request, "name", form.name, sizeof(form.name));
   if (!webNameOk(form.name)) {
     setNodeNote("В имени нельзя использовать [ ] \\ : , ? *");
-    request->redirect("/#node");
+    request->redirect("/?at=node");
     return;
   }
   if (request->hasParam("owner", true) &&
       !copyOwner(form.owner, sizeof(form.owner), request->getParam("owner", true)->value())) {
     setNodeNote("Описание владельца длиннее 119 символов");
-    request->redirect("/#node");
+    request->redirect("/?at=node");
     return;
   }
   readText(request, "lat", form.lat, sizeof(form.lat));
@@ -1643,7 +1742,7 @@ static void handleNode(AsyncWebServerRequest* request) {
     if (!form.lat[0] || !lat_end || *lat_end || lat < -90.0 || lat > 90.0 ||
         !form.lon[0] || !lon_end || *lon_end || lon < -180.0 || lon > 180.0) {
       setNodeNote("Широта −90…90, долгота −180…180");
-      request->redirect("/#node");
+      request->redirect("/?at=node");
       return;
     }
   }
@@ -1653,16 +1752,52 @@ static void handleNode(AsyncWebServerRequest* request) {
       mins < 0 || (mins > 0 && mins < 60) || mins > 240 ||
       hours < 0 || (hours > 0 && hours < 3) || hours > 168) {
     setNodeNote("Локальное объявление: 0 или 60–240 мин. Flood: 0 или 3–168 ч");
-    request->redirect("/#node");
+    request->redirect("/?at=node");
     return;
   }
   form.advert_mins = (uint16_t)((mins / 2) * 2);
   form.flood_hours = (uint8_t)hours;
+  long kind = 0;
+  if (!readLong(request, "ant", kind) || kind < ADV_ANT_NONE || kind > ADV_ANT_MAXON) {
+    setNodeNote("Выберите антенну из списка");
+    request->redirect("/?at=node");
+    return;
+  }
+  form.ant_kind = (uint8_t)kind;
+  char height[16];
+  readText(request, "height", height, sizeof(height));
+  commaDot(height);
+  if (!height[0]) {
+    form.ant_height_dm = ADV_ANT_UNSET;
+  } else {
+    char* end = nullptr;
+    double meters = strtod(height, &end);
+    if (!end || end == height || *end || meters < 0.0 || meters > 409.5) {
+      setNodeNote("Высота антенны: 0–409.5 м или пусто");
+      request->redirect("/?at=node");
+      return;
+    }
+    form.ant_height_dm = (uint16_t)(meters * 10.0 + 0.5);
+  }
+  char bearing[8];
+  readText(request, "brg", bearing, sizeof(bearing));
+  if (!bearing[0]) {
+    form.ant_bearing = ADV_ANT_UNSET;
+  } else {
+    char* end = nullptr;
+    long deg = strtol(bearing, &end, 10);
+    if (!end || end == bearing || *end || deg < 0 || deg > 359) {
+      setNodeNote("Направление: 0–359° или пусто. 0° — север");
+      request->redirect("/?at=node");
+      return;
+    }
+    form.ant_bearing = (uint16_t)deg;
+  }
   int queued = queueNode(form);
   if (queued == 2) setNodeNote("Не хватило памяти");
   else if (queued) setNodeNote("Предыдущие настройки ещё сохраняются");
   else setNodeNote("Сохраняем настройки узла…");
-  request->redirect("/#node");
+  request->redirect("/?at=node");
 }
 
 static void handleCmd(AsyncWebServerRequest* request) {
@@ -1759,13 +1894,13 @@ static void handlePower(AsyncWebServerRequest* request) {
   long mode = -1;
   if (!readLong(request, "mode", mode) || mode < WIFI_POWER_NONE || mode > WIFI_POWER_LIGHT) {
     setPowerNote("Неизвестный режим");
-    request->redirect("/#power");
+    request->redirect("/?at=power");
     return;
   }
   power_hold.store((uint8_t)mode, std::memory_order_release);
   power_job.store((uint8_t)mode, std::memory_order_release);
   setPowerNote("Сохраняем…");
-  request->redirect("/#power");
+  request->redirect("/?at=power");
 }
 
 static void handleNtp(AsyncWebServerRequest* request) {
@@ -1803,6 +1938,16 @@ static void handleAct(AsyncWebServerRequest* request) {
     return;
   }
   request->redirect("/");
+}
+
+static void onUptime(AsyncWebServerRequest* request) {
+  if (!allowed(request)) return;
+  char body[16];
+  snprintf(body, sizeof(body), "%lu", (unsigned long)(millis() / 1000));
+  AsyncWebServerResponse* response = request->beginResponse(200, "text/plain; charset=utf-8", body);
+  response->addHeader("Cache-Control", "no-store");
+  response->addHeader("Connection", "close");
+  request->send(response);
 }
 
 #ifndef DISABLE_WIFI_OTA
@@ -1983,6 +2128,11 @@ static void onFwUpload(AsyncWebServerRequest* request, String filename, size_t i
 
 static void onFwStatus(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
+  // The uptime probe is /fw?t=… . A browser refresh of /fw must get the page, not a number.
+  if (!request->hasParam("t")) {
+    request->redirect("/");
+    return;
+  }
   char body[16];
   snprintf(body, sizeof(body), "%lu", (unsigned long)(millis() / 1000));
   AsyncWebServerResponse* response = request->beginResponse(200, "text/plain; charset=utf-8", body);
@@ -2052,6 +2202,18 @@ void RepeaterWeb::poll(bool enabled) {
     return;
   }
 #endif
+  uint32_t reboot_at = web_reboot_at.load(std::memory_order_acquire);
+  if (reboot_at && (int32_t)(millis() - reboot_at) >= 0) {
+    char command[CMD_CAP];
+    char reply[CMD_CAP];
+    memcpy(command, web_reboot_cmd, CMD_CAP);
+    command[CMD_CAP - 1] = 0;
+    reply[0] = 0;
+    web_reboot_at.store(0, std::memory_order_release);
+    Serial.println("Web: перезагрузка");
+    the_mesh.handleCommand(0, command, reply);
+    return;
+  }
   serviceCommand();
   serviceMqttJob();
   serviceTelJob();
@@ -2090,6 +2252,7 @@ void RepeaterWeb::poll(bool enabled) {
   server->on("/", HTTP_GET, sendPage);
   server->on("/cmd", HTTP_POST, handleCmd);
   server->on("/radio", HTTP_POST, handleRadio);
+  server->on("/up", HTTP_GET, onUptime);
   server->on("/node", HTTP_POST, handleNode);
   server->on("/power", HTTP_POST, handlePower);
   server->on("/ntp", HTTP_POST, handleNtp);
@@ -2100,6 +2263,21 @@ void RepeaterWeb::poll(bool enabled) {
   server->on("/fw", HTTP_GET, onFwStatus);
   server->on("/fw", HTTP_POST, onFwDone, onFwUpload);
 #endif
+  server->onNotFound([](AsyncWebServerRequest* request) {
+    if (request->method() != HTTP_GET) {
+      request->send(404, "text/plain; charset=utf-8", "not found");
+      return;
+    }
+    if (request->url() == "/favicon.ico") {
+      request->send(204);
+      return;
+    }
+    const String& url = request->url();
+    if (url == "/radio") request->redirect("/?at=radio");
+    else if (url == "/node") request->redirect("/?at=node");
+    else if (url == "/power") request->redirect("/?at=power");
+    else request->redirect("/");
+  });
   server->begin();
   server_ip = ip;
   IPAddress addr = WiFi.localIP();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Mesh.h"
+#include <helpers/AdvertDataHelpers.h>
 #include <helpers/IdentityStore.h>
 #include <helpers/SensorManager.h>
 #include <helpers/ClientACL.h>
@@ -34,6 +35,9 @@ public:
   float airtime_factor = 0;
   char node_name[32];
   double node_lat = 0, node_lon = 0;
+  uint8_t ant_kind = ADV_ANT_NONE;
+  uint16_t ant_height_dm = ADV_ANT_UNSET;
+  uint16_t ant_bearing = ADV_ANT_UNSET;
   char password[16];
   float freq = 0;
   int8_t tx_power_dbm = 0;
@@ -50,6 +54,10 @@ public:
   uint8_t allow_read_only = 0;
   uint8_t multi_acks = 0;
   float bw = 0;
+  float home_freq = 0;     // radio saved before the Long profile
+  float home_bw = 0;
+  uint8_t home_sf = 0;
+  uint8_t home_cr = 0;
   uint8_t flood_max = 0;
   uint8_t flood_max_unscoped = 0;
   uint8_t flood_max_advert = 0;
@@ -116,6 +124,10 @@ private:
       def("bw", _parent->bw);
       def("sf", _parent->sf);
       def("cr", _parent->cr);
+      def("hf", _parent->home_freq);
+      def("hb", _parent->home_bw);
+      def("hs", _parent->home_sf);
+      def("hc", _parent->home_cr);
       def("cad", _parent->cad_enabled);
       def("int_thr", _parent->interference_threshold);
       def("rxgain", _parent->rx_boosted_gain);
@@ -273,6 +285,9 @@ protected:
     def("f_adv_int", flood_advert_interval);
     def("lat", node_lat);
     def("lon", node_lon);
+    def("ant_kind", ant_kind);
+    def("ant_hdm", ant_height_dm);
+    def("ant_brg", ant_bearing);
     def("tvalid", time_valid);
     def("radio", radio);
     def("bridge", bridge);

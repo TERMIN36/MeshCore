@@ -279,7 +279,9 @@ public:
   void disableMqtt();
   bool applyTelPanel(bool enable, const char* iata, const char* host, uint16_t port, const char* user, const char* broker_pass,
                      bool tx, char* reply, size_t reply_cap);
-  bool applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t reply_cap);
+  bool applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t reply_cap, bool& reboot);
+  uint8_t radioProfile() const;
+  void applyRadioProfile(uint8_t profile);
   bool applyNodePanel(const RepeaterNodeForm& in, char* reply, size_t reply_cap);
   void applyWifiConfig() override;
   uint8_t applyWifiPowerMode() override;

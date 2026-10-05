@@ -48,6 +48,9 @@ struct RepeaterPageInfo {
   char tel_pass[40];
   char lat[16];
   char lon[16];
+  uint8_t ant_kind;
+  uint16_t ant_height_dm;
+  uint16_t ant_bearing;
   char clock_text[32];
   char mqtt_host[64];
   char mqtt_ip[32];
@@ -64,6 +67,7 @@ struct RepeaterPageInfo {
   float mqtt_ant_m;
   uint8_t sf;
   uint8_t cr;
+  uint8_t radio_profile;
   int8_t tx_dbm;
   uint8_t forwarding;
   uint8_t rx_gain;
@@ -129,6 +133,7 @@ struct RepeaterRadioForm {
   int8_t tx_dbm;
   uint8_t sf;
   uint8_t cr;
+  uint8_t profile;
   uint8_t rx_gain;
   uint8_t fem_rx;
   uint8_t fem_tx;
@@ -151,6 +156,9 @@ struct RepeaterNodeForm {
   char owner[120];
   char lat[16];
   char lon[16];
+  uint8_t ant_kind;
+  uint16_t ant_height_dm;
+  uint16_t ant_bearing;
   uint16_t advert_mins;
   uint8_t flood_hours;
 };

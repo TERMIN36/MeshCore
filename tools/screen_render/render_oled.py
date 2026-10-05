@@ -624,13 +624,14 @@ def scr_neighbors_empty(d):
     d.drawTextCentered(d.width() // 2, 64 - 11, "poll: " + PRESS_LABEL)
 
 
-def scr_radio(d, lna=False):
+def scr_radio(d, profile="Normal", freq=869.525, bw=250.0, sf=11, cr=5, lna=False, tx=22):
     home_header(d, "RADIO")
     d.setColor(WHITE); d.setTextSize(1)
-    d.setCursor(0, 20); d.print("FQ: %06.3f   SF: %d" % (869.525, 11))
-    d.setCursor(0, 31); d.print("BW: %03.2f     CR: %d" % (250.0, 5))
-    d.setCursor(0, 42); d.print("TX: %ddBm  LNA: %s" % (22, "on" if lna else "off"))
-    d.setCursor(0, 53); d.print("Noise floor: %d" % -108)
+    d.setCursor(0, 20); d.print("FQ: %06.3f   SF: %d" % (freq, sf))
+    d.setCursor(0, 31); d.print("BW: %03.2f     CR: %d" % (bw, cr))
+    d.setCursor(0, 42); d.print("TX: %ddBm  LNA: %s" % (tx, "on" if lna else "off"))
+    d.drawTextLeftAlign(0, 53, profile)
+    d.drawTextRightAlign(d.width() - 1, 53, "3x: profile")
 
 
 def scr_setup(d, row=0, clock_on=True, mode=0, editing=False):
@@ -793,6 +794,17 @@ def scr_repeater(d, name="Repeater South", lna=False):
     d.setCursor(0, 20); d.print("FREQ: %06.3f SF%d" % (869.525, 11))
     d.setCursor(0, 30); d.print("BW: %03.2f CR: %d" % (250.0, 5))
     d.setCursor(0, 40); d.print("LNA: %s  NF: %d" % ("on" if lna else "off", -110))
+    d.setCursor(0, 52); d.print("1x Radio  3x LNA")
+
+
+def scr_repeater_radio(d, profile="Long", freq=869.495, bw=62.5, sf=11, cr=5):
+    d.setCursor(0, 0); d.setTextSize(1); d.setColor(WHITE)
+    d.print("Radio")
+    battery(d, 4100)
+    d.setCursor(0, 16); d.print(profile)
+    d.setCursor(0, 28); d.print("FQ %06.3f SF%d" % (freq, sf))
+    d.setCursor(0, 40); d.print("BW %03.2f CR%d" % (bw, cr))
+    d.setCursor(0, 52); d.print("3x profile  hold LNA")
 
 
 SCREENS = [
@@ -806,7 +818,11 @@ SCREENS = [
     ("03_recent", "Recent adverts", scr_recent),
     ("04_neighbors", "Neighbors: соседи по SNR", scr_neighbors),
     ("05_neighbors_empty", "Neighbors: до опроса", scr_neighbors_empty),
-    ("06_radio", "Radio: LNA и шум", scr_radio),
+    ("06_radio", "Radio: Normal", scr_radio),
+    ("06_radio_long", "Radio: Long", lambda d: scr_radio(
+        d, "Long", 869.495, 62.5, 11, 5)),
+    ("06_radio_hinoise", "Radio: HiNoise", lambda d: scr_radio(
+        d, "HiNoise", 869.495, 31.25, 10, 7)),
     ("07_power_eco_max", "Power: Eco max", lambda d: scr_power(d, "Eco max", True, False, False)),
     ("08_power_ble", "Power: BLE мешает сну", lambda d: scr_power(
         d, "Eco good", False, True, False, hold="BLE needs CPU on")),
@@ -823,6 +839,11 @@ SCREENS = [
         d, "group 30m", "Squad North", "55.7558  37.6173", "sent 4m ago"), d.alert("group 30m Squad"))),
     ("17_repeater_splash", "Заставка Repeater", lambda d: scr_splash(d, "Repeater by Termin36", True)),
     ("18_repeater", "Экран Repeater", scr_repeater),
+    ("18b_repeater_radio", "Repeater Radio: Long", scr_repeater_radio),
+    ("18c_repeater_radio_noise", "Repeater Radio: HiNoise", lambda d: scr_repeater_radio(
+        d, "HiNoise", 869.495, 31.25, 10, 7)),
+    ("18d_repeater_radio_normal", "Repeater Radio: Normal", lambda d: scr_repeater_radio(
+        d, "Normal", 869.525, 250.0, 11, 5)),
 ]
 
 # MeshPocket has no GPS, so its companion build has no GPS / Beacon pages.

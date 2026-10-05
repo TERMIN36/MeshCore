@@ -1,6 +1,7 @@
 #include "UITask.h"
 #include "target.h"
 #include "MyMesh.h"
+#include <helpers/RadioProfiles.h>
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
 #include <helpers/ui/BatteryLevel.h>
@@ -111,6 +112,8 @@ void UITask::renderCurrScreen() {
     _display->setCursor((_display->width() - poffWidth) / 2, 48);
     _display->drawTextCentered(_display->width()/2, 48, poweroff_string);
   } else if (_page == 1) {
+    renderRadioScreen();
+  } else if (_page == 2) {
     renderWifiScreen();
   } else {
     renderStatusScreen();
@@ -147,10 +150,34 @@ void UITask::renderStatusScreen() {
   if (_node_prefs->mqtt_enabled) {
     _display->print(the_mesh.mqttBridgeUp() ? "MQTT: up" : "MQTT: down");
   } else if (_board->canControlLoRaFemLna()) {
-    _display->print("3x: LNA");
+    _display->print("1x Radio  3x LNA");
   } else {
-    _display->print("click: WiFi");
+    _display->print("click: Radio");
   }
+}
+
+void UITask::renderRadioScreen() {
+  char tmp[80];
+  _display->setCursor(0, 0);
+  _display->setTextSize(1);
+  _display->setColor(UIColor::primary_txt);
+  _display->print("Radio");
+  renderBatteryIndicator();
+
+  _display->setCursor(0, 16);
+  _display->print(radioProfileLabel(the_mesh.radioProfile()));
+
+  _display->setCursor(0, 28);
+  sprintf(tmp, "FQ %06.3f SF%d", _node_prefs->freq, _node_prefs->sf);
+  _display->print(tmp);
+
+  _display->setCursor(0, 40);
+  sprintf(tmp, "BW %03.2f CR%d", _node_prefs->bw, _node_prefs->cr);
+  _display->print(tmp);
+
+  _display->setCursor(0, 52);
+  if (_board->canControlLoRaFemLna()) _display->print("3x profile  hold LNA");
+  else _display->print("3x: profile");
 }
 
 void UITask::renderWifiScreen() {
@@ -192,7 +219,7 @@ void UITask::showNextPage() {
   _auto_off = millis() + AUTO_OFF_MILLIS;
   // Splash and the power-off frame own the panel until they finish.
   if (_powering_off_at == 0 && millis() >= _started_at + BOOT_SCREEN_MILLIS) {
-    _page = _page == 0 ? 1 : 0;
+    _page = (uint8_t)((_page + 1) % 3);
   }
   _next_refresh = 0;
 }
@@ -209,10 +236,13 @@ void UITask::pollButton() {
   } else if (ev == BUTTON_EVENT_TRIPLE_CLICK && _powering_off_at == 0) {
     _display->turnOn();
     _auto_off = millis() + AUTO_OFF_MILLIS;
-    if (_page == 1) {
+    if (_page == 2) {
       _node_prefs->wifi_enabled = _node_prefs->wifi_enabled ? 0 : 1;
       the_mesh.savePrefs();
       the_mesh.applyWifiConfig();
+    } else if (_page == 1) {
+      uint8_t next = radioNextProfile(the_mesh.radioProfile());
+      the_mesh.applyRadioProfile(next);
     } else if (_board->canControlLoRaFemLna()) {
       bool enable = !_board->isLoRaFemLnaEnabled();
       if (_board->setLoRaFemLnaEnabled(enable)) {
@@ -223,8 +253,18 @@ void UITask::pollButton() {
     _next_refresh = 0;
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
       _display->turnOn();
-      Serial.println("Powering Off");
-      _powering_off_at = millis() + POWEROFF_DELAY; 
+      _auto_off = millis() + AUTO_OFF_MILLIS;
+      if (_page == 1 && _powering_off_at == 0 && _board->canControlLoRaFemLna()) {
+        bool enable = !_board->isLoRaFemLnaEnabled();
+        if (_board->setLoRaFemLnaEnabled(enable)) {
+          _node_prefs->radio_fem_rxgain = enable ? 1 : 0;
+          the_mesh.savePrefs();
+        }
+        _next_refresh = 0;
+      } else {
+        Serial.println("Powering Off");
+        _powering_off_at = millis() + POWEROFF_DELAY;
+      }
   }
 #endif
 }

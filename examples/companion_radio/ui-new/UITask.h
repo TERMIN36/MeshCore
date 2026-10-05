@@ -106,6 +106,7 @@ public:
   bool canControlFemLna() const { return _board && _board->canControlLoRaFemLna(); }
   bool isFemLnaEnabled() const { return _board && _board->isLoRaFemLnaEnabled(); }
   void toggleFemLna();
+  void cycleRadioProfile();
   // Most economical first. Parentheses on the page show CPU, RX boost and LNA.
   void applyPowerProfile(bool rx_boost, bool fem_lna, bool cpu_sleep);
   bool canSelectMcuSleep() const { return _board && _board->canSelectMcuSleep(); }

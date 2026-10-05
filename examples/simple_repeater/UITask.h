@@ -16,6 +16,7 @@ class UITask {
 
   void renderCurrScreen();
   void renderStatusScreen();
+  void renderRadioScreen();
   void renderWifiScreen();
   void renderBatteryIndicator();
   void showNextPage();

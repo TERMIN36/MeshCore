@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include <helpers/RadioProfiles.h>
 #include <helpers/ui/BatteryLevel.h>
 #include <helpers/ui/ClockFont.h>
 #include <math.h>
@@ -666,8 +667,9 @@ public:
       }
       display.print(tmp);
       display.setCursor(0, 53);
-      sprintf(tmp, "Noise floor: %d", radio_driver.getNoiseFloor());
-      display.print(tmp);
+      display.drawTextLeftAlign(0, 53, radioProfileLabel(the_mesh.radioProfile()));
+      display.setColor(UIColor::secondary_txt);
+      display.drawTextRightAlign(display.width() - 1, 53, "3x: profile");
     } else if (_page == HomePage::POWER) {
       bool fem = _task->canControlFemLna();
       bool cpu_hw = _task->canSelectMcuSleep();
@@ -1044,6 +1046,10 @@ public:
 #endif
     }
     if (c == KEY_SELECT) {
+      if (_page == HomePage::RADIO) {
+        _task->cycleRadioProfile();
+        return true;
+      }
       if (_page == HomePage::SETUP && _setup_edit) {
         changeSetupValue();
         return true;
@@ -2146,6 +2152,14 @@ void UITask::applyPowerProfile(bool rx_boost, bool fem_lna, bool cpu_sleep) {
   }
   if (cpu_blocked) showAlert(ble_blocked ? "BLE needs CPU on" : "GPS needs CPU on", 1200);
   else showAlert(name, 800);
+  _next_refresh = 0;
+}
+
+void UITask::cycleRadioProfile() {
+  uint8_t next = radioNextProfile(the_mesh.radioProfile());
+  the_mesh.applyRadioProfile(next);
+  notify(UIEventType::ack);
+  showAlert(radioProfileAlert(next), 900);
   _next_refresh = 0;
 }
 

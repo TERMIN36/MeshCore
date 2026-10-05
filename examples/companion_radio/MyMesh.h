@@ -188,6 +188,8 @@ public:
     _prefs.node_lon = sensors.node_lon;
     _store->savePrefs(_prefs);
   }
+  uint8_t radioProfile() const;
+  void applyRadioProfile(uint8_t profile);
 
 #if ENV_INCLUDE_GPS == 1
   void applyGpsPrefs() {

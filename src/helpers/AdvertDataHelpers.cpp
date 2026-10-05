@@ -1,6 +1,23 @@
 #include <helpers/AdvertDataHelpers.h>
 #include <helpers/UTF8Helpers.h>
 
+  void AdvertDataBuilder::setAntenna(uint8_t kind, uint16_t height_dm, uint16_t bearing_deg) {
+    bool has_height = height_dm != ADV_ANT_UNSET && height_dm <= ADV_ANT_HEIGHT_MASK;
+    uint16_t height = has_height ? (uint16_t)(height_dm & ADV_ANT_HEIGHT_MASK) : 0;
+    uint8_t kind_low = (kind <= ADV_ANT_KIND_MASK) ? (uint8_t)(kind & ADV_ANT_KIND_MASK) : 0;
+    uint16_t feat1 = (uint16_t)((kind_low << ADV_ANT_KIND_SHIFT) | height);
+    if (has_height) feat1 |= ADV_ANT_HEIGHT_FLAG;
+    if (feat1) _extra1 = feat1;
+    uint16_t feat2 = 0;
+    if (bearing_deg != ADV_ANT_UNSET && bearing_deg <= 359) {
+      feat2 = (uint16_t)(ADV_ANT_BEARING_FLAG | (bearing_deg & ADV_ANT_BEARING_MASK));
+    }
+    if (kind > ADV_ANT_KIND_MASK && kind <= ADV_ANT_KIND_EXT_MASK) {
+      feat2 |= (uint16_t)((kind & ADV_ANT_KIND_EXT_MASK) << ADV_ANT_KIND_EXT_SHIFT);
+    }
+    if (feat2) _extra2 = feat2;
+  }
+
   uint8_t AdvertDataBuilder::encodeTo(uint8_t app_data[]) {
     app_data[0] = _type;
     int i = 1;
