@@ -1,0 +1,18 @@
+# MeshCore classic ESP32: CPU light sleep on top of ORIG modem sleep.
+# Append to esp32-arduino-lib-builder configs/defconfig.esp32
+# (branch release/v4.4, Arduino-ESP32 2.0.17, ESP-IDF v4.4.7).
+#
+# Stock already enables BTDM modem sleep in ORIG mode with the 40 MHz
+# crystal as the low-power clock. ORIG has no Mode 1. IDF 4.4 documents
+# that this clock cannot keep BLE time across light sleep unless the board
+# has an external 32 kHz crystal, which these boards do not. PM and tickless
+# idle are still required so esp_pm_configure() exists; the companion turns
+# light sleep off itself when the controller refuses it and keeps modem sleep.
+# Flash stays powered.
+
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_BTDM_CTRL_MODEM_SLEEP=y
+CONFIG_BTDM_CTRL_MODEM_SLEEP_MODE_ORIG=y
+CONFIG_BTDM_CTRL_LPCLK_SEL_MAIN_XTAL=y
+# CONFIG_ESP_SLEEP_POWER_DOWN_FLASH is not set

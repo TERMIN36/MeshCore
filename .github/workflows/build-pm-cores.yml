@@ -1,0 +1,118 @@
+name: Build PM Cores
+
+# Rebuilds the four ESP32 power-management frameworks and publishes them as
+# the rolling `pm-cores` release. Firmware jobs download those archives; they
+# do not run this workflow.
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-pm-cores:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - name: Clone Repo
+        uses: actions/checkout@v6
+
+      - name: Install core build packages
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            ccache \
+            cmake \
+            curl \
+            flex \
+            bison \
+            gperf \
+            git \
+            libffi-dev \
+            libssl-dev \
+            ninja-build \
+            pkg-config \
+            python3-pip \
+            python3-setuptools \
+            python3-venv \
+            unzip \
+            wget
+          # Ubuntu 24.04's Python 3.12 has no stdlib distutils. setuptools 69
+          # still exposes it, which is what the IDF 4.4 scripts import.
+          python3 -m pip install --user --break-system-packages 'setuptools==69.5.1'
+          python3 -c "import distutils; print('distutils', distutils.__file__)"
+
+      - name: Normalize script line endings
+        run: |
+          set -euo pipefail
+          sed -i 's/\r$//' \
+            arch/esp32/build-s3-pm-core.sh \
+            arch/esp32/build-idf44-pm-cores.sh \
+            arch/esp32/build-c6-pm-core.sh \
+            arch/esp32/sdkconfig.defaults.esp32 \
+            arch/esp32/sdkconfig.defaults.esp32s3 \
+            arch/esp32/sdkconfig.defaults.esp32c3 \
+            arch/esp32/sdkconfig.defaults.esp32c6
+
+      - name: Build ESP32-S3 core
+        run: |
+          set -euo pipefail
+          df -h /
+          bash arch/esp32/build-s3-pm-core.sh
+          test -f .cache/framework-arduinoespressif32-s3-pm.tar.gz
+          rm -rf .cache/framework-arduinoespressif32-s3-pm
+
+      - name: Build ESP32-C3 and classic ESP32 cores
+        run: |
+          set -euo pipefail
+          df -h /
+          bash arch/esp32/build-idf44-pm-cores.sh
+          test -f .cache/framework-arduinoespressif32-c3-pm.tar.gz
+          test -f .cache/framework-arduinoespressif32-esp32-pm.tar.gz
+          rm -rf \
+            .cache/framework-arduinoespressif32-c3-pm \
+            .cache/framework-arduinoespressif32-esp32-pm \
+            "$HOME/meshcore-s3-core-build"
+
+      - name: Build ESP32-C6 core
+        run: |
+          set -euo pipefail
+          df -h /
+          bash arch/esp32/build-c6-pm-core.sh
+          test -f .cache/framework-arduinoespressif32-c6-pm.tar.gz
+          rm -rf \
+            .cache/framework-arduinoespressif32-c6-pm \
+            .cache/esp32-arduino-libs-idf-release_v5.3-489d7a2b-v1.zip \
+            "$HOME/meshcore-c6-core-build"
+
+      - name: Publish PM cores
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archives=(
+            .cache/framework-arduinoespressif32-s3-pm.tar.gz
+            .cache/framework-arduinoespressif32-c3-pm.tar.gz
+            .cache/framework-arduinoespressif32-esp32-pm.tar.gz
+            .cache/framework-arduinoespressif32-c6-pm.tar.gz
+          )
+          for archive in "${archives[@]}"; do
+            if [ ! -f "$archive" ]; then
+              echo "::error::Missing $archive"
+              exit 1
+            fi
+            ls -lh "$archive"
+          done
+          notes="Prebuilt ESP32 power-management frameworks. Firmware jobs download these archives."
+          if gh release view pm-cores --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload pm-cores --repo "$GITHUB_REPOSITORY" --clobber "${archives[@]}"
+          else
+            gh release create pm-cores --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "PM cores" \
+              --notes "$notes" \
+              "${archives[@]}"
+          fi
