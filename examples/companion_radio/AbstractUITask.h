@@ -38,6 +38,9 @@ public:
   uint16_t getBattMilliVolts() const { return _board->getBattMilliVolts(); }
   bool isBluetoothEnabled() const { return _interfaceManager->isBluetoothEnabled(); }
   virtual bool isDisplayOn() const { return false; }
+  // How soon the UI needs the CPU while the panel does not already block sleep.
+  // The caller caps this; the default is one minute.
+  virtual uint32_t millisUntilIdleWake() const { return 60000; }
   void enableBluetooth() { _interfaceManager->enableBluetooth(); }
   void disableBluetooth() { _interfaceManager->disableBluetooth(); }
   virtual void msgRead(int msgcount) = 0;

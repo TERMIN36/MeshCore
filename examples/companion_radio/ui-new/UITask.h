@@ -7,6 +7,9 @@
 #include <helpers/MultiSerialInterface.h>
 #include <Arduino.h>
 #include <helpers/sensors/LPPDataHelpers.h>
+#if defined(ESP32)
+#include <sdkconfig.h>
+#endif
 
 #ifndef LED_STATE_ON
   #define LED_STATE_ON 1
@@ -20,6 +23,7 @@
 #endif
 
 #include "../AbstractUITask.h"
+#include "../CompanionLink.h"
 #include "../NodePrefs.h"
 
 class UITask : public AbstractUITask {
@@ -32,6 +36,7 @@ class UITask : public AbstractUITask {
   GenericVibration vibration;
 #endif
   unsigned long _next_refresh, _auto_off;
+  uint32_t _idle_wake_ms;
   NodePrefs* _node_prefs;
   char _alert[80];
   unsigned long _alert_expiry;
@@ -70,6 +75,7 @@ public:
 
   UITask(mesh::MainBoard* board, MultiSerialInterface* serial) : AbstractUITask(board, serial), _display(NULL), _sensors(NULL) {
     next_batt_chck = _next_refresh = 0;
+    _idle_wake_ms = 60000;
     ui_started_at = 0;
     curr = NULL;
     clock = NULL;
@@ -117,16 +123,20 @@ public:
     return false;
 #endif
   }
-  // ESP32 manual light sleep stops the BLE controller. This Arduino build
-  // has no BT modem sleep, so CPU-off modes wait until Bluetooth is off.
+  // Manual ESP32 light sleep stops Bluedroid. A core built with BT modem
+  // sleep can idle the CPU while the phone stays connected.
   bool bleBlocksCpuSleep() const {
-#if defined(BLE_PIN_CODE)
+#if defined(ESP32) && defined(BLE_PIN_CODE) && \
+    !defined(CONFIG_BT_CTRL_MODEM_SLEEP) && !defined(CONFIG_BTDM_CTRL_MODEM_SLEEP)
     return isBluetoothEnabled();
 #else
     return false;
 #endif
   }
+  bool wifiBlocksCpuSleep() const { return companionLinkHoldsCpu(); }
   bool isDisplayOn() const override;
+  void setIdleWakeHint(uint32_t ms) { if (ms < _idle_wake_ms) _idle_wake_ms = ms; }
+  uint32_t millisUntilIdleWake() const override;
 
 
   // from AbstractUITask

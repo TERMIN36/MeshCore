@@ -57,6 +57,16 @@ mesh::Packet* PacketQueue::removeByIdx(int i) {
   return item;
 }
 
+bool PacketQueue::nextDeadline(uint32_t& at) const {
+  if (_num == 0) return false;
+  uint32_t best = _schedule_table[0];
+  for (int j = 1; j < _num; j++) {
+    if ((int32_t)(_schedule_table[j] - best) < 0) best = _schedule_table[j];
+  }
+  at = best;
+  return true;
+}
+
 bool PacketQueue::add(mesh::Packet* packet, uint8_t priority, uint32_t scheduled_for) {
   if (_num == _size) {
     return false;
@@ -124,4 +134,14 @@ bool StaticPoolPacketManager::queueInbound(mesh::Packet* packet, uint32_t schedu
 }
 mesh::Packet* StaticPoolPacketManager::getNextInbound(uint32_t now) {
   return rx_queue.get(now);
+}
+
+bool StaticPoolPacketManager::nextDeadline(uint32_t& at) const {
+  uint32_t rx_at = 0, tx_at = 0;
+  bool rx = rx_queue.nextDeadline(rx_at);
+  bool tx = send_queue.nextDeadline(tx_at);
+  if (!rx && !tx) return false;
+  if (rx && tx) at = ((int32_t)(rx_at - tx_at) < 0) ? rx_at : tx_at;
+  else at = rx ? rx_at : tx_at;
+  return true;
 }

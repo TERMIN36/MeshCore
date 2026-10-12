@@ -9,13 +9,33 @@ on:
       release_title_prefix:
         required: true
         type: string
+      publish:
+        description: Upload this workflow's artifacts as its own GitHub release.
+        required: false
+        type: boolean
+        default: true
+      batch_size:
+        description: How many firmware targets one job builds.
+        required: false
+        type: number
+        default: 6
+      embed_git_tag_version:
+        description: Embed the parsed git tag. Release builds pass the full tag instead.
+        required: false
+        type: boolean
+        default: true
+      firmware_version:
+        description: Version string passed to build.sh when embed_git_tag_version is false.
+        required: false
+        type: string
+        default: ""
 
 jobs:
 
   generate-build-matrix:
     runs-on: ubuntu-latest
     outputs:
-      targets: ${{ steps.get-build-targets.outputs.targets }}
+      batches: ${{ steps.get-build-targets.outputs.batches }}
     steps:
 
       - name: Clone Repo
@@ -23,27 +43,38 @@ jobs:
 
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
+        with:
+          pm_frameworks: false
 
       - name: Get Build Targets
         id: get-build-targets
+        env:
+          DISPLAY_ENVS_ONLY: "0"
+          BATCH_SIZE: ${{ inputs.batch_size }}
         run: |
-          # get list of firmwares to build
+          set -euo pipefail
           TARGET_LIST=$(/usr/bin/env bash build.sh get-${{ inputs.firmware_type }}-firmwares-to-build)
-          
-          # convert targets separated by new line into a json array string
-          JSON_ARRAY=$(echo "$TARGET_LIST" | jq -R -s -c 'split("\n") | map(select(length > 0))')
-          
-          # use json array as targets result
-          echo "targets=$JSON_ARRAY" >> $GITHUB_OUTPUT
+          n="${BATCH_SIZE:-6}"
+          if [ "$n" -lt 1 ]; then
+            n=6
+          fi
+          # One matrix cell is a space-separated batch, so each job stays under the 256 cap.
+          JSON_ARRAY=$(printf '%s\n' "$TARGET_LIST" | jq -R -s -c --argjson n "$n" '
+            split("\n") | map(select(length > 0)) | unique
+            | [range(0; length; $n) as $i | .[$i:$i+$n] | join(" ")]
+          ')
+          echo "Targets: $(printf '%s\n' "$TARGET_LIST" | sed '/^$/d' | wc -l)"
+          echo "Batches: $(printf '%s' "$JSON_ARRAY" | jq length)"
+          echo "batches=$JSON_ARRAY" >> "$GITHUB_OUTPUT"
 
   build:
     needs: generate-build-matrix
     runs-on: ubuntu-latest
-    continue-on-error: true # don't fail entire build if one board fails to build
+    continue-on-error: true # one broken batch must not cancel the other batches
     strategy:
       matrix:
-        target: ${{ fromJson(needs.generate-build-matrix.outputs.targets) }}
-      fail-fast: false # don't cancel other builds if one board fails to build
+        batch: ${{ fromJson(needs.generate-build-matrix.outputs.batches) }}
+      fail-fast: false
     steps:
 
       - name: Clone Repo
@@ -51,22 +82,60 @@ jobs:
 
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
+        with:
+          pm_frameworks: true
 
       - name: Build Firmware
+        id: build
         env:
-          FIRMWARE_VERSION: ${{ env.GIT_TAG_VERSION }}
-        run: /usr/bin/env bash build.sh build-firmware ${{ matrix.target }}
+          BATCH: ${{ matrix.batch }}
+          # embed_git_tag_version keeps companion/repeater/room-server tags on the parsed tag.
+          # The v* release passes the full tag and turns that parsing off.
+          FIRMWARE_VERSION: ${{ inputs.embed_git_tag_version && env.GIT_TAG_VERSION || inputs.firmware_version }}
+        run: |
+          set -u
+          read -r -a envs <<< "$BATCH"
+          mkdir -p "$RUNNER_TEMP/firmware-out"
+          failed=0
+          for env in "${envs[@]}"; do
+            echo "::group::$env"
+            before=$(find "$RUNNER_TEMP/firmware-out" -type f | wc -l)
+            if /usr/bin/env bash build.sh build-firmware "$env"; then
+              cp -a out/. "$RUNNER_TEMP/firmware-out/" 2>/dev/null || true
+              after=$(find "$RUNNER_TEMP/firmware-out" -type f | wc -l)
+              if [ "$after" -le "$before" ]; then
+                echo "::error::No firmware files for $env"
+                failed=1
+              fi
+            else
+              echo "::error::Build failed: $env"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          rm -rf out
+          mkdir -p out
+          cp -a "$RUNNER_TEMP/firmware-out/." out/ 2>/dev/null || true
+          if [ "$failed" != 0 ]; then
+            echo "failed=true" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload Workflow Artifacts
+        if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: "${{ matrix.target }}"
+          name: "${{ inputs.firmware_type }}-${{ strategy.job-index }}"
           path: out
+          if-no-files-found: ignore
+
+      - name: Fail batch when a target failed
+        if: steps.build.outputs.failed == 'true'
+        run: exit 1
 
   create-release:
     needs: build
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/') # only create release for tagged builds
+    if: inputs.publish && startsWith(github.ref, 'refs/tags/')
     steps:
 
       - name: Clone Repo
@@ -74,6 +143,8 @@ jobs:
 
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
+        with:
+          pm_frameworks: false
 
       - name: Download All Artifacts
         uses: actions/download-artifact@v8

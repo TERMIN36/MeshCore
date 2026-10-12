@@ -48,6 +48,8 @@ public:
   RegionEntry* getDefaultRegion();   // NOTE: can be NULL
   void setDefaultRegion(const RegionEntry* def);
   bool removeRegion(const RegionEntry& region);
+  // Remove region and all descendants (children first). Wildcard (id 0) is refused.
+  bool removeRegionRecursive(uint16_t id);
   bool clear();
   void resetFrom(const RegionMap& src) { num_regions = 0; next_id = src.next_id; }
   int getCount() const { return num_regions; }

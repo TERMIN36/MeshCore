@@ -66,6 +66,38 @@ struct RepeaterStats {
   uint32_t n_recv_errors;
 };
 
+#if defined(ESP32)
+// 5 min × 288 = 24 h. Keep BSS small: WiFi/web already stress the heap.
+#ifndef REPEATER_STATS_SLOTS
+  #define REPEATER_STATS_SLOTS 288
+#endif
+#ifndef REPEATER_STATS_INTERVAL_SECS
+  #define REPEATER_STATS_INTERVAL_SECS 300
+#endif
+#ifndef REPEATER_STATS_EXPORT_MAX
+  #define REPEATER_STATS_EXPORT_MAX 96
+#endif
+
+// One sample interval of traffic deltas + end-of-interval gauges (~24 B).
+struct RepeaterStatsSlot {
+  uint16_t recv_d, sent_d;
+  uint16_t flood_rx_d, flood_tx_d;
+  uint16_t direct_rx_d, direct_tx_d;
+  uint16_t tx_air_ds, rx_air_ds;  // airtime delta in deciseconds
+  int8_t noise, rssi, snr_q4;
+  uint8_t queue;
+  uint16_t batt_mv;
+  int16_t temp_c_x10;  // REPEATER_TEMP_UNKNOWN if unavailable
+};
+
+struct RepeaterStatsSeriesMeta {
+  uint8_t hours;
+  uint32_t interval_secs;
+  uint32_t t0;   // unix time of first point when clock is valid, else 0
+  uint16_t count;
+};
+#endif
+
 #ifndef MAX_CLIENTS
   #define MAX_CLIENTS           32
 #endif
@@ -104,6 +136,22 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   RegionMap region_map, temp_map;
   RegionEntry* load_stack[8];
   RegionEntry* recv_pkt_region;
+  struct RegionStatSlot {
+    uint16_t id;
+    uint32_t rx;
+    uint32_t fwd;
+  };
+  RegionStatSlot _region_stats[MAX_REGION_ENTRIES];
+  uint8_t _region_stats_n;
+  uint32_t _region_unscoped_rx;
+  uint32_t _region_unscoped_fwd;
+  uint32_t _region_drop_unknown;
+  uint32_t _region_drop_denied;
+  uint32_t _region_drop_unscoped;
+  uint32_t _region_drop_hop;
+  uint32_t _region_drop_loop;
+  uint32_t _region_drop_nofwd;
+  bool _region_fwd_drop_done;
   TransportKey default_scope;
   RateLimiter discover_limiter, anon_limiter;
   uint32_t pending_discover_tag;
@@ -142,6 +190,25 @@ class MyMesh : public mesh::Mesh, public CommonCLICallbacks {
   NtpClock _ntp;
   MqttReach _reach;
   RepeaterWeb _web;
+#if defined(ESP32)
+  RepeaterStatsSlot _stats_slots[REPEATER_STATS_SLOTS];
+  uint16_t _stats_next = 0;
+  uint16_t _stats_count = 0;
+  uint32_t _stats_last_ms = 0;
+  bool _stats_primed = false;
+  // Set while web exports a snapshot so the sampler does not mutate the ring mid-read.
+  volatile uint8_t _stats_exporting = 0;
+  uint32_t _stats_base_recv = 0;
+  uint32_t _stats_base_sent = 0;
+  uint32_t _stats_base_flood_rx = 0;
+  uint32_t _stats_base_flood_tx = 0;
+  uint32_t _stats_base_direct_rx = 0;
+  uint32_t _stats_base_direct_tx = 0;
+  uint32_t _stats_base_tx_air_ms = 0;
+  uint32_t _stats_base_rx_air_ms = 0;
+  void captureStatsBaseline();
+  void tickStatsHistory();
+#endif
   bool _mqtt_cert_load = false;
   char* _mqtt_cert_buf = nullptr;
   size_t _mqtt_cert_len = 0;
@@ -283,17 +350,36 @@ public:
   uint8_t radioProfile() const;
   void applyRadioProfile(uint8_t profile);
   bool applyNodePanel(const RepeaterNodeForm& in, char* reply, size_t reply_cap);
+  bool applyRegionPanel(const RepeaterRegionForm& in, char* reply, size_t reply_cap);
+  void regionStatRxFwd(uint16_t id, uint32_t& rx, uint32_t& fwd) const;
+  uint32_t regionUnscopedRx() const { return _region_unscoped_rx; }
+  uint32_t regionUnscopedFwd() const { return _region_unscoped_fwd; }
+  uint32_t regionDropUnknown() const { return _region_drop_unknown; }
+  uint32_t regionDropDenied() const { return _region_drop_denied; }
+  uint32_t regionDropUnscoped() const { return _region_drop_unscoped; }
+  uint32_t regionDropHop() const { return _region_drop_hop; }
+  uint32_t regionDropLoop() const { return _region_drop_loop; }
+  uint32_t regionDropNofwd() const { return _region_drop_nofwd; }
   void applyWifiConfig() override;
   uint8_t applyWifiPowerMode() override;
   bool wifiLightSleep() const { return _wifi.powerMode() == WIFI_POWER_LIGHT; }
+  bool webCommandQueued() const { return _web.commandQueued(); }
+  bool webViewerConnected() const { return _web.viewerConnected(); }
+  bool webBusy() const { return _web.webBusy(); }
   void formatWifiStatus(char* reply) override;
   void applyNtpConfig() override;
   void formatNtpStatus(char* reply) override;
   bool syncNtp() override;
   bool ntpHoldsClock() override;
   void fillRepeaterPage(RepeaterPageInfo& info);
+#if defined(ESP32)
+  // Copy/aggregate history for web charts. dest_cap capped by REPEATER_STATS_EXPORT_MAX.
+  uint16_t exportStatsHistory(uint8_t hours, RepeaterStatsSlot* dest, uint16_t dest_cap,
+                              RepeaterStatsSeriesMeta& meta) const;
+#endif
   void copyAdminPassword(char* dest, size_t cap) const;
   bool copyWifiAddress(char* dest, size_t cap) const { return _wifi.copyAddress(dest, cap); }
+  bool copyWifiRssi(int8_t& dbm) const { return _wifi.copyRssi(dbm); }
   bool hasMqttCert() const override { return _mqtt_ca_on_file; }
   bool mqttBridgeUp() const { return _mqtt.isUp(); }
 
@@ -320,6 +406,8 @@ public:
   }
 #endif
 
+  // Soonest radio, advert, or clock deadline. Zero means work is already due.
+  uint32_t millisUntilIdleWork() const;
   // To check if there is pending work
   bool hasPendingWork() const;
 

@@ -24,6 +24,10 @@
 #define USER_BTN_PRESSED LOW
 #endif
 
+// Set when the display turns on. The next battery draw discards the stale
+// window and latches the voltage measured at wake.
+static bool s_fresh_batt = false;
+
 // 'meshcore', 128x13px
 static const uint8_t meshcore_logo [] PROGMEM = {
     0x3c, 0x01, 0xe3, 0xff, 0xc7, 0xff, 0x8f, 0x03, 0x87, 0xfe, 0x1f, 0xfe, 0x1f, 0xfe, 0x1f, 0xfe, 
@@ -150,6 +154,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   if (_display != NULL) {
     if (!_display->isOn() && !hasConnection()) {
       _display->turnOn();
+      s_fresh_batt = true;
     }
     if (_display->isOn()) {
     _auto_off = millis() + AUTO_OFF_MILLIS;  // extend the auto-off timer
@@ -168,8 +173,20 @@ void UITask::renderBatteryIndicator(uint16_t batteryMilliVolts) {
   const int minMilliVolts = BATT_MIN_MILLIVOLTS;
   const int maxMilliVolts = BATT_MAX_MILLIVOLTS;
   static BatteryLevelFilter batt_filter;
-  int batteryPercentage = batt_filter.push(batteryMilliVolts, minMilliVolts, maxMilliVolts)
-                          * 100 / BatteryLevelFilter::LEVELS;
+  int batteryPercentage;
+  if (s_fresh_batt) {
+    s_fresh_batt = false;
+    uint16_t reads[BatteryLevelFilter::WINDOW];
+    for (int i = 0; i < BatteryLevelFilter::WINDOW; i++) {
+      reads[i] = _board->getBattMilliVolts();
+    }
+    batteryPercentage = batt_filter.latch(BatteryLevelFilter::median(reads, BatteryLevelFilter::WINDOW),
+                                          minMilliVolts, maxMilliVolts)
+                        * 100 / BatteryLevelFilter::LEVELS;
+  } else {
+    batteryPercentage = batt_filter.push(batteryMilliVolts, minMilliVolts, maxMilliVolts)
+                        * 100 / BatteryLevelFilter::LEVELS;
+  }
 
   // battery icon
   int iconWidth = 24;
@@ -479,6 +496,7 @@ void UITask::handleButtonAnyPress() {
     _displayWasOn = _display->isOn();  // Track display state before any action
     if (!_displayWasOn) {
       _display->turnOn();
+      s_fresh_batt = true;
     }
     _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
   }

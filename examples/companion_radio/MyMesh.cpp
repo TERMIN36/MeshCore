@@ -1,4 +1,5 @@
 #include "MyMesh.h"
+#include "CompanionLink.h"
 #include <helpers/RadioProfiles.h>
 
 #include <Arduino.h> // needed for PlatformIO
@@ -293,7 +294,40 @@ bool MyMesh::getCADEnabled() const {
 }
 
 int MyMesh::getAGCResetInterval() const {
-  return 4000; // SX1262 analog/AGC can stick; companion had no reset
+  return 60000; // SX1262 analog/AGC can stick; a minute is enough to recover it
+}
+
+static uint32_t msUntil(uint32_t now, unsigned long at, uint32_t wait) {
+  if (at == 0) return wait;
+  long left = (long)(at - now);
+  if (left < 0) left = 0;
+  if ((uint32_t)left < wait) return (uint32_t)left;
+  return wait;
+}
+
+uint32_t MyMesh::millisUntilIdleWork() const {
+  uint32_t now = (uint32_t)_ms->getMillis();
+  uint32_t wait = millisUntilRadioWork();
+  wait = msUntil(now, _clock_next_pull, wait);
+  if (_clock_pull_tag != 0) wait = msUntil(now, _clock_pull_deadline, wait);
+  wait = msUntil(now, _console_ack_at, wait);
+  wait = msUntil(now, dirty_contacts_expiry, wait);
+#if ENV_INCLUDE_GPS == 1
+  uint32_t gps_wake = sensors.millisUntilGpsWake();
+  if (gps_wake < wait) wait = gps_wake;
+  if (_prefs.gps_interval > 0 && _prefs.beacon_mode != BEACON_OFF && _beacon_next != 0) {
+    LocationProvider* loc = sensors.getLocationProvider();
+    if (!(loc && loc->isValid())) {
+      long until_beacon = (long)(_beacon_next - now);
+      if (until_beacon <= (long)GPS_ON_WINDOW_MS) wait = 0;
+      else {
+        uint32_t until_open = (uint32_t)until_beacon - (uint32_t)GPS_ON_WINDOW_MS;
+        if (until_open < wait) wait = until_open;
+      }
+    }
+  }
+#endif
+  return wait;
 }
 
 void MyMesh::restoreRadioAfterScan() {
@@ -1059,14 +1093,11 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
 #endif
   _prefs.radio_fem_rxgain = 0;  // FEM RX LNA off (Heltec V4.3 bypass)
   _prefs.radio_fem_txgain = 0;
+  _prefs.mcu_sleep = 1;         // Eco max: sleep the CPU while idle
   //_prefs.rx_delay_base = 10.0f;  enable once new algo fixed
   _prefs.setRepeatEn(false);
 #if defined(USE_SX1262) || defined(USE_SX1268)
-#ifdef SX126X_RX_BOOSTED_GAIN
-  _prefs.rx_boosted_gain = SX126X_RX_BOOSTED_GAIN;
-#else
-  _prefs.rx_boosted_gain = 1; // enabled by default
-#endif
+  _prefs.rx_boosted_gain = 0;   // Eco max: RX boost off until the user picks another profile
 #endif
 }
 
@@ -1118,6 +1149,8 @@ void MyMesh::begin(bool has_display) {
   _prefs.cr = constrain(_prefs.cr, 5, 8);
   _prefs.tx_power_dbm = constrain(_prefs.tx_power_dbm, -9, MAX_LORA_TX_POWER);
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
+  _prefs.tx_led = _prefs.tx_led ? 1 : 0;
+  mesh::MainBoard::setTxLedEnabled(_prefs.tx_led != 0);
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
   _prefs.beacon_mode = constrain(_prefs.beacon_mode, BEACON_OFF, BEACON_CHAT);
   if (_prefs.beacon_group_mins < 5 || _prefs.beacon_group_mins > 180) _prefs.beacon_group_mins = 30;
@@ -2455,7 +2488,7 @@ static void formatLocalDateTime(uint32_t utc, int16_t tz_mins, char* buf, size_t
 void MyMesh::runCLICommand(char* command, Print& out) {
     char line[96];
     if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
-      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
+      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, set tx.led on|off, set link ble|wifi|off, set wifi.ssid, set wifi.password, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
     } else if (strcmp(command, "ver") == 0) {
       snprintf(line, sizeof(line), "%s %s\n", FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
       out.print(line);
@@ -2582,6 +2615,21 @@ void MyMesh::runCLICommand(char* command, Print& out) {
             out.print(line);
           }
         }
+      } else if (memcmp(config, "tx.led", 6) == 0 && (config[6] == 0 || config[6] == ' ')) {
+        const char* arg = (config[6] == ' ') ? &config[7] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          snprintf(line, sizeof(line), "  > tx.led is %s\n", _prefs.tx_led ? "on" : "off");
+          out.print(line);
+        } else if (strcmp(arg, "on") != 0 && strcmp(arg, "off") != 0) {
+          out.print("  Error: tx.led is on or off\n");
+        } else {
+          _prefs.tx_led = strcmp(arg, "on") == 0;
+          mesh::MainBoard::setTxLedEnabled(_prefs.tx_led != 0);
+          savePrefs();
+          snprintf(line, sizeof(line), "  > tx.led is now %s\n", _prefs.tx_led ? "on" : "off");
+          out.print(line);
+        }
       } else if (memcmp(config, "lang", 4) == 0 && (config[4] == 0 || config[4] == ' ')) {
         const char* arg = (config[4] == ' ') ? &config[5] : "";
         while (*arg == ' ') arg++;
@@ -2626,6 +2674,89 @@ void MyMesh::runCLICommand(char* command, Print& out) {
               out.print("\n");
             }
           }
+        }
+      } else if (memcmp(config, "link", 4) == 0 && (config[4] == 0 || config[4] == ' ')) {
+        const char* arg = (config[4] == ' ') ? &config[5] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          const char* name = "ble";
+          if (_prefs.link_mode == LINK_MODE_WIFI) name = "wifi";
+          else if (_prefs.link_mode == LINK_MODE_OFF) name = "off";
+          snprintf(line, sizeof(line), "  > link is %s\n", name);
+          out.print(line);
+          if (_prefs.link_mode == LINK_MODE_WIFI) {
+            snprintf(line, sizeof(line), "  > ssid %s\n", _prefs.wifi_ssid[0] ? _prefs.wifi_ssid : "(none)");
+            out.print(line);
+            char ip[16];
+            if (companionWifiAddress(ip, sizeof(ip))) {
+              snprintf(line, sizeof(line), "  > %s\n", ip);
+              out.print(line);
+            } else if (!_prefs.wifi_ssid[0]) {
+              out.print("  > set wifi.ssid\n");
+            }
+          }
+        } else {
+          uint8_t mode = LINK_MODE_BLE;
+          if (strcmp(arg, "ble") == 0) mode = LINK_MODE_BLE;
+          else if (strcmp(arg, "off") == 0) mode = LINK_MODE_OFF;
+          else if (strcmp(arg, "wifi") == 0) mode = LINK_MODE_WIFI;
+          else {
+            out.print("  Error: link is ble, wifi or off\n");
+            mode = 0xFF;
+          }
+#if !defined(ESP32)
+          if (mode == LINK_MODE_WIFI) {
+            out.print("  Error: wifi is ESP32 only\n");
+            mode = 0xFF;
+          }
+#endif
+          if (mode != 0xFF) {
+            _prefs.link_mode = mode;
+            savePrefs();
+            companionApplyLink();
+            snprintf(line, sizeof(line), "  > link is now %s\n", arg);
+            out.print(line);
+            if (mode == LINK_MODE_WIFI && !_prefs.wifi_ssid[0]) out.print("  > set wifi.ssid\n");
+          }
+        }
+      } else if (memcmp(config, "wifi.ssid", 9) == 0 && (config[9] == 0 || config[9] == ' ')) {
+        const char* arg = (config[9] == ' ') ? &config[10] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          snprintf(line, sizeof(line), "  > ssid %s\n", _prefs.wifi_ssid[0] ? _prefs.wifi_ssid : "(none)");
+          out.print(line);
+        } else if (strlen(arg) >= sizeof(_prefs.wifi_ssid)) {
+          out.print("  Error: ssid too long\n");
+        } else {
+          strncpy(_prefs.wifi_ssid, arg, sizeof(_prefs.wifi_ssid) - 1);
+          _prefs.wifi_ssid[sizeof(_prefs.wifi_ssid) - 1] = 0;
+          savePrefs();
+          companionApplyLink();
+          snprintf(line, sizeof(line), "  > ssid is now %s\n", _prefs.wifi_ssid);
+          out.print(line);
+        }
+      } else if ((memcmp(config, "wifi.password", 13) == 0 && (config[13] == 0 || config[13] == ' ')) ||
+                 (memcmp(config, "wifi.pwd", 8) == 0 && (config[8] == 0 || config[8] == ' '))) {
+        bool short_name = config[6] == 'w';
+        const char* arg = short_name ? (config[8] == ' ' ? &config[9] : "")
+                                     : (config[13] == ' ' ? &config[14] : "");
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          snprintf(line, sizeof(line), "  > password %s\n", _prefs.wifi_wpass[0] ? "set" : "empty");
+          out.print(line);
+        } else if (strcmp(arg, "-") == 0) {
+          _prefs.wifi_wpass[0] = 0;
+          savePrefs();
+          companionApplyLink();
+          out.print("  > password is empty\n");
+        } else if (strlen(arg) >= sizeof(_prefs.wifi_wpass)) {
+          out.print("  Error: password too long\n");
+        } else {
+          strncpy(_prefs.wifi_wpass, arg, sizeof(_prefs.wifi_wpass) - 1);
+          _prefs.wifi_wpass[sizeof(_prefs.wifi_wpass) - 1] = 0;
+          savePrefs();
+          companionApplyLink();
+          out.print("  > password is set\n");
         }
       } else {
         snprintf(line, sizeof(line), "  Error: unknown config: %s\n", config);
@@ -3007,6 +3138,13 @@ void MyMesh::loop() {
 #endif
 
 #if ENV_INCLUDE_GPS == 1
+  if (_prefs.gps_interval > 0 && _prefs.beacon_mode != BEACON_OFF && _beacon_next != 0) {
+    LocationProvider* loc = sensors.getLocationProvider();
+    if (!(loc && loc->isValid())) {
+      long until_beacon = (long)(_beacon_next - _ms->getMillis());
+      sensors.noteGpsDeadline(until_beacon > 0 ? (uint32_t)until_beacon : 0);
+    }
+  }
   checkBeacon();
 #endif
   checkClockPull(false);
@@ -3301,5 +3439,11 @@ bool MyMesh::advert() {
 
 // To check if there is pending work
 bool MyMesh::hasPendingWork() const {
-  return _mgr->getOutboundTotal() > 0 || dirty_contacts_expiry != 0;
+  if (companionLinkHoldsCpu()) return true;
+  // CMD_GET_CONTACTS sends one contact per loop, paced by the 60 ms BLE
+  // notify gap. A 200 ms light sleep between those frames stretches the sync.
+  if (_iter_started) return true;
+  // A pending contact flush has its own deadline. Staying awake for the whole
+  // five-second lazy write kept the CPU up after the screen had already gone off.
+  return _mgr->getOutboundTotal() > 0;
 }

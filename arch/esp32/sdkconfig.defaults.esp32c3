@@ -1,0 +1,15 @@
+# MeshCore ESP32-C3: Bluetooth modem sleep and automatic light sleep.
+# Append to esp32-arduino-lib-builder configs/defconfig.esp32c3
+# (branch release/v4.4, Arduino-ESP32 2.0.17, ESP-IDF v4.4.7).
+#
+# The stock C3 SDK leaves the controller awake (BT_CTRL_SLEEP_MODE_EFF 0)
+# and has no power management. C3 Mode 1 can light-sleep on the 40 MHz
+# crystal, same as S3. Flash stays powered.
+
+CONFIG_PM_ENABLE=y
+CONFIG_FREERTOS_USE_TICKLESS_IDLE=y
+CONFIG_BT_CTRL_MODEM_SLEEP=y
+CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1=y
+CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL=y
+CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP=y
+# CONFIG_ESP_SLEEP_POWER_DOWN_FLASH is not set

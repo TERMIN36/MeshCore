@@ -16,6 +16,7 @@ public:
   int countBefore(uint32_t now) const;
   mesh::Packet* itemAt(int i) const { return _table[i]; }
   mesh::Packet* removeByIdx(int i);
+  bool nextDeadline(uint32_t& at) const;
 };
 
 class StaticPoolPacketManager : public mesh::PacketManager {
@@ -35,4 +36,5 @@ public:
   mesh::Packet* removeOutboundByIdx(int i) override;
   bool queueInbound(mesh::Packet* packet, uint32_t scheduled_for) override;
   mesh::Packet* getNextInbound(uint32_t now) override;
+  bool nextDeadline(uint32_t& at) const override;
 };

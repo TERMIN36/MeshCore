@@ -16,7 +16,8 @@ protected:
   PhysicalLayer* _radio;
   mesh::MainBoard* _board;
   uint32_t n_recv, n_sent, n_recv_errors;
-  int16_t _noise_floor, _threshold;
+  int16_t _noise_floor = 0, _noise_floor_hold = 0, _threshold = 0;
+  bool _floor_open = false;
   bool _cad_enabled;
   bool _nf_paused;
   uint16_t _num_floor_samples;
@@ -60,8 +61,14 @@ public:
   PacketMillis calcMaxPacketMillis(uint8_t sf, float bw, uint8_t cr, uint8_t preambleSymbols);
   virtual int16_t performChannelScan();
 
-  int getNoiseFloor() const override { return _noise_floor; }
+  // A calibration in progress must not publish 0 over the last good average.
+  int getNoiseFloor() const override {
+    return _noise_floor < 0 ? _noise_floor : _noise_floor_hold;
+  }
   void triggerNoiseFloorCalibrate(int threshold) override;
+  // Start another average as soon as the last one is finished. Used while the
+  // scan screen is open so the displayed floor tracks the live RSSI.
+  void repeatNoiseFloor();
   void pauseNoiseFloor(bool pause) { _nf_paused = pause; }
   void setCADEnabled(bool enable) override { _cad_enabled = enable; }
   void resetAGC() override;

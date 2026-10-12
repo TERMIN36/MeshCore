@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include "../CompanionLink.h"
 #include <helpers/RadioProfiles.h>
 #include <helpers/ui/BatteryLevel.h>
 #include <helpers/ui/ClockFont.h>
@@ -36,6 +37,18 @@
   #define SCAN_REFRESH_MILLIS_EINK 3000   // each e-ink update blocks the loop
 #endif
 #define FSCAN_REFRESH_MILLIS  250   // progress bar while the freq scan runs
+
+// Set when the display turns on. The next battery draw discards the stale
+// window and latches the voltage measured at wake.
+static bool s_fresh_batt = false;
+
+static uint16_t medianBattMilliVolts(UITask* task) {
+  uint16_t reads[BatteryLevelFilter::WINDOW];
+  for (int i = 0; i < BatteryLevelFilter::WINDOW; i++) {
+    reads[i] = task->getBattMilliVolts();
+  }
+  return BatteryLevelFilter::median(reads, BatteryLevelFilter::WINDOW);
+}
 
 #ifndef MSG_PAGE_MILLIS
   #if AUTO_OFF_MILLIS==0   // e-ink: every page flip is a full refresh
@@ -77,14 +90,17 @@ static const char* savingsName(int index, int count) {
 
 static int buildPowerChoices(bool fem, bool cpu_ok, PowerChoice* out) {
   int n = 0;
+  // Screen-off already light-sleeps when the core allows it. Offering a
+  // "CPU on" step there only kept the old 29 mA idle.
   if (cpu_ok) {
     out[n++] = {false, false, true, NULL};
     out[n++] = {true, false, true, NULL};
     if (fem) out[n++] = {true, true, true, NULL};
+  } else {
+    out[n++] = {false, false, false, NULL};
+    out[n++] = {true, false, false, NULL};
+    if (fem) out[n++] = {true, true, false, NULL};
   }
-  out[n++] = {false, false, false, NULL};
-  out[n++] = {true, false, false, NULL};
-  if (fem) out[n++] = {true, true, false, NULL};
   for (int i = 0; i < n; i++) out[i].name = savingsName(i, n);
   return n;
 }
@@ -347,8 +363,15 @@ class HomeScreen : public UIScreen {
     const int minMilliVolts = BATT_MIN_MILLIVOLTS;
     const int maxMilliVolts = BATT_MAX_MILLIVOLTS;
     static BatteryLevelFilter batt_filter;
-    int batteryPercentage = batt_filter.push(batteryMilliVolts, minMilliVolts, maxMilliVolts)
-                            * 100 / BatteryLevelFilter::LEVELS;
+    int batteryPercentage;
+    if (s_fresh_batt) {
+      s_fresh_batt = false;
+      batteryPercentage = batt_filter.latch(medianBattMilliVolts(_task), minMilliVolts, maxMilliVolts)
+                          * 100 / BatteryLevelFilter::LEVELS;
+    } else {
+      batteryPercentage = batt_filter.push(batteryMilliVolts, minMilliVolts, maxMilliVolts)
+                          * 100 / BatteryLevelFilter::LEVELS;
+    }
 
     // battery icon
     int iconWidth = 24;
@@ -469,12 +492,44 @@ public:
     if (_page == HomePage::SCAN && (long)(millis() - scan_next_sample) >= 0) {
       scan_next_sample = millis() + SCAN_SAMPLE_MILLIS;
       sampleNoise();
+      radio_driver.repeatNoiseFloor();
     }
     if (_page == HomePage::FSCAN && fscan_state == FSCAN_RUN) {
       stepFreqScan();
     }
+    // E-ink does not count as "display on", so idle sleep would otherwise
+    // freeze a measurement for up to a minute. Stay on the sample cadence.
+    if (_page == HomePage::SCAN) {
+      long left = (long)(scan_next_sample - millis());
+      _task->setIdleWakeHint(left > 0 ? (uint32_t)left : 1);
+    } else if (_page == HomePage::FSCAN && fscan_state == FSCAN_RUN) {
+      long left = (long)(fscan_ready_at - millis());
+      _task->setIdleWakeHint(left > 0 ? (uint32_t)left : 1);
+    }
     if (_shutdown_init && !_task->isButtonPressed()) {  // must wait for USR button to be released
       _task->shutdown();
+    }
+  }
+
+  const char* pageTitle() const {
+    switch (_page) {
+      case HomePage::RECENT: return "Recent";
+      case HomePage::NEIGHBORS: return "Neighbors";
+      case HomePage::RADIO: return "Radio";
+      case HomePage::POWER: return "Power";
+      case HomePage::SCAN: return "Scan";
+      case HomePage::FSCAN: return "Freq";
+      case HomePage::BLUETOOTH: return "Link";
+#if ENV_INCLUDE_GPS == 1
+      case HomePage::GPS: return "GPS";
+      case HomePage::BEACON: return "Beacon";
+#endif
+#if UI_SENSORS_PAGE == 1
+      case HomePage::SENSORS: return "Sensors";
+#endif
+      case HomePage::SETUP: return "Setup";
+      case HomePage::SHUTDOWN: return "Off";
+      default: return "";
     }
   }
 
@@ -484,11 +539,11 @@ public:
     display.setColor(UIColor::title_bkg);
     display.fillRect(0, 0, display.width(), 12);
     char tmp[80];
-    // node name
     display.setTextSize(1);
     display.setColor(UIColor::title_txt);
-    char filtered_name[sizeof(_node_prefs->node_name)];
-    display.translateUTF8ToBlocks(filtered_name, _node_prefs->node_name, sizeof(filtered_name));
+    char filtered_name[40];
+    const char* title_src = (_page == HomePage::FIRST) ? _node_prefs->node_name : pageTitle();
+    display.translateUTF8ToBlocks(filtered_name, title_src, sizeof(filtered_name));
     display.setCursor(0, 2);
     display.print(filtered_name);
 
@@ -530,7 +585,17 @@ public:
       display.drawTextCentered(display.width() / 2, 22, tmp);
 
       bool show_date = !display.isEink() && _rtc->getCurrentTime() >= 1000000000UL;
-      #ifdef WIFI_SSID
+      uint8_t link_mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
+      #if defined(ESP32) && defined(BLE_PIN_CODE) && !defined(WIFI_SSID)
+        char ip[16];
+        if (link_mode == LINK_MODE_WIFI && companionWifiAddress(ip, sizeof(ip))) {
+          snprintf(tmp, sizeof(tmp), "IP: %s", ip);
+          display.setTextSize(1);
+          int ip_y = display.height() - 22;
+          if (display.height() <= 64) ip_y = show_date ? -1 : 54;
+          if (ip_y >= 0) display.drawTextCentered(display.width() / 2, ip_y, tmp);
+        }
+      #elif defined(WIFI_SSID)
         IPAddress ip = WiFi.localIP();
         snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
         display.setTextSize(1);
@@ -543,7 +608,7 @@ public:
         display.setTextSize(1);
         display.drawTextCentered(display.width() / 2, 43, "< Connected >");
 
-      } else if (the_mesh.getBLEPin() != 0) { // BT pin
+      } else if (link_mode == LINK_MODE_BLE && the_mesh.getBLEPin() != 0) { // BT pin
         display.setColor(UIColor::warning_txt);
         bool room = !show_date || display.height() > 64;
         display.setTextSize(room ? 2 : 1);
@@ -673,10 +738,10 @@ public:
     } else if (_page == HomePage::POWER) {
       bool fem = _task->canControlFemLna();
       bool cpu_hw = _task->canSelectMcuSleep();
-      bool cpu_ok = cpu_hw && !_task->gpsBlocksCpuSleep() && !_task->bleBlocksCpuSleep();
+      bool cpu_ok = cpu_hw && !_task->gpsBlocksCpuSleep() && !_task->bleBlocksCpuSleep() && !_task->wifiBlocksCpuSleep();
       bool boost = _node_prefs->rx_boosted_gain != 0;
       bool lna = fem && _node_prefs->radio_fem_rxgain != 0;
-      bool cpu = cpu_ok && _node_prefs->mcu_sleep != 0;
+      bool cpu = cpu_ok;
       PowerChoice choices[6];
       int n = buildPowerChoices(fem, cpu_ok, choices);
       const char* name = "Custom";
@@ -707,6 +772,7 @@ public:
         const char* hold = NULL;
         if (cpu_hw && _task->gpsBlocksCpuSleep()) hold = "GPS needs CPU on";
         else if (cpu_hw && _task->bleBlocksCpuSleep()) hold = "BLE needs CPU on";
+        else if (cpu_hw && _task->wifiBlocksCpuSleep()) hold = "WiFi needs CPU on";
         display.setColor(hold ? UIColor::warning_txt : UIColor::secondary_txt);
         const char* hint = hold ? hold : "mode: " PRESS_LABEL;
         display.drawTextCentered(display.width() / 2, y, hint);
@@ -801,13 +867,31 @@ public:
         display.drawTextCentered(display.width() / 2, display.height() - 11, "scan: " PRESS_LABEL);
       }
     } else if (_page == HomePage::BLUETOOTH) {
+      uint8_t link_mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
+      const uint8_t* icon = bluetooth_on;
+      const char* name = "BLE";
+      if (link_mode == LINK_MODE_WIFI) {
+        icon = wifi_on;
+        name = "WiFi";
+      } else if (link_mode == LINK_MODE_OFF) {
+        icon = bluetooth_off;
+        name = "off";
+      }
       display.setColor(UIColor::corp_blue);
-      display.drawXbm((display.width() - 32) / 2, 18,
-          _task->isBluetoothEnabled() ? bluetooth_on : bluetooth_off,
-          32, 32);
+      display.drawXbm((display.width() - 32) / 2, 18, icon, 32, 32);
       display.setColor(UIColor::secondary_txt);
       display.setTextSize(1);
-      display.drawTextCentered(display.width() / 2, 64 - 11, "toggle: " PRESS_LABEL);
+      char ip[16];
+      bool have_ip = link_mode == LINK_MODE_WIFI && companionWifiAddress(ip, sizeof(ip));
+      if (have_ip) {
+        display.drawTextCentered(display.width() / 2, 64 - 11, ip);
+      } else if (link_mode == LINK_MODE_WIFI && _node_prefs && !_node_prefs->wifi_ssid[0]) {
+        display.drawTextLeftAlign(0, 64 - 11, "set ssid");
+        display.drawTextRightAlign(display.width() - 1, 64 - 11, PRESS_LABEL);
+      } else {
+        display.drawTextLeftAlign(0, 64 - 11, name);
+        display.drawTextRightAlign(display.width() - 1, 64 - 11, PRESS_LABEL);
+      }
 #if ENV_INCLUDE_GPS == 1
     } else if (_page == HomePage::GPS) {
       LocationProvider* nmea = sensors.getLocationProvider();
@@ -1107,32 +1191,6 @@ public:
         neighbors_scroll_offset = 0;
         neighbors_next_scroll = 0;
       }
-      // Page-name plaques force a second full refresh on e-ink.
-      if (!_task->isEink()) {
-        if (_page == HomePage::RECENT) {
-          _task->showAlert("Recent adverts", 800);
-        }
-        if (_page == HomePage::NEIGHBORS) {
-          _task->showAlert("Neighbors", 800);
-        }
-        if (_page == HomePage::RADIO) {
-          _task->showAlert("Radio", 800);
-        }
-        if (_page == HomePage::POWER) {
-          _task->showAlert("Power", 800);
-        }
-        if (_page == HomePage::SCAN) {
-          _task->showAlert("Noise scan", 800);
-        }
-        if (_page == HomePage::FSCAN) {
-          _task->showAlert("Freq scan", 800);
-        }
-#if ENV_INCLUDE_GPS == 1
-        if (_page == HomePage::BEACON) {
-          _task->showAlert("Beacon", 800);
-        }
-#endif
-      }
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::FSCAN) {
@@ -1167,10 +1225,10 @@ public:
     }
     if (c == KEY_ENTER && _page == HomePage::POWER) {
       bool fem = _task->canControlFemLna();
-      bool cpu_ok = _task->canSelectMcuSleep() && !_task->gpsBlocksCpuSleep() && !_task->bleBlocksCpuSleep();
+      bool cpu_ok = _task->canSelectMcuSleep() && !_task->gpsBlocksCpuSleep() && !_task->bleBlocksCpuSleep() && !_task->wifiBlocksCpuSleep();
       bool boost = _node_prefs->rx_boosted_gain != 0;
       bool lna = fem && _node_prefs->radio_fem_rxgain != 0;
-      bool cpu = cpu_ok && _node_prefs->mcu_sleep != 0;
+      bool cpu = cpu_ok;
       PowerChoice choices[6];
       int n = buildPowerChoices(fem, cpu_ok, choices);
       int cur = -1;
@@ -1185,11 +1243,25 @@ public:
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::BLUETOOTH) {
-      if (_task->isBluetoothEnabled()) {  // toggle Bluetooth on/off
+#if defined(BLE_PIN_CODE)
+      uint8_t mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
+#if defined(ESP32) && !defined(WIFI_SSID)
+      if (mode == LINK_MODE_BLE) mode = LINK_MODE_WIFI;
+      else if (mode == LINK_MODE_WIFI) mode = LINK_MODE_OFF;
+      else mode = LINK_MODE_BLE;
+#else
+      mode = mode == LINK_MODE_OFF ? LINK_MODE_BLE : LINK_MODE_OFF;
+#endif
+      if (_node_prefs) _node_prefs->link_mode = mode;
+      the_mesh.savePrefs();
+      companionApplyLink();
+#else
+      if (_task->isBluetoothEnabled()) {
         _task->disableBluetooth();
       } else {
         _task->enableBluetooth();
       }
+#endif
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::RECENT) {
@@ -1793,6 +1865,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   if (_display != NULL) {
     if (!_display->isOn() && !hasConnection()) {
       _display->turnOn();
+      s_fresh_batt = true;
     }
     if (_display->isOn()) {
     _auto_off = millis() + AUTO_OFF_MILLIS;  // extend the auto-off timer
@@ -1863,6 +1936,7 @@ bool UITask::isButtonPressed() const {
 }
 
 void UITask::loop() {
+  _idle_wake_ms = 60000;
   char c = 0;
 #if UI_HAS_JOYSTICK
   int ev = user_btn.check();
@@ -2026,6 +2100,7 @@ char UITask::checkDisplayOn(char c) {
   if (_display != NULL) {
     if (!_display->isOn()) {
       _display->turnOn();   // turn display on and consume event
+      s_fresh_batt = true;
       c = 0;
     }
     _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
@@ -2092,7 +2167,7 @@ void UITask::toggleGPS() {
           notify(UIEventType::ack);
         }
         the_mesh.savePrefs();
-        if (_node_prefs->gps_enabled && _node_prefs->mcu_sleep) {
+        if (_node_prefs->gps_enabled && _node_prefs->mcu_sleep && _node_prefs->gps_interval == 0) {
           showAlert("GPS needs CPU on", 1200);
         } else {
           showAlert(_node_prefs->gps_enabled ? "GPS: Enabled" : "GPS: Disabled", 800);
@@ -2112,6 +2187,18 @@ bool UITask::isDisplayOn() const {
 #endif
 }
 
+uint32_t UITask::millisUntilIdleWake() const {
+  uint32_t wait = _idle_wake_ms;
+  // The clock face waits for the next minute. Other pages can sit until the
+  // caller's cap: their redraw is not a reason to wake the CPU.
+  if (clock != NULL && curr == clock && _display != NULL && _display->isOn() && _next_refresh != 0) {
+    long left = (long)(_next_refresh - millis());
+    if (left < 0) left = 0;
+    if ((uint32_t)left < wait) wait = (uint32_t)left;
+  }
+  return wait;
+}
+
 void UITask::applyPowerProfile(bool rx_boost, bool fem_lna, bool cpu_sleep) {
   if (!radio_driver.setRxBoostedGainMode(rx_boost)) {
     showAlert("RX boost failed", 900);
@@ -2120,7 +2207,8 @@ void UITask::applyPowerProfile(bool rx_boost, bool fem_lna, bool cpu_sleep) {
   _node_prefs->rx_boosted_gain = rx_boost ? 1 : 0;
   bool cpu_blocked = false;
   bool ble_blocked = bleBlocksCpuSleep();
-  if (cpu_sleep && (gpsBlocksCpuSleep() || ble_blocked)) {
+  bool wifi_blocked = wifiBlocksCpuSleep();
+  if (cpu_sleep && (gpsBlocksCpuSleep() || ble_blocked || wifi_blocked)) {
     cpu_sleep = false;
     cpu_blocked = true;
   }
@@ -2150,7 +2238,7 @@ void UITask::applyPowerProfile(bool rx_boost, bool fem_lna, bool cpu_sleep) {
       break;
     }
   }
-  if (cpu_blocked) showAlert(ble_blocked ? "BLE needs CPU on" : "GPS needs CPU on", 1200);
+  if (cpu_blocked) showAlert(ble_blocked ? "BLE needs CPU on" : (wifi_blocked ? "WiFi needs CPU on" : "GPS needs CPU on"), 1200);
   else showAlert(name, 800);
   _next_refresh = 0;
 }

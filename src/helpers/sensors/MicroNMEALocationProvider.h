@@ -103,6 +103,8 @@ public :
         release();
     }
 
+    bool canPowerOff() const override { return _pin_en != -1; }
+
     bool isEnabled() override {
         // directly read the enable pin if present as gps can be
         // activated/deactivated outside of here ...

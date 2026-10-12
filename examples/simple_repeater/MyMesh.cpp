@@ -446,12 +446,23 @@ void MyMesh::sendFloodReply(mesh::Packet* packet, unsigned long delay_millis, ui
 }
 
 bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
-  if (_prefs.disable_fwd) return false;
+  if (_prefs.disable_fwd) {
+    if (packet->isRouteFlood() && !_region_fwd_drop_done) {
+      _region_fwd_drop_done = true;
+      _region_drop_nofwd++;
+    }
+    return false;
+  }
   if (packet->isRouteFlood()
       && mesh::isFloodHopLimitExceeded(packet, _prefs.flood_max, _prefs.flood_max_unscoped, _prefs.flood_max_advert)) {
+    if (!_region_fwd_drop_done) {
+      _region_fwd_drop_done = true;
+      _region_drop_hop++;
+    }
     return false;
   }
   if (packet->isRouteFlood() && recv_pkt_region == NULL) {
+    // Region deny/unknown/unscoped already counted in onRecvPacket.
     MESH_DEBUG_PRINTLN("allowPacketForward: unknown transport code, or wildcard not allowed for FLOOD packet");
     return false;
   }
@@ -466,6 +477,10 @@ bool MyMesh::allowPacketForward(const mesh::Packet *packet) {
     }
     if (isLooped(packet, maximums)) {
       MESH_DEBUG_PRINTLN("allowPacketForward: FLOOD packet loop detected!");
+      if (!_region_fwd_drop_done) {
+        _region_fwd_drop_done = true;
+        _region_drop_loop++;
+      }
       return false;
     }
   }
@@ -529,6 +544,26 @@ void MyMesh::onTxAttempt(mesh::Packet* pkt) {
 }
 
 void MyMesh::onForward(mesh::Packet* pkt) {
+  if (pkt && pkt->isRouteFlood() && recv_pkt_region) {
+    if (recv_pkt_region->isWildcard()) {
+      _region_unscoped_fwd++;
+    } else {
+      RegionStatSlot* slot = nullptr;
+      for (uint8_t i = 0; i < _region_stats_n; i++) {
+        if (_region_stats[i].id == recv_pkt_region->id) {
+          slot = &_region_stats[i];
+          break;
+        }
+      }
+      if (!slot && _region_stats_n < MAX_REGION_ENTRIES) {
+        slot = &_region_stats[_region_stats_n++];
+        slot->id = recv_pkt_region->id;
+        slot->rx = 0;
+        slot->fwd = 0;
+      }
+      if (slot) slot->fwd++;
+    }
+  }
   offerMqttTx(pkt);
 }
 
@@ -587,13 +622,37 @@ uint32_t MyMesh::getDirectRetransmitDelay(const mesh::Packet *packet) {
 }
 
 mesh::DispatcherAction MyMesh::onRecvPacket(mesh::Packet* pkt) {
+  _region_fwd_drop_done = false;
   if (pkt->getRouteType() == ROUTE_TYPE_TRANSPORT_FLOOD) {
+    RegionEntry* any = region_map.findMatch(pkt, 0);
     recv_pkt_region = region_map.findMatch(pkt, REGION_DENY_FLOOD);
+    if (!any) {
+      _region_drop_unknown++;
+    } else if (!recv_pkt_region) {
+      _region_drop_denied++;
+    } else {
+      RegionStatSlot* slot = nullptr;
+      for (uint8_t i = 0; i < _region_stats_n; i++) {
+        if (_region_stats[i].id == recv_pkt_region->id) {
+          slot = &_region_stats[i];
+          break;
+        }
+      }
+      if (!slot && _region_stats_n < MAX_REGION_ENTRIES) {
+        slot = &_region_stats[_region_stats_n++];
+        slot->id = recv_pkt_region->id;
+        slot->rx = 0;
+        slot->fwd = 0;
+      }
+      if (slot) slot->rx++;
+    }
   } else if (pkt->getRouteType() == ROUTE_TYPE_FLOOD) {
     if (region_map.getWildcard().flags & REGION_DENY_FLOOD) {
       recv_pkt_region = NULL;
+      _region_drop_unscoped++;
     } else {
-      recv_pkt_region =  &region_map.getWildcard();
+      recv_pkt_region = &region_map.getWildcard();
+      _region_unscoped_rx++;
     }
   } else {
     recv_pkt_region = NULL;
@@ -972,6 +1031,12 @@ MyMesh::MyMesh(mesh::MainBoard &board, mesh::Radio &radio, mesh::MillisecondCloc
   _logging = false;
   region_load_active = false;
   recv_pkt_region = NULL;
+  _region_stats_n = 0;
+  memset(_region_stats, 0, sizeof(_region_stats));
+  _region_unscoped_rx = _region_unscoped_fwd = 0;
+  _region_drop_unknown = _region_drop_denied = _region_drop_unscoped = 0;
+  _region_drop_hop = _region_drop_loop = _region_drop_nofwd = 0;
+  _region_fwd_drop_done = false;
 
 #if MAX_NEIGHBOURS
   memset(neighbours, 0, sizeof(neighbours));
@@ -1292,7 +1357,173 @@ void MyMesh::clearStats() {
   radio_driver.resetStats();
   resetStats();
   ((SimpleMeshTables *)getTables())->resetStats();
+  _region_stats_n = 0;
+  memset(_region_stats, 0, sizeof(_region_stats));
+  _region_unscoped_rx = _region_unscoped_fwd = 0;
+  _region_drop_unknown = _region_drop_denied = _region_drop_unscoped = 0;
+  _region_drop_hop = _region_drop_loop = _region_drop_nofwd = 0;
+  _region_fwd_drop_done = false;
+#if defined(ESP32)
+  // Keep the ring; only re-baseline so the next slot is not a wrap-around spike.
+  captureStatsBaseline();
+#endif
 }
+
+void MyMesh::regionStatRxFwd(uint16_t id, uint32_t& rx, uint32_t& fwd) const {
+  rx = 0;
+  fwd = 0;
+  for (uint8_t i = 0; i < _region_stats_n; i++) {
+    if (_region_stats[i].id == id) {
+      rx = _region_stats[i].rx;
+      fwd = _region_stats[i].fwd;
+      return;
+    }
+  }
+}
+
+#if defined(ESP32)
+static uint16_t statsDelta16(uint32_t now, uint32_t& prev) {
+  uint32_t d = now - prev;
+  prev = now;
+  if (d > 65535u) d = 65535u;
+  return (uint16_t)d;
+}
+
+static int8_t statsClampI8(int v) {
+  if (v < -128) return -128;
+  if (v > 127) return 127;
+  return (int8_t)v;
+}
+
+void MyMesh::captureStatsBaseline() {
+  _stats_base_recv = radio_driver.getPacketsRecv();
+  _stats_base_sent = radio_driver.getPacketsSent();
+  _stats_base_flood_rx = getNumRecvFlood();
+  _stats_base_flood_tx = getNumSentFlood();
+  _stats_base_direct_rx = getNumRecvDirect();
+  _stats_base_direct_tx = getNumSentDirect();
+  _stats_base_tx_air_ms = (uint32_t)getTotalAirTime();
+  _stats_base_rx_air_ms = (uint32_t)getReceiveAirTime();
+  _stats_primed = true;
+}
+
+void MyMesh::tickStatsHistory() {
+  uint32_t now = _ms->getMillis();
+  if (!_stats_primed) {
+    captureStatsBaseline();
+    _stats_last_ms = now ? now : 1;
+    return;
+  }
+  if (_stats_exporting) return;
+  uint32_t gap_ms = (uint32_t)REPEATER_STATS_INTERVAL_SECS * 1000u;
+  if (_stats_last_ms && (uint32_t)(now - _stats_last_ms) < gap_ms) return;
+  _stats_last_ms = now ? now : 1;
+
+  RepeaterStatsSlot slot{};
+  slot.recv_d = statsDelta16(radio_driver.getPacketsRecv(), _stats_base_recv);
+  slot.sent_d = statsDelta16(radio_driver.getPacketsSent(), _stats_base_sent);
+  slot.flood_rx_d = statsDelta16(getNumRecvFlood(), _stats_base_flood_rx);
+  slot.flood_tx_d = statsDelta16(getNumSentFlood(), _stats_base_flood_tx);
+  slot.direct_rx_d = statsDelta16(getNumRecvDirect(), _stats_base_direct_rx);
+  slot.direct_tx_d = statsDelta16(getNumSentDirect(), _stats_base_direct_tx);
+  uint32_t tx_air = (uint32_t)getTotalAirTime();
+  uint32_t rx_air = (uint32_t)getReceiveAirTime();
+  uint32_t tx_d = tx_air - _stats_base_tx_air_ms;
+  uint32_t rx_d = rx_air - _stats_base_rx_air_ms;
+  _stats_base_tx_air_ms = tx_air;
+  _stats_base_rx_air_ms = rx_air;
+  slot.tx_air_ds = (uint16_t)((tx_d / 100u) > 65535u ? 65535u : (tx_d / 100u));
+  slot.rx_air_ds = (uint16_t)((rx_d / 100u) > 65535u ? 65535u : (rx_d / 100u));
+  slot.noise = statsClampI8(_radio->getNoiseFloor());
+  slot.rssi = statsClampI8((int)radio_driver.getLastRSSI());
+  slot.snr_q4 = statsClampI8((int)(radio_driver.getLastSNR() * 4.0f));
+  uint32_t q = (uint32_t)_mgr->getOutboundTotal();
+  slot.queue = q > 255u ? 255u : (uint8_t)q;
+  uint16_t batt_mv = 0;
+  int16_t temp_c_x10 = REPEATER_TEMP_UNKNOWN;
+  sampleEnvironment(batt_mv, temp_c_x10);
+  slot.batt_mv = batt_mv;
+  slot.temp_c_x10 = temp_c_x10;
+
+  _stats_slots[_stats_next] = slot;
+  _stats_next = (uint16_t)((_stats_next + 1u) % REPEATER_STATS_SLOTS);
+  if (_stats_count < REPEATER_STATS_SLOTS) _stats_count++;
+}
+
+uint16_t MyMesh::exportStatsHistory(uint8_t hours, RepeaterStatsSlot* dest, uint16_t dest_cap,
+                                    RepeaterStatsSeriesMeta& meta) const {
+  memset(&meta, 0, sizeof(meta));
+  if (!dest || !dest_cap) return 0;
+  if (hours != 1 && hours != 3 && hours != 6 && hours != 12 && hours != 24) hours = 24;
+  meta.hours = hours;
+  meta.interval_secs = REPEATER_STATS_INTERVAL_SECS;
+
+  // Freeze the ring for this read (web task); sampler skips while set.
+  const_cast<MyMesh*>(this)->_stats_exporting = 1;
+
+  uint32_t want = ((uint32_t)hours * 3600u) / (uint32_t)REPEATER_STATS_INTERVAL_SECS;
+  if (want < 1u) want = 1u;
+  if (want > _stats_count) want = _stats_count;
+  if (!want) {
+    const_cast<MyMesh*>(this)->_stats_exporting = 0;
+    return 0;
+  }
+
+  uint16_t max_out = dest_cap;
+  if (max_out > REPEATER_STATS_EXPORT_MAX) max_out = REPEATER_STATS_EXPORT_MAX;
+  uint32_t group = 1;
+  if (want > max_out) {
+    group = (want + max_out - 1u) / max_out;
+    meta.interval_secs = (uint32_t)REPEATER_STATS_INTERVAL_SECS * group;
+  }
+
+  uint16_t out = 0;
+  uint32_t oldest = (_stats_next + REPEATER_STATS_SLOTS - want) % REPEATER_STATS_SLOTS;
+  uint32_t src = 0;
+  while (src < want && out < max_out) {
+    RepeaterStatsSlot agg{};
+    uint32_t noise_sum = 0, rssi_sum = 0, snr_sum = 0, queue_sum = 0, batt_sum = 0;
+    int32_t temp_sum = 0;
+    uint32_t n = 0, batt_n = 0, temp_n = 0;
+    while (n < group && src < want) {
+      const RepeaterStatsSlot& s = _stats_slots[(oldest + src) % REPEATER_STATS_SLOTS];
+      src++;
+      n++;
+      uint32_t v;
+      v = (uint32_t)agg.recv_d + s.recv_d; agg.recv_d = v > 65535u ? 65535u : (uint16_t)v;
+      v = (uint32_t)agg.sent_d + s.sent_d; agg.sent_d = v > 65535u ? 65535u : (uint16_t)v;
+      v = (uint32_t)agg.flood_rx_d + s.flood_rx_d; agg.flood_rx_d = v > 65535u ? 65535u : (uint16_t)v;
+      v = (uint32_t)agg.flood_tx_d + s.flood_tx_d; agg.flood_tx_d = v > 65535u ? 65535u : (uint16_t)v;
+      v = (uint32_t)agg.direct_rx_d + s.direct_rx_d; agg.direct_rx_d = v > 65535u ? 65535u : (uint16_t)v;
+      v = (uint32_t)agg.direct_tx_d + s.direct_tx_d; agg.direct_tx_d = v > 65535u ? 65535u : (uint16_t)v;
+      v = (uint32_t)agg.tx_air_ds + s.tx_air_ds; agg.tx_air_ds = v > 65535u ? 65535u : (uint16_t)v;
+      v = (uint32_t)agg.rx_air_ds + s.rx_air_ds; agg.rx_air_ds = v > 65535u ? 65535u : (uint16_t)v;
+      noise_sum += (uint32_t)((int)s.noise + 128);
+      rssi_sum += (uint32_t)((int)s.rssi + 128);
+      snr_sum += (uint32_t)((int)s.snr_q4 + 128);
+      queue_sum += s.queue;
+      if (s.batt_mv) { batt_sum += s.batt_mv; batt_n++; }
+      if (s.temp_c_x10 != REPEATER_TEMP_UNKNOWN) { temp_sum += s.temp_c_x10; temp_n++; }
+    }
+    if (!n) break;
+    agg.noise = (int8_t)((int)(noise_sum / n) - 128);
+    agg.rssi = (int8_t)((int)(rssi_sum / n) - 128);
+    agg.snr_q4 = (int8_t)((int)(snr_sum / n) - 128);
+    agg.queue = (uint8_t)(queue_sum / n);
+    agg.batt_mv = batt_n ? (uint16_t)(batt_sum / batt_n) : 0;
+    agg.temp_c_x10 = temp_n ? (int16_t)(temp_sum / (int32_t)temp_n) : (int16_t)REPEATER_TEMP_UNKNOWN;
+    dest[out++] = agg;
+  }
+  meta.count = out;
+  if (_prefs.time_valid && out) {
+    uint32_t now = getRTCClock()->getCurrentTime();
+    uint32_t span = (uint32_t)(out > 0 ? out - 1 : 0) * meta.interval_secs;
+    meta.t0 = now > span ? now - span : 0;
+  }
+  const_cast<MyMesh*>(this)->_stats_exporting = 0;
+  return out;
+}
+#endif
 
 void MyMesh::loadMqttCa() {
   if (!_fs->exists(MQTT_CA_FILE)) return;
@@ -1581,8 +1812,15 @@ bool MyMesh::applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t re
   float prev_bw = _prefs.bw;
   uint8_t prev_sf = _prefs.sf;
   uint8_t prev_cr = _prefs.cr;
-  if (in.profile == RADIO_PROFILE_LONG || in.profile == RADIO_PROFILE_HINOISE ||
-      in.profile == RADIO_PROFILE_NORMAL) {
+  uint8_t current_profile = radioProfile();
+  bool named = in.profile == RADIO_PROFILE_LONG || in.profile == RADIO_PROFILE_HINOISE ||
+               in.profile == RADIO_PROFILE_NORMAL;
+  // The page keeps showing the current modem fields when a named profile is
+  // chosen. Apply that preset only if those four fields were left alone.
+  // Edited frequency, bandwidth, SF or CR are what the user asked to save.
+  bool modem_edited = !radioNear(in.freq, _prefs.freq) || !radioNear(in.bw, _prefs.bw) ||
+                      in.sf != _prefs.sf || in.cr != _prefs.cr;
+  if (!modem_edited && named && in.profile != current_profile) {
     applyRadioProfileChoice(in.profile, _prefs.freq, _prefs.bw, _prefs.sf, _prefs.cr,
                             _prefs.home_freq, _prefs.home_bw, _prefs.home_sf, _prefs.home_cr);
   } else {
@@ -1625,6 +1863,167 @@ bool MyMesh::applyRadioPanel(const RepeaterRadioForm& in, char* reply, size_t re
     copyReply(reply, reply_cap, reboot ? "Настройки радио сохранены. Перезагрузка…" : "Настройки радио сохранены");
   }
   return true;
+}
+
+static const char* regionDisplayName(const RegionEntry* r) {
+  if (!r) return "";
+  const char* n = r->name;
+  return (*n == '#') ? n + 1 : n;
+}
+
+static bool regionNameCharsOk(const char* name) {
+  if (!name || !name[0]) return false;
+  for (const char* p = name; *p; p++) {
+    if (*p == '$') return false;
+    if (!RegionMap::is_name_char((uint8_t)*p)) return false;
+  }
+  return true;
+}
+
+static void appendRegionSnapshot(MyMesh& mesh, RegionMap& map, uint16_t parent_id, uint8_t depth,
+                                 RepeaterPageInfo& info) {
+  for (int i = 0; i < map.getCount() && info.region_count < REPEATER_PAGE_REGIONS; i++) {
+    const RegionEntry* r = map.getByIdx(i);
+    if (!r || r->parent != parent_id) continue;
+    RepeaterRegionEntry& dst = info.regions[info.region_count++];
+    memset(&dst, 0, sizeof(dst));
+    strncpy(dst.name, regionDisplayName(r), sizeof(dst.name) - 1);
+    const RegionEntry* parent = map.findById(r->parent);
+    if (parent && !parent->isWildcard()) {
+      strncpy(dst.parent, regionDisplayName(parent), sizeof(dst.parent) - 1);
+    }
+    dst.depth = depth;
+    dst.flood_ok = (r->flags & REGION_DENY_FLOOD) ? 0 : 1;
+    RegionEntry* def = map.getDefaultRegion();
+    RegionEntry* home = map.getHomeRegion();
+    dst.is_default = (def && def->id == r->id) ? 1 : 0;
+    dst.is_home = (home && !home->isWildcard() && home->id == r->id) ? 1 : 0;
+    mesh.regionStatRxFwd(r->id, dst.rx, dst.fwd);
+    appendRegionSnapshot(mesh, map, r->id, (uint8_t)(depth < 7 ? depth + 1 : depth), info);
+  }
+}
+
+bool MyMesh::applyRegionPanel(const RepeaterRegionForm& in, char* reply, size_t reply_cap) {
+  auto persist = [&]() -> bool {
+    _prefs.discovery_mod_timestamp = getRTCClock()->getCurrentTime();
+    savePrefs();
+    if (!saveRegions()) {
+      copyReply(reply, reply_cap, "Не удалось сохранить регионы");
+      return false;
+    }
+    copyReply(reply, reply_cap, "Настройки регионов сохранены");
+    return true;
+  };
+
+  if (in.op == REGION_OP_FLOOD) {
+    RegionEntry* region = nullptr;
+    if (!in.name[0] || strcmp(in.name, "*") == 0) {
+      region = &region_map.getWildcard();
+    } else {
+      region = region_map.findByName(in.name);
+    }
+    if (!region) {
+      copyReply(reply, reply_cap, "Регион не найден");
+      return false;
+    }
+    if (in.flood_ok) region->flags &= ~REGION_DENY_FLOOD;
+    else region->flags |= REGION_DENY_FLOOD;
+    return persist();
+  }
+
+  if (in.op == REGION_OP_ADD) {
+    if (!regionNameCharsOk(in.name) || strcmp(in.name, "*") == 0 || strlen(in.name) > 30) {
+      copyReply(reply, reply_cap, "В имени есть недопустимый символ");
+      return false;
+    }
+    if (region_map.findByName(in.name)) {
+      copyReply(reply, reply_cap, "Такое имя уже есть");
+      return false;
+    }
+    RegionEntry* parent = &region_map.getWildcard();
+    if (in.parent[0] && strcmp(in.parent, "*") != 0) {
+      parent = region_map.findByName(in.parent);
+      if (!parent) {
+        copyReply(reply, reply_cap, "Неизвестный родитель");
+        return false;
+      }
+    }
+    if (region_map.getCount() >= MAX_REGION_ENTRIES) {
+      copyReply(reply, reply_cap, "Список регионов заполнен (максимум 32)");
+      return false;
+    }
+    RegionEntry* region = region_map.putRegion(in.name, parent->id);
+    if (!region) {
+      copyReply(reply, reply_cap, "В имени есть недопустимый символ");
+      return false;
+    }
+    region->flags = 0;
+    return persist();
+  }
+
+  if (in.op == REGION_OP_REMOVE) {
+    if (!in.name[0] || strcmp(in.name, "*") == 0) {
+      copyReply(reply, reply_cap, "Регион не найден");
+      return false;
+    }
+    RegionEntry* region = region_map.findByName(in.name);
+    if (!region) {
+      copyReply(reply, reply_cap, "Регион не найден");
+      return false;
+    }
+    uint16_t removed_id = region->id;
+    RegionEntry* def = region_map.getDefaultRegion();
+    RegionEntry* home = region_map.getHomeRegion();
+    uint16_t def_id = def ? def->id : 0;
+    uint16_t home_id = (home && !home->isWildcard()) ? home->id : 0;
+    // Drop the whole subtree — leaf-only remove felt broken in the web UI.
+    if (!region_map.removeRegionRecursive(removed_id)) {
+      copyReply(reply, reply_cap, "Не удалось удалить регион");
+      return false;
+    }
+    if (def_id && !region_map.findById(def_id)) {
+      region_map.setDefaultRegion(NULL);
+      onDefaultRegionChanged(NULL);
+    }
+    if (home_id && !region_map.findById(home_id)) region_map.setHomeRegion(NULL);
+    if (!persist()) return false;
+    copyReply(reply, reply_cap, "Регион удалён");
+    return true;
+  }
+
+  if (in.op == REGION_OP_DEFAULT) {
+    if (!in.name[0] || strcmp(in.name, "*") == 0) {
+      region_map.setDefaultRegion(NULL);
+      onDefaultRegionChanged(NULL);
+      return persist();
+    }
+    RegionEntry* def = region_map.findByName(in.name);
+    if (!def) {
+      copyReply(reply, reply_cap, "Регион не найден");
+      return false;
+    }
+    def->flags = 0;
+    region_map.setDefaultRegion(def);
+    onDefaultRegionChanged(def);
+    return persist();
+  }
+
+  if (in.op == REGION_OP_HOME) {
+    if (!in.name[0] || strcmp(in.name, "*") == 0) {
+      region_map.setHomeRegion(NULL);
+      return persist();
+    }
+    RegionEntry* home = region_map.findByName(in.name);
+    if (!home) {
+      copyReply(reply, reply_cap, "Регион не найден");
+      return false;
+    }
+    region_map.setHomeRegion(home);
+    return persist();
+  }
+
+  copyReply(reply, reply_cap, "Неизвестная операция");
+  return false;
 }
 
 bool MyMesh::applyNodePanel(const RepeaterNodeForm& in, char* reply, size_t reply_cap) {
@@ -1781,7 +2180,11 @@ void MyMesh::formatWifiStatus(char* reply) {
     return;
   }
   char ip[16];
-  if (_wifi.copyAddress(ip, sizeof(ip))) snprintf(reply, 160, "> on %s", ip);
+  int8_t rssi = 0;
+  bool has_ip = _wifi.copyAddress(ip, sizeof(ip));
+  bool has_rssi = _wifi.copyRssi(rssi);
+  if (has_ip && has_rssi) snprintf(reply, 160, "> on %s %d dBm", ip, (int)rssi);
+  else if (has_ip) snprintf(reply, 160, "> on %s", ip);
   else strcpy(reply, "> on");
 }
 
@@ -2101,7 +2504,9 @@ void MyMesh::fillRepeaterPage(RepeaterPageInfo& info) {
   strncpy(info.ssid, _prefs.wifi_ssid, sizeof(info.ssid) - 1);
   info.wifi_ps = _prefs.wifi_ps;
   info.wifi_ps_active = _wifi.powerMode();
-  copyWifiAddress(info.ip, sizeof(info.ip));
+  info.wifi_up = copyWifiAddress(info.ip, sizeof(info.ip)) ? 1 : 0;
+  int8_t wifi_rssi = 0;
+  if (_wifi.copyRssi(wifi_rssi)) info.wifi_rssi = wifi_rssi;
   if (!_prefs.mqtt_enabled) strncpy(info.mqtt, "выкл", sizeof(info.mqtt) - 1);
   else if (_mqtt.isUp()) strncpy(info.mqtt, "подключён", sizeof(info.mqtt) - 1);
   else strncpy(info.mqtt, "нет связи", sizeof(info.mqtt) - 1);
@@ -2234,6 +2639,25 @@ void MyMesh::fillRepeaterPage(RepeaterPageInfo& info) {
     dst.secs_ago = now - src.heard_timestamp;
   }
 #endif
+
+  info.wildcard_flood = (region_map.getWildcard().flags & REGION_DENY_FLOOD) ? 0 : 1;
+  RegionEntry* def = region_map.getDefaultRegion();
+  if (def && !def->isWildcard()) {
+    strncpy(info.region_default, regionDisplayName(def), sizeof(info.region_default) - 1);
+  }
+  RegionEntry* home = region_map.getHomeRegion();
+  if (home && !home->isWildcard()) {
+    strncpy(info.region_home, regionDisplayName(home), sizeof(info.region_home) - 1);
+  }
+  info.region_unscoped_rx = _region_unscoped_rx;
+  info.region_unscoped_fwd = _region_unscoped_fwd;
+  info.region_drop_unknown = _region_drop_unknown;
+  info.region_drop_denied = _region_drop_denied;
+  info.region_drop_unscoped = _region_drop_unscoped;
+  info.region_drop_hop = _region_drop_hop;
+  info.region_drop_loop = _region_drop_loop;
+  info.region_drop_nofwd = _region_drop_nofwd;
+  appendRegionSnapshot(*this, region_map, 0, 0, info);
 }
 
 void MyMesh::sampleEnvironment(uint16_t& batt_mv, int16_t& temp_c_x10) {
@@ -2267,43 +2691,54 @@ void MyMesh::loop() {
     }
   }
   _reach.poll(_mqtt.isUp());
+  // A firmware upload is on this link. Reconnecting would drop it.
+  if (!_web.webBusy()) _wifi.maintain();
   _web.poll(_prefs.wifi_enabled && _prefs.wifi_ssid[0]);
+#if defined(ESP32)
+  tickStatsHistory();
+#endif
   uint16_t batt_mv = 0;
   int16_t temp_c_x10 = REPEATER_TEMP_UNKNOWN;
   sampleEnvironment(batt_mv, temp_c_x10);
-  _mqtt.setRadioMetrics((int16_t)_radio->getNoiseFloor(),
-                        (uint32_t)(getTotalAirTime() / 1000),
-                        (uint32_t)(getReceiveAirTime() / 1000),
-                        _ms->getMillis() / 1000,
-                        (uint32_t)_mgr->getOutboundTotal(),
-                        batt_mv,
-                        temp_c_x10,
-                        getFirmwareVer());
   _mqtt.loop();
-  TelView tel_view{};
-  tel_view.enabled = _prefs.tel_enabled != 0;
-  tel_view.unix_time = getRTCClock()->getCurrentTime();
-  tel_view.time_ok = _prefs.time_valid && tel_view.unix_time >= 1735689600UL;
-  strncpy(tel_view.iata, _prefs.tel_iata, sizeof(tel_view.iata) - 1);
-  telBroker(_prefs, tel_view.host, sizeof(tel_view.host), &tel_view.port, tel_view.user, sizeof(tel_view.user),
-            tel_view.pass, sizeof(tel_view.pass));
-  strncpy(tel_view.name, _prefs.node_name, sizeof(tel_view.name) - 1);
-  const char* tel_model = board.getManufacturerName();
-  if (tel_model) strncpy(tel_view.model, tel_model, sizeof(tel_view.model) - 1);
-  strncpy(tel_view.firmware, getFirmwareVer(), sizeof(tel_view.firmware) - 1);
-  tel_view.freq = _prefs.freq;
-  tel_view.bw = _prefs.bw;
-  tel_view.sf = _prefs.sf;
-  tel_view.cr = _prefs.cr;
-  tel_view.battery_mv = batt_mv;
-  tel_view.uptime_secs = _ms->getMillis() / 1000;
-  tel_view.error_flags = _err_flags;
-  tel_view.queue_len = (uint32_t)_mgr->getOutboundTotal();
-  tel_view.noise_floor = _radio->getNoiseFloor();
-  tel_view.tx_air_secs = (uint32_t)(getTotalAirTime() / 1000);
-  tel_view.rx_air_secs = (uint32_t)(getReceiveAirTime() / 1000);
-  tel_view.recv_errors = radio_driver.getPacketsRecvErrors();
-  _tel.loop(tel_view);
+  // Heartbeat is once a minute and the tel status every five. Refresh the snapshot every 5 s.
+  static uint32_t metrics_at = 0;
+  uint32_t metrics_now = _ms->getMillis();
+  if (!metrics_at || (uint32_t)(metrics_now - metrics_at) >= 5000) {
+    metrics_at = metrics_now ? metrics_now : 1;
+    _mqtt.setRadioMetrics((int16_t)_radio->getNoiseFloor(),
+                          (uint32_t)(getTotalAirTime() / 1000),
+                          (uint32_t)(getReceiveAirTime() / 1000),
+                          metrics_now / 1000,
+                          (uint32_t)_mgr->getOutboundTotal(),
+                          batt_mv,
+                          temp_c_x10,
+                          getFirmwareVer());
+    TelView tel_view{};
+    tel_view.enabled = _prefs.tel_enabled != 0;
+    tel_view.unix_time = getRTCClock()->getCurrentTime();
+    tel_view.time_ok = _prefs.time_valid && tel_view.unix_time >= 1735689600UL;
+    strncpy(tel_view.iata, _prefs.tel_iata, sizeof(tel_view.iata) - 1);
+    telBroker(_prefs, tel_view.host, sizeof(tel_view.host), &tel_view.port, tel_view.user, sizeof(tel_view.user),
+              tel_view.pass, sizeof(tel_view.pass));
+    strncpy(tel_view.name, _prefs.node_name, sizeof(tel_view.name) - 1);
+    const char* tel_model = board.getManufacturerName();
+    if (tel_model) strncpy(tel_view.model, tel_model, sizeof(tel_view.model) - 1);
+    strncpy(tel_view.firmware, getFirmwareVer(), sizeof(tel_view.firmware) - 1);
+    tel_view.freq = _prefs.freq;
+    tel_view.bw = _prefs.bw;
+    tel_view.sf = _prefs.sf;
+    tel_view.cr = _prefs.cr;
+    tel_view.battery_mv = batt_mv;
+    tel_view.uptime_secs = metrics_now / 1000;
+    tel_view.error_flags = _err_flags;
+    tel_view.queue_len = (uint32_t)_mgr->getOutboundTotal();
+    tel_view.noise_floor = _radio->getNoiseFloor();
+    tel_view.tx_air_secs = (uint32_t)(getTotalAirTime() / 1000);
+    tel_view.rx_air_secs = (uint32_t)(getReceiveAirTime() / 1000);
+    tel_view.recv_errors = radio_driver.getPacketsRecvErrors();
+    _tel.loop(tel_view);
+  }
 #ifdef WITH_BRIDGE
   bridge.loop();
 #endif
@@ -2347,6 +2782,28 @@ void MyMesh::loop() {
   uint32_t now = millis();
   uptime_millis += now - last_millis;
   last_millis = now;
+}
+
+static uint32_t msUntil(uint32_t now, unsigned long at, uint32_t wait) {
+  if (at == 0) return wait;
+  long left = (long)(at - now);
+  if (left < 0) left = 0;
+  if ((uint32_t)left < wait) return (uint32_t)left;
+  return wait;
+}
+
+uint32_t MyMesh::millisUntilIdleWork() const {
+  uint32_t now = (uint32_t)_ms->getMillis();
+  uint32_t wait = millisUntilRadioWork();
+  wait = msUntil(now, next_flood_advert, wait);
+  wait = msUntil(now, next_local_advert, wait);
+  wait = msUntil(now, _clock_next_pull, wait);
+  if (_clock_pull_tag != 0) wait = msUntil(now, _clock_pull_deadline, wait);
+  wait = msUntil(now, set_radio_at, wait);
+  wait = msUntil(now, revert_radio_at, wait);
+  wait = msUntil(now, dirty_contacts_expiry, wait);
+  wait = msUntil(now, pending_discover_until, wait);
+  return wait;
 }
 
 // To check if there is pending work

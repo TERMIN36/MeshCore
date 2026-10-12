@@ -98,6 +98,8 @@ public:
   virtual Packet* removeOutboundByIdx(int i) = 0;
   virtual bool queueInbound(Packet* packet, uint32_t scheduled_for) = 0;
   virtual Packet* getNextInbound(uint32_t now) = 0;
+  // Earliest scheduled inbound or outbound packet. False when both queues are empty.
+  virtual bool nextDeadline(uint32_t& at) const { (void)at; return false; }
 };
 
 typedef uint32_t  DispatcherAction;
@@ -187,6 +189,9 @@ public:
   unsigned long getTotalAirTime() const { return total_air_time; }
   unsigned long getReceiveAirTime() const {return rx_air_time; }
   unsigned long getRemainingTxBudget() const { return tx_budget_ms; }
+  // Milliseconds until the next noise-floor sample or AGC reset. A very large
+  // value means neither is scheduled. Zero means one of them is already due.
+  uint32_t millisUntilRadioWork() const;
   uint32_t getNumSentFlood() const { return n_sent_flood; }
   uint32_t getNumSentDirect() const { return n_sent_direct; }
   uint32_t getNumRecvFlood() const { return n_recv_flood; }

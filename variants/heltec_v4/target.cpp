@@ -25,7 +25,7 @@ AutoDiscoverRTCClock rtc_clock(fallback_clock);
 
 #ifdef DISPLAY_CLASS
   DISPLAY_CLASS display(NULL);
-  MomentaryButton user_btn(PIN_USER_BTN, 1000, true);
+  MomentaryButton user_btn(PIN_USER_BTN, 1000, true, true);
 #endif
 
 bool radio_init() {

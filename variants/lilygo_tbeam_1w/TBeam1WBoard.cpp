@@ -22,6 +22,7 @@ void TBeam1WBoard::begin() {
 
 void TBeam1WBoard::onBeforeTransmit() {
   // RF switching handled by RadioLib via SX126X_DIO2_AS_RF_SWITCH and setRfSwitchPins()
+  if (!isTxLedEnabled()) return;
   digitalWrite(LED_PIN, HIGH);  // TX LED on
 }
 

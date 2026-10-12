@@ -17,7 +17,7 @@ Commands:
   build-companion-firmwares: Build all companion firmwares for all build targets.
   build-repeater-firmwares: Build all repeater firmwares for all build targets.
   build-room-server-firmwares: Build all chat room server firmwares for all build targets.
-  get-version: Print the firmware version from src/helpers/FirmwareVersion.h (e.g. v1.17.1-0.1.1).
+  get-version: Print the firmware version from src/helpers/FirmwareVersion.h (e.g. v0.2.0).
 
 Examples:
 Build firmware for the "RAK_4631_repeater" device target
@@ -41,8 +41,9 @@ $ sh build.sh build-kiss-radio-firmwares
 Environment Variables:
   DISABLE_DEBUG=1: Disables all debug logging flags (MESH_DEBUG, MESH_PACKET_LOGGING, etc.)
                    If not set, debug flags from variant platformio.ini files are used.
-  DISPLAY_ENVS_ONLY=0: Include boards without a display in build-*-firmwares and release builds.
-                   By default only envs with a DISPLAY_CLASS (other than NullDisplayDriver) are built.
+  DISPLAY_ENVS_ONLY=0: Include boards without a display. Local bulk builds skip them.
+                   GitHub release workflows set this to 0. Default keeps only envs whose
+                   DISPLAY_CLASS is set and is not NullDisplayDriver.
   FIRMWARE_VERSION: Version to embed. Defaults to the version in src/helpers/FirmwareVersion.h.
 
 Examples:
@@ -88,8 +89,8 @@ get_pio_envs_containing_string() {
   done
 }
 
-# Bulk and release builds only cover envs with a real display, since the fork's
-# changes are the on-device UI and display drivers. Set DISPLAY_ENVS_ONLY=0 to build every board.
+# Local bulk builds only cover envs with a real display. GitHub release workflows
+# set DISPLAY_ENVS_ONLY=0 so headless boards are published too.
 DISPLAY_ENVS_ONLY=${DISPLAY_ENVS_ONLY-1}
 
 # print pio env names that define a DISPLAY_CLASS other than NullDisplayDriver
@@ -151,12 +152,10 @@ for section, options in data:
 "
 }
 
-# firmware version from source: "<upstream version>-<fork version>", e.g. v1.17.1-0.1.1
+# firmware version from source: own fork line, e.g. v0.2.0
 get_source_version() {
   local header="src/helpers/FirmwareVersion.h"
-  local base=$(sed -n 's/^#define MESHCORE_BASE_VERSION *"\([^"]*\)".*/\1/p' "$header")
-  local fork=$(sed -n 's/^#define FORK_VERSION *"\([^"]*\)".*/\1/p' "$header")
-  echo "${base}-${fork}"
+  sed -n 's/^#define FORK_VERSION *"\([^"]*\)".*/\1/p' "$header"
 }
 
 # disable all debug logging flags if DISABLE_DEBUG=1 is set

@@ -20,9 +20,12 @@ extern MyMesh the_mesh;
 #include <Update.h>
 #endif
 
-static const size_t PAGE_BYTES = 57344;
+static const size_t PAGE_BYTES = 73728;
 static const size_t LIVE_HTML_BYTES = 20480;
 static const size_t LIVE_JSON_BYTES = 24576;
+static const size_t STATS_JSON_BYTES = 8192;
+// Contiguous heap needed beyond the page itself for TCP/WS while serving HTML.
+static const size_t PAGE_HEAP_RESERVE = 24576;
 
 static AsyncWebServer* server = nullptr;
 static AsyncWebSocket* socket = nullptr;
@@ -93,15 +96,20 @@ static char tel_hold_bpass[40];
 static char radio_note[120];
 static char node_note[120];
 static char power_note[120];
+static char region_note[120];
 static std::atomic<uint8_t> power_job{0xFF};
 static std::atomic<uint8_t> power_hold{0xFF};
 static std::atomic<RepeaterRadioForm*> radio_job{nullptr};
 static std::atomic<RepeaterNodeForm*> node_job{nullptr};
+static std::atomic<RepeaterRegionForm*> region_job{nullptr};
 static std::atomic<uint8_t> radio_hold{0};
 static std::atomic<uint8_t> radio_reboot{0};
 static std::atomic<uint8_t> node_hold{0};
+static std::atomic<uint8_t> region_hold{0};
+static std::atomic<uint8_t> region_reload{0};
 static RepeaterRadioForm radio_hold_form;
 static RepeaterNodeForm node_hold_form;
+static RepeaterRegionForm region_hold_form;
 
 static void setMqttNote(const char* text) {
   strncpy(mqtt_note, text ? text : "", sizeof(mqtt_note) - 1);
@@ -128,6 +136,11 @@ static void setNodeNote(const char* text) {
   node_note[sizeof(node_note) - 1] = 0;
 }
 
+static void setRegionNote(const char* text) {
+  strncpy(region_note, text ? text : "", sizeof(region_note) - 1);
+  region_note[sizeof(region_note) - 1] = 0;
+}
+
 static void syncSession() {
   uint32_t slot = page_slot.load(std::memory_order_acquire);
   if (strcmp(session_pass, admin_pass[slot]) == 0 && session_key) return;
@@ -147,9 +160,18 @@ static void publishSnapshot() {
   syncSession();
 }
 
+static bool socketLive() {
+  if (!socket) return false;
+  for (const AsyncWebSocketClient& client : socket->getClients()) {
+    if (client.status() == WS_CONNECTED) return true;
+  }
+  return false;
+}
+
 static void refreshSnapshot() {
   uint32_t now = millis();
-  if (last_snapshot_ms && (uint32_t)(now - last_snapshot_ms) < 500) return;
+  uint32_t gap = 5000;
+  if (last_snapshot_ms && (uint32_t)(now - last_snapshot_ms) < gap) return;
   last_snapshot_ms = now;
   publishSnapshot();
 }
@@ -171,6 +193,10 @@ static bool enqueueCommand(const char* command) {
 static bool commandPending() {
   return submit_seq.load(std::memory_order_acquire) != result_seq.load(std::memory_order_acquire);
 }
+
+bool RepeaterWeb::commandQueued() const { return commandPending(); }
+
+bool RepeaterWeb::viewerConnected() const { return socketLive(); }
 
 static const char* skipWs(const char* p, const char* end) {
   while (p < end && (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')) p++;
@@ -425,6 +451,21 @@ static void serviceRadioJob() {
   radio_hold.store(0, std::memory_order_release);
 }
 
+static void serviceRegionJob() {
+  RepeaterRegionForm* job = region_job.exchange(nullptr);
+  if (!job) return;
+  char reply[120];
+  reply[0] = 0;
+  bool ok = the_mesh.applyRegionPanel(*job, reply, sizeof(reply));
+  setRegionNote(reply[0] ? reply : "Настройки регионов не применены");
+  if (ok) region_reload.store(1, std::memory_order_release);
+  free(job);
+  publishSnapshot();
+  last_snapshot_ms = millis();
+  last_push_ms = 0;
+  region_hold.store(0, std::memory_order_release);
+}
+
 static void serviceNodeJob() {
   RepeaterNodeForm* job = node_job.exchange(nullptr);
   if (!job) return;
@@ -479,6 +520,11 @@ static void serviceCommand() {
     strncpy(reply, "Перезагрузка…", sizeof(reply) - 1);
   } else {
     the_mesh.handleCommand(0, command, reply);
+    if (memcmp(original, "clear stats", 11) == 0) {
+      publishSnapshot();
+      last_snapshot_ms = millis();
+      last_push_ms = 0;
+    }
   }
   reply[CMD_CAP - 1] = 0;
 
@@ -742,6 +788,20 @@ static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left
   row(cursor, left, "События ошибок", errors);
   appendRaw(cursor, left, "</table></section><section><h2>Сеть</h2><table>");
   row(cursor, left, "Wi‑Fi", info.ssid);
+  char signal[40];
+  if (!info.wifi_up) {
+    snprintf(signal, sizeof(signal), "нет связи");
+  } else if (info.wifi_rssi < 0) {
+    const char* word = "плохой";
+    if (info.wifi_rssi >= -50) word = "отличный";
+    else if (info.wifi_rssi >= -60) word = "хороший";
+    else if (info.wifi_rssi >= -70) word = "средний";
+    else if (info.wifi_rssi >= -80) word = "слабый";
+    snprintf(signal, sizeof(signal), "%d дБм, %s", (int)info.wifi_rssi, word);
+  } else {
+    snprintf(signal, sizeof(signal), "есть связь");
+  }
+  row(cursor, left, "Сигнал", signal);
   const char* power = "без энергосбережения";
   if (info.wifi_ps == WIFI_POWER_LIGHT && info.wifi_ps_active == WIFI_POWER_MODEM) power = "сон модема, процессор не спит";
   else if (info.wifi_ps == WIFI_POWER_MODEM) power = "сон модема";
@@ -881,6 +941,8 @@ static void renderRadioForm(const RepeaterPageInfo& info, char*& cursor, size_t&
             "<p class=\"sub\">«Дальний» — 869.495 МГц, полоса 62.5, SF11, CR 4/5. "
             "«HiNoise» — та же частота, полоса 31.25, SF10, CR 4/7, когда шум на весь эфир. "
             "«Обычный» возвращает параметры, которые были до специального профиля. "
+            "Готовый профиль подставляется, только если частоту, полосу, SF и CR не менять. "
+            "Иначе сохраняются введённые значения. "
             "Соседи должны стоять на тех же параметрах. На дальнем и HiNoise компаньон включает ретрансляцию. "
             "Если меняются частота, полоса, SF или CR, репитер перезагружается сам.</p>"
             "<form class=\"setup grid\" method=\"post\" action=\"/radio\" autocomplete=\"off\">");
@@ -1038,14 +1100,266 @@ static void renderPowerForm(const RepeaterPageInfo& info, char*& cursor, size_t&
   appendRaw(cursor, left, "</section>");
 }
 
+static void appendRegionStatPair(char*& cursor, size_t& left, const char* id_prefix, uint32_t rx, uint32_t fwd) {
+  appendRaw(cursor, left, "<div class=\"region-nums\"><span class=\"muted\">принято </span><span id=\"");
+  appendRaw(cursor, left, id_prefix);
+  appendRaw(cursor, left, "-rx\">");
+  appendFmt(cursor, left, "%u", rx);
+  appendRaw(cursor, left, "</span><span class=\"muted\"> · переслано </span><span id=\"");
+  appendRaw(cursor, left, id_prefix);
+  appendRaw(cursor, left, "-fwd\">");
+  appendFmt(cursor, left, "%u", fwd);
+  appendRaw(cursor, left, "</span></div>");
+}
+
+static void renderRegionDrops(const RepeaterPageInfo& info, char*& cursor, size_t& left) {
+  appendRaw(cursor, left, "<table class=\"grid\"><tr><th>Отброшено</th><th>Число</th></tr>");
+  appendRaw(cursor, left, "<tr><td>Неизвестная метка</td><td id=\"rs-d0\">");
+  appendFmt(cursor, left, "%u", info.region_drop_unknown);
+  appendRaw(cursor, left, "</td></tr><tr><td>Запрет пересылки у региона</td><td id=\"rs-d1\">");
+  appendFmt(cursor, left, "%u", info.region_drop_denied);
+  appendRaw(cursor, left, "</td></tr><tr><td>Запрет «без области»</td><td id=\"rs-d2\">");
+  appendFmt(cursor, left, "%u", info.region_drop_unscoped);
+  appendRaw(cursor, left, "</td></tr><tr><td>Лимит прыжков</td><td id=\"rs-d3\">");
+  appendFmt(cursor, left, "%u", info.region_drop_hop);
+  appendRaw(cursor, left, "</td></tr><tr><td>Петля</td><td id=\"rs-d4\">");
+  appendFmt(cursor, left, "%u", info.region_drop_loop);
+  appendRaw(cursor, left, "</td></tr><tr><td>Ретрансляция выключена</td><td id=\"rs-d5\">");
+  appendFmt(cursor, left, "%u", info.region_drop_nofwd);
+  appendRaw(cursor, left,
+            "</td></tr></table><div class=\"actions\" style=\"margin-top:10px\">"
+            "<form method=\"post\" action=\"/act\" onsubmit=\"return confirm('Сбросить статистику?')\">"
+            "<input type=\"hidden\" name=\"act\" value=\"stats\">"
+            "<input type=\"hidden\" name=\"at\" value=\"regions\">"
+            "<button type=\"submit\" class=\"warn\">Сбросить статистику</button></form></div>");
+}
+
+static void appendRegionStatsJson(const RepeaterPageInfo& info, char*& cursor, size_t& left) {
+  appendRaw(cursor, left, "{\"u\":[");
+  appendFmt(cursor, left, "%u,%u", info.region_unscoped_rx, info.region_unscoped_fwd);
+  appendRaw(cursor, left, "],\"n\":[");
+  for (uint8_t i = 0; i < info.region_count; i++) {
+    if (i) appendRaw(cursor, left, ",");
+    appendRaw(cursor, left, "[");
+    appendFmt(cursor, left, "%u,%u", info.regions[i].rx, info.regions[i].fwd);
+    appendRaw(cursor, left, "]");
+  }
+  appendRaw(cursor, left, "],\"d\":[");
+  appendFmt(cursor, left, "%u,%u,%u,%u,%u,%u", info.region_drop_unknown, info.region_drop_denied,
+            info.region_drop_unscoped, info.region_drop_hop, info.region_drop_loop, info.region_drop_nofwd);
+  appendRaw(cursor, left, "]}");
+}
+
+static void renderRegionsForm(const RepeaterPageInfo& info, char*& cursor, size_t& left) {
+  const RepeaterRegionForm* held =
+      region_hold.load(std::memory_order_acquire) ? &region_hold_form : nullptr;
+  uint8_t wildcard_flood = info.wildcard_flood;
+  const char* region_default = info.region_default;
+  const char* region_home = info.region_home;
+  if (held) {
+    if (held->op == REGION_OP_FLOOD && (!held->name[0] || strcmp(held->name, "*") == 0)) {
+      wildcard_flood = held->flood_ok ? 1 : 0;
+    }
+    if (held->op == REGION_OP_DEFAULT) region_default = held->name;
+    if (held->op == REGION_OP_HOME) region_home = held->name;
+  }
+
+  appendRaw(cursor, left,
+            "<section id=\"regions\"><h2>Регионы</h2>"
+            "<p class=\"sub\">Регион — метка на flood-сообщении в эфире. Репитер пересылает только знакомые метки "
+            "с включённой пересылкой. Счётчики в памяти, с перезагрузки или сброса, на диск не пишутся. "
+            "Даже при включённой пересылке «без области» дальность режет поле «Flood без области» на вкладке «Радио».</p>"
+            "<h3>Области</h3>"
+            "<div class=\"region-list\">"
+            "<div class=\"region-row\">"
+            "<div class=\"region-main\"><strong>Без области</strong>"
+            "<span class=\"muted\">сообщения без метки</span></div>");
+  appendRegionStatPair(cursor, left, "rs-u", info.region_unscoped_rx, info.region_unscoped_fwd);
+  appendRaw(cursor, left,
+            "<div class=\"region-actions\">"
+            "<form method=\"post\" action=\"/region\" autocomplete=\"off\">"
+            "<input type=\"hidden\" name=\"op\" value=\"flood\">"
+            "<input type=\"hidden\" name=\"name\" value=\"*\">"
+            "<label class=\"switch\"><input type=\"checkbox\" name=\"flood\" value=\"on\"");
+  if (wildcard_flood) appendRaw(cursor, left, " checked");
+  appendRaw(cursor, left,
+            " onchange=\"this.form.submit()\"><i></i><span>Пересылать</span></label></form></div></div>");
+
+  if (!info.region_count) {
+    appendRaw(cursor, left,
+              "<p class=\"sub\">Пока своих регионов нет. Добавьте область ниже, если нужно принимать или отправлять "
+              "сообщения с меткой.</p>");
+  }
+  uint8_t hide_deeper_than = 255;
+  for (uint8_t i = 0; i < info.region_count; i++) {
+    const RepeaterRegionEntry& r = info.regions[i];
+    uint8_t depth = r.depth > 6 ? 6 : r.depth;
+    // While a remove is queued, hide that region and its children immediately.
+    if (held && held->op == REGION_OP_REMOVE && held->name[0]) {
+      if (strcmp(held->name, r.name) == 0) {
+        hide_deeper_than = r.depth;
+        continue;
+      }
+      if (hide_deeper_than != 255 && r.depth > hide_deeper_than) continue;
+      if (r.depth <= hide_deeper_than) hide_deeper_than = 255;
+    }
+    appendRaw(cursor, left, "<div class=\"region-row d");
+    appendFmt(cursor, left, "%u", (unsigned)depth);
+    appendRaw(cursor, left, "\">");
+    appendRaw(cursor, left, "<div class=\"region-main\"><strong>");
+    appendEscaped(cursor, left, r.name);
+    appendRaw(cursor, left, "</strong>");
+    bool is_default = r.is_default != 0;
+    bool is_home = r.is_home != 0;
+    if (held && held->op == REGION_OP_DEFAULT) {
+      is_default = held->name[0] && strcmp(held->name, r.name) == 0;
+    }
+    if (held && held->op == REGION_OP_HOME) {
+      is_home = held->name[0] && strcmp(held->name, r.name) == 0;
+    }
+    if (is_default) appendRaw(cursor, left, "<span class=\"tag\">по умолчанию</span>");
+    if (is_home) appendRaw(cursor, left, "<span class=\"tag\">домашний</span>");
+    appendRaw(cursor, left, "</div>");
+    char id_prefix[12];
+    snprintf(id_prefix, sizeof(id_prefix), "rs-%u", (unsigned)i);
+    appendRegionStatPair(cursor, left, id_prefix, r.rx, r.fwd);
+    appendRaw(cursor, left, "<div class=\"region-actions\">");
+    appendRaw(cursor, left,
+              "<form method=\"post\" action=\"/region\" autocomplete=\"off\">"
+              "<input type=\"hidden\" name=\"op\" value=\"flood\"><input type=\"hidden\" name=\"name\" value=\"");
+    appendEscaped(cursor, left, r.name);
+    appendRaw(cursor, left, "\"><label class=\"switch\"><input type=\"checkbox\" name=\"flood\" value=\"on\"");
+    bool flood_on = r.flood_ok != 0;
+    if (held && held->op == REGION_OP_FLOOD && held->name[0] && strcmp(held->name, r.name) == 0) {
+      flood_on = held->flood_ok != 0;
+    }
+    if (flood_on) appendRaw(cursor, left, " checked");
+    appendRaw(cursor, left,
+              " onchange=\"this.form.submit()\"><i></i><span>Пересылать</span></label></form>"
+              "<form method=\"post\" action=\"/region\" "
+              "onsubmit=\"return confirm('Удалить регион и все вложенные?')\">"
+              "<input type=\"hidden\" name=\"op\" value=\"remove\"><input type=\"hidden\" name=\"name\" value=\"");
+    appendEscaped(cursor, left, r.name);
+    appendRaw(cursor, left, "\"><button type=\"submit\" class=\"warn\">Удалить</button></form></div></div>");
+  }
+  appendRaw(cursor, left, "</div><div id=\"region-stats\">");
+  renderRegionDrops(info, cursor, left);
+  appendRaw(cursor, left, "</div>");
+
+  appendRaw(cursor, left,
+            "<h3>Свои сообщения</h3>"
+            "<p class=\"sub\">Эту метку репитер ставит на свои объявления и ответы, когда область запроса неизвестна. "
+            "Если оставить «Без метки», соседние репитеры с выключенной пересылкой сообщений без области ваши сообщения дальше не пропустят.</p>"
+            "<form class=\"setup\" method=\"post\" action=\"/region\" autocomplete=\"off\">"
+            "<input type=\"hidden\" name=\"op\" value=\"default\">");
+  selectOpen(cursor, left, "Область по умолчанию", "name");
+  selectOption(cursor, left, "", "Без метки", !region_default[0]);
+  for (uint8_t i = 0; i < info.region_count; i++) {
+    selectOption(cursor, left, info.regions[i].name, info.regions[i].name,
+                 region_default[0] && strcmp(region_default, info.regions[i].name) == 0);
+  }
+  selectClose(cursor, left);
+  appendRaw(cursor, left, "<button type=\"submit\">Сохранить</button></form>");
+
+  appendRaw(cursor, left,
+            "<h3>Добавить регион</h3>"
+            "<p class=\"sub\">Имя — короткая метка для эфира, например Moscow или #Europe. "
+            "Буквы, цифры, дефис и решётка. Имена с решёткой и без неё считаются одним и тем же. "
+            "Не больше 30 символов и не больше 32 регионов. После добавления пересылка для нового региона уже включена — "
+            "при необходимости выключите её в списке.</p>"
+            "<form class=\"setup grid\" method=\"post\" action=\"/region\" autocomplete=\"off\">"
+            "<input type=\"hidden\" name=\"op\" value=\"add\">");
+  textField(cursor, left, "Имя", "name", "", "maxlength=\"30\"", false);
+  selectOpen(cursor, left, "Родитель", "parent");
+  selectOption(cursor, left, "*", "Без области", true);
+  for (uint8_t i = 0; i < info.region_count; i++) {
+    selectOption(cursor, left, info.regions[i].name, info.regions[i].name, false);
+  }
+  selectClose(cursor, left);
+  appendRaw(cursor, left, "<button class=\"span2\" type=\"submit\">Добавить</button></form>");
+
+  appendRaw(cursor, left,
+            "<h3>Домашний регион</h3>"
+            "<p class=\"sub\">Просто пометка, к какой области относится этот репитер. "
+            "На пересылку чужих сообщений не влияет.</p>"
+            "<form class=\"setup\" method=\"post\" action=\"/region\" autocomplete=\"off\">"
+            "<input type=\"hidden\" name=\"op\" value=\"home\">");
+  selectOpen(cursor, left, "Домашний регион", "name");
+  selectOption(cursor, left, "", "Не задан", !region_home[0]);
+  for (uint8_t i = 0; i < info.region_count; i++) {
+    selectOption(cursor, left, info.regions[i].name, info.regions[i].name,
+                 region_home[0] && strcmp(region_home, info.regions[i].name) == 0);
+  }
+  selectClose(cursor, left);
+  appendRaw(cursor, left, "<button type=\"submit\">Сохранить</button></form>");
+  noteLine(cursor, left, "region-note", region_note);
+  appendRaw(cursor, left, "</section>");
+}
+
+static const char* paneForAnchor(const char* id) {
+  if (!id || !id[0]) return "status";
+  if (!strcmp(id, "stats") || !strcmp(id, "stat")) return "stats";
+  if (!strcmp(id, "radio")) return "radio";
+  if (!strcmp(id, "node")) return "node";
+  if (!strcmp(id, "regions") || !strcmp(id, "region")) return "regions";
+  if (!strcmp(id, "tel") || !strcmp(id, "ntp") || !strcmp(id, "net")) return "net";
+  if (!strcmp(id, "power") || !strcmp(id, "fw") || !strcmp(id, "sys") || !strcmp(id, "console")) return "sys";
+  return "status";
+}
+
+static void renderStatsPane(char*& cursor, size_t& left) {
+  appendRaw(cursor, left,
+            "<section><h2>Статистика</h2>"
+            "<p class=\"sub\">Окна по истории с репитера (шаг 5 мин, до 24 ч). После перезагрузки графики пустые, пока не накопятся сэмплы.</p>"
+            "<div class=\"filters\" id=\"stats-filters\">"
+            "<button type=\"button\" data-h=\"1\">1ч</button>"
+            "<button type=\"button\" data-h=\"3\">3ч</button>"
+            "<button type=\"button\" data-h=\"6\">6ч</button>"
+            "<button type=\"button\" data-h=\"12\">12ч</button>"
+            "<button type=\"button\" data-h=\"24\" class=\"on\">24ч</button>"
+            "</div>"
+            "<p id=\"stats-note\" class=\"note\" hidden></p>"
+            "<div class=\"chart-box\"><h3>Пакеты RX / TX</h3><canvas id=\"c-pkt\" width=\"640\" height=\"180\"></canvas>"
+            "<div class=\"legend\"><span><i style=\"background:#60a5fa\"></i>RX</span><span><i style=\"background:#86efac\"></i>TX</span></div></div>"
+            "<div class=\"chart-box\"><h3>Flood / Direct (RX)</h3><canvas id=\"c-fd\" width=\"640\" height=\"180\"></canvas>"
+            "<div class=\"legend\"><span><i style=\"background:#fbbf24\"></i>Flood</span><span><i style=\"background:#c084fc\"></i>Direct</span></div></div>"
+            "<div class=\"chart-box\"><h3>Эфир, с за интервал</h3><canvas id=\"c-air\" width=\"640\" height=\"180\"></canvas>"
+            "<div class=\"legend\"><span><i style=\"background:#fb7185\"></i>TX</span><span><i style=\"background:#38bdf8\"></i>RX</span></div></div>"
+            "<div class=\"chart-box\"><h3>Шум / RSSI / SNR</h3><canvas id=\"c-rf\" width=\"640\" height=\"180\"></canvas>"
+            "<div class=\"legend\"><span><i style=\"background:#9aa4ae\"></i>Шум</span><span><i style=\"background:#60a5fa\"></i>RSSI</span><span><i style=\"background:#86efac\"></i>SNR</span></div></div>"
+            "<div class=\"chart-box\"><h3>Очередь</h3><canvas id=\"c-q\" width=\"640\" height=\"180\"></canvas>"
+            "<div class=\"legend\"><span><i style=\"background:#fbbf24\"></i>Длина</span></div></div>"
+            "<div class=\"chart-box\"><h3>Батарея, мВ</h3><canvas id=\"c-batt\" width=\"640\" height=\"180\"></canvas>"
+            "<div class=\"legend\"><span><i style=\"background:#86efac\"></i>Напряжение</span></div></div>"
+            "<div class=\"chart-box\"><h3>Температура, °C</h3><canvas id=\"c-temp\" width=\"640\" height=\"180\"></canvas>"
+            "<div class=\"legend\"><span><i style=\"background:#fb7185\"></i>MCU</span></div></div>"
+            "</section>");
+}
+
+static void tabButton(char*& cursor, size_t& left, const char* id, const char* label, const char* active) {
+  appendRaw(cursor, left, "<button type=\"button\" data-tab=\"");
+  appendRaw(cursor, left, id);
+  appendRaw(cursor, left, strcmp(id, active) == 0 ? "\" class=\"on\">" : "\">");
+  appendEscaped(cursor, left, label);
+  appendRaw(cursor, left, "</button>");
+}
+
+static void openPane(char*& cursor, size_t& left, const char* id, const char* active) {
+  appendRaw(cursor, left, "<div id=\"pane-");
+  appendRaw(cursor, left, id);
+  appendRaw(cursor, left, strcmp(id, active) == 0 ? "\" class=\"pane on\">" : "\" class=\"pane\">");
+}
+
 static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
-                       const char* command, const char* reply, char* dest, size_t cap) {
+                       const char* command, const char* reply, char* dest, size_t cap,
+                       const char* active) {
   char* cursor = dest;
   size_t left = cap;
+  if (!active || !active[0]) active = "status";
   if (cap) dest[0] = 0;
   appendRaw(cursor, left,
             "<!doctype html><html lang=\"ru\"><head><meta charset=\"utf-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1, viewport-fit=cover\">"
             "<title>");
   appendEscaped(cursor, left, info.name[0] ? info.name : "репитер");
   appendRaw(cursor, left,
@@ -1053,10 +1367,18 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             ":root{color-scheme:dark;--bg:#0d0f12;--panel:#14171b;--panel-2:#191d22;--panel-3:#20252b;--line:#2b3138;--line-strong:#3b434d;--text:#edf0f3;--muted:#9aa4ae;--accent:#60a5fa;--accent-2:#2563eb;--warning:#fbbf24;--danger:#fb7185}"
             "*{box-sizing:border-box}"
             "body{margin:0;color:var(--text);background-color:#0b0d10;background-image:url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='360' height='320' fill='none'%3E%3Cg stroke='%2360a5fa' stroke-opacity='0.14' stroke-width='1'%3E%3Cpath d='M42 58 L168 96 L286 46 M168 96 L92 196 L214 228 M168 96 L214 228 M286 46 L292 168 L214 228 M92 196 L42 58'/%3E%3C/g%3E%3Cg fill='%23edf0f3' fill-opacity='0.22'%3E%3Ccircle cx='42' cy='58' r='2.2'/%3E%3Ccircle cx='168' cy='96' r='2.6'/%3E%3Ccircle cx='286' cy='46' r='2.2'/%3E%3Ccircle cx='92' cy='196' r='2.2'/%3E%3Ccircle cx='214' cy='228' r='2.4'/%3E%3Ccircle cx='292' cy='168' r='2.2'/%3E%3C/g%3E%3C/svg%3E\");background-size:360px 320px;font:14px/1.45 Inter,ui-sans-serif,system-ui,-apple-system,'Segoe UI',sans-serif}"
-            "main{max-width:46rem;margin:0 auto;padding:16px 18px 20px}"
-            "h1{margin:0 0 6px;font-size:20px;font-weight:650;letter-spacing:-.01em}"
+            "header.bar{position:-webkit-sticky;position:sticky;top:0;z-index:5;padding-top:env(safe-area-inset-top);background:var(--panel);border-bottom:1px solid var(--line);box-shadow:0 8px 24px rgba(0,0,0,.28)}"
+            ".brand{max-width:46rem;margin:0 auto;padding:10px 18px 0;display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 16px}"
+            ".brand h1{margin:0;font-size:18px;font-weight:650;letter-spacing:-.01em}"
+            ".brand .sub{margin:0}"
+            "nav.tabs{max-width:46rem;margin:0 auto;display:flex;gap:2px;padding:6px 8px 0;overflow-x:auto;scrollbar-width:none}"
+            "nav.tabs::-webkit-scrollbar{height:0}"
+            "nav.tabs button{flex:1 0 auto;white-space:nowrap;margin:0;border:0;border-bottom:2px solid transparent;border-radius:0;background:transparent;color:var(--muted);min-height:36px;padding:8px 10px 7px;font-size:13px}"
+            "nav.tabs button.on{color:var(--text);border-bottom-color:var(--accent);background:transparent}"
+            "main{max-width:46rem;margin:0 auto;padding:14px 18px 24px}"
             ".sub{color:var(--muted);margin:0 0 14px;font-size:12px}"
-            "section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin:0 0 14px}"
+            ".pane{display:none}.pane.on{display:block}"
+            "section{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px;margin:0 0 14px;scroll-margin-top:96px}"
             "h2{margin:0 0 11px;font-size:12px;font-weight:650;letter-spacing:.06em;text-transform:uppercase}"
             "table{width:100%;border-collapse:collapse;font-size:13px}"
             "th,td{text-align:left;padding:8px 4px;border-bottom:1px solid var(--line);vertical-align:top}"
@@ -1092,20 +1414,63 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "form.setup.grid .span2{grid-column:1/-1}"
             "form.setup label.field select{display:block;width:100%;margin-top:4px}"
             "form.setup.grid label.field input,form.setup.grid label.field select,form.setup.grid label.field textarea{display:block;width:100%;margin-top:4px}"
+            "h3{margin:16px 0 8px;font-size:13px;font-weight:650}"
+            ".region-list{display:flex;flex-direction:column;gap:6px;margin:0 0 12px}"
+            ".region-row{display:flex;flex-wrap:wrap;gap:8px 12px;align-items:center;justify-content:space-between;"
+            "padding:10px 10px 10px 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel-2);"
+            "border-left:3px solid var(--line-strong)}"
+            ".region-row.d1,.region-row.d2,.region-row.d3,.region-row.d4,.region-row.d5,.region-row.d6{"
+            "border-left-color:var(--accent);background:var(--panel)}"
+            ".region-row.d1{margin-left:1.1rem}.region-row.d2{margin-left:2.2rem}.region-row.d3{margin-left:3.3rem}"
+            ".region-row.d4{margin-left:4.4rem}.region-row.d5{margin-left:5.5rem}.region-row.d6{margin-left:6.6rem}"
+            ".region-main{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;flex:1 1 12rem}"
+            ".region-main strong{font-size:13px}"
+            ".region-nums{font-size:12px;color:var(--text);white-space:nowrap}"
+            ".region-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}"
+            ".region-actions form{margin:0;display:flex;align-items:center;gap:8px}"
+            ".tag{display:inline-block;padding:1px 6px;border:1px solid var(--line-strong);border-radius:999px;"
+            "color:var(--muted);font-size:11px}"
+            ".muted{color:var(--muted);font-size:12px}"
+            ".filters{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 12px}"
+            ".filters button{border-color:var(--line-strong);background:var(--panel-3)}"
+            ".filters button.on{border-color:var(--accent-2);background:var(--accent-2)}"
+            ".chart-box{margin:0 0 14px}.chart-box h3{margin:0 0 6px;font-size:13px;font-weight:650}"
+            ".chart-box canvas{width:100%;max-width:100%;height:180px;display:block;background:var(--panel-2);border:1px solid var(--line);border-radius:5px}"
+            ".legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin:4px 0 0}"
+            ".legend i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}"
             "@media(max-width:640px){form.setup.grid{grid-template-columns:1fr}}"
-            "</style></head><body><main><h1 id=\"title\">");
+            "</style></head><body><header class=\"bar\"><div class=\"brand\"><h1 id=\"title\">");
   appendEscaped(cursor, left, info.name[0] ? info.name : "репитер");
   appendRaw(cursor, left, "</h1><p class=\"sub\" id=\"ver\">");
   appendEscaped(cursor, left, info.firmware);
   appendRaw(cursor, left, " · ");
   appendEscaped(cursor, left, info.build);
-  appendRaw(cursor, left, "</p>");
-  renderRadioForm(info, cursor, left);
-  renderNodeForm(info, cursor, left);
-  renderPowerForm(info, cursor, left);
+  appendRaw(cursor, left, "</p></div><nav class=\"tabs\" id=\"nav\">");
+  tabButton(cursor, left, "status", "Статус", active);
+  tabButton(cursor, left, "stats", "Статистика", active);
+  tabButton(cursor, left, "radio", "Радио", active);
+  tabButton(cursor, left, "node", "Узел", active);
+  tabButton(cursor, left, "regions", "Регионы", active);
+  tabButton(cursor, left, "net", "Сеть", active);
+  tabButton(cursor, left, "sys", "Система", active);
+  appendRaw(cursor, left, "</nav></header><main>");
+  openPane(cursor, left, "status", active);
   appendRaw(cursor, left, "<div id=\"live\">");
   renderLive(info, cursor, left);
+  appendRaw(cursor, left, "</div></div>");
+  openPane(cursor, left, "stats", active);
+  renderStatsPane(cursor, left);
   appendRaw(cursor, left, "</div>");
+  openPane(cursor, left, "radio", active);
+  renderRadioForm(info, cursor, left);
+  appendRaw(cursor, left, "</div>");
+  openPane(cursor, left, "node", active);
+  renderNodeForm(info, cursor, left);
+  appendRaw(cursor, left, "</div>");
+  openPane(cursor, left, "regions", active);
+  renderRegionsForm(info, cursor, left);
+  appendRaw(cursor, left, "</div>");
+  openPane(cursor, left, "net", active);
   appendRaw(cursor, left,
             "<section><h2>Подключение MQTT</h2>"
             "<p class=\"sub\">Вставьте строку настройки из панели целиком или заполните поля.</p>"
@@ -1130,7 +1495,10 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "<input name=\"pass\" maxlength=\"39\" type=\"password\" autocomplete=\"new-password\" placeholder=\"пусто — оставить текущий\">"
             "<label class=\"field\">Сертификат</label>"
             "<textarea name=\"ca\" rows=\"6\" placeholder=\"PEM. Пусто — оставить текущий\"></textarea>"
-            "<button type=\"submit\">Сохранить</button></form></section>"
+            "<button type=\"submit\">Сохранить</button></form>");
+  noteLine(cursor, left, "mqtt-note", mqtt_note);
+  appendRaw(cursor, left,
+            "</section>"
             "<section id=\"tel\"><h2>MeshCoreTel</h2>"
             "<p class=\"sub\">Вместе с MQTT, обычный TCP без TLS. Статус уходит раз в 5 минут, принятые пакеты — сразу.</p>"
             "<form class=\"setup\" method=\"post\" action=\"/tel\" autocomplete=\"off\">"
@@ -1159,11 +1527,7 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
   if (tel_tx_on) appendRaw(cursor, left, " checked");
   appendRaw(cursor, left, "><i></i><span>Отправлять свои передачи</span></label>"
             "<button type=\"submit\">Сохранить</button></form>");
-  if (tel_note[0]) {
-    appendRaw(cursor, left, "<p class=\"note\">");
-    appendEscaped(cursor, left, tel_note);
-    appendRaw(cursor, left, "</p>");
-  }
+  noteLine(cursor, left, "tel-note", tel_note);
   appendRaw(cursor, left, "</section><section id=\"ntp\"><h2>NTP</h2>"
             "<p class=\"sub\">Нужен Wi-Fi с доступом к серверу по UDP/123. Пока ответ NTP свежий, опрос времени по эфиру не перезаписывает часы.</p>"
             "<form class=\"setup\" method=\"post\" action=\"/ntp\" autocomplete=\"off\">"
@@ -1177,22 +1541,30 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "<form method=\"post\" action=\"/ntp\"><input type=\"hidden\" name=\"sync\" value=\"1\">"
             "<button type=\"submit\">Синхронизировать</button></form>");
 #ifndef DISABLE_WIFI_OTA
+  appendRaw(cursor, left, "</section></div>");
+  openPane(cursor, left, "sys", active);
+  renderPowerForm(info, cursor, left);
   appendRaw(cursor, left,
-            "</section><section id=\"fw\"><h2>Прошивка</h2>"
+            "<section id=\"fw\"><h2>Прошивка</h2>"
             "<p class=\"sub\">Файл .bin этой платы, без merged в имени. Пока идёт запись, эфир почти стоит. После успеха репитер перезагрузится, и эта страница обновится сама.</p>"
             "<form id=\"fw-form\" class=\"setup\" method=\"post\" action=\"/fw\" enctype=\"multipart/form-data\">"
             "<input type=\"file\" name=\"firmware\" accept=\".bin,application/octet-stream\">"
             "<progress id=\"fw-bar\" max=\"100\" value=\"0\" hidden></progress>"
             "<p id=\"fw-note\" class=\"note\" hidden></p>"
             "<button type=\"submit\" class=\"warn\">Загрузить</button></form>");
-#endif
   appendRaw(cursor, left, "</section><section><h2>Действия</h2><div class=\"actions\">");
+#else
+  appendRaw(cursor, left, "</section></div>");
+  openPane(cursor, left, "sys", active);
+  renderPowerForm(info, cursor, left);
+  appendRaw(cursor, left, "<section><h2>Действия</h2><div class=\"actions\">");
+#endif
   actionButton(cursor, left, "advert", "Отправить объявление", nullptr);
   actionButton(cursor, left, "discover", "Запросить соседей", nullptr);
   actionButton(cursor, left, "clock", "Подтянуть время", nullptr);
   actionButton(cursor, left, "stats", "Сбросить статистику", "Сбросить статистику?");
   actionButton(cursor, left, "reboot", "Перезагрузить", "Перезагрузить репитер?");
-  appendRaw(cursor, left, "</div></section><section><h2>Консоль</h2>");
+  appendRaw(cursor, left, "</div></section><section id=\"console\"><h2>Консоль</h2>");
   appendRaw(cursor, left,
             "<form method=\"post\" action=\"/cmd\" autocomplete=\"off\">"
             "<input name=\"cmd\" maxlength=\"159\" placeholder=\"команда\">"
@@ -1200,7 +1572,7 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
   renderConsoleOut(cursor, left, busy, pending, command, reply);
   appendRaw(cursor, left,
             "</div></section><p class=\"sub\">Вход: пользователь admin и пароль администратора. "
-            "Те же команды, что и в последовательной консоли. Данные приходят по WebSocket, страница не перезагружается.</p>"
+            "Те же команды, что и в последовательной консоли. Данные приходят по WebSocket, страница не перезагружается.</p></div>"
             "<script>(function(){var live=document.getElementById('live'),out=document.getElementById('out'),title=document.getElementById('title');"
             "function setNote(id,text){var el=document.getElementById(id);if(!el)return;el.hidden=!text;el.textContent=text||'';}"
             "var booting=false;"
@@ -1215,22 +1587,97 @@ static void renderPage(const RepeaterPageInfo& info, bool busy, bool pending,
             "req.onload=function(){if(settled)return;if(req.status!==200){if(!req.status)fail();else{settled=true;setTimeout(probe,700);}return;}settled=true;var up=parseInt(req.responseText,10);if(downSince&&back(up)){finish();return;}if(!downSince)before=up;setTimeout(probe,700);};"
             "req.onerror=req.ontimeout=fail;req.send();}setTimeout(probe,800);}"
             "function apply(m){if(m.t&&title){title.textContent=m.t;document.title=m.t;}if(m.live&&live)live.innerHTML=m.live;if(out)out.innerHTML=m.out||'';"
-            "if(m.rb)watchBoot();if(m.rn!==undefined&&!booting)setNote('radio-note',m.rn);if(m.nn!==undefined)setNote('node-note',m.nn);if(m.pn!==undefined)setNote('power-note',m.pn);}"
+            "if(m.rb)watchBoot();if(m.rn!==undefined&&!booting)setNote('radio-note',m.rn);if(m.nn!==undefined)setNote('node-note',m.nn);if(m.pn!==undefined)setNote('power-note',m.pn);if(m.mn!==undefined)setNote('mqtt-note',m.mn);if(m.tn!==undefined)setNote('tel-note',m.tn);"
+            "if(m.gn!==undefined)setNote('region-note',m.gn);"
+            "if(m.rs&&typeof m.rs==='object'){var set=function(id,v){var el=document.getElementById(id);if(el)el.textContent=v;};"
+            "if(m.rs.u){set('rs-u-rx',m.rs.u[0]|0);set('rs-u-fwd',m.rs.u[1]|0);}"
+            "if(m.rs.n){for(var i=0;i<m.rs.n.length;i++){set('rs-'+i+'-rx',m.rs.n[i][0]|0);set('rs-'+i+'-fwd',m.rs.n[i][1]|0);}}"
+            "if(m.rs.d){for(var j=0;j<m.rs.d.length;j++)set('rs-d'+j,m.rs.d[j]|0);}}"
+            "if(m.gr){location.replace('/?at=regions&r='+Date.now());return;}}"
             "var b64=document.getElementById('mqtt-b64'),man=document.getElementById('mqtt-manual');"
             "var tb=document.getElementById('mqtt-tab-b64'),tm=document.getElementById('mqtt-tab-manual');"
             "function mqttMode(manual){if(!b64||!man)return;b64.classList.toggle('off',manual);man.classList.toggle('off',!manual);if(tb)tb.classList.toggle('on',!manual);if(tm)tm.classList.toggle('on',manual);}"
             "if(tb)tb.onclick=function(){mqttMode(false);};if(tm)tm.onclick=function(){mqttMode(true);};"
+            "var tabSet=false;"
+            "var statsH=24,statsTimer=0,statsBusy=false;"
+            "function niceNum(range,round){var exp=Math.floor(Math.log(Math.abs(range)||1)/Math.LN10),f=(Math.abs(range)||1)/Math.pow(10,exp),nf;"
+            "if(round)nf=f<1.5?1:f<3?2:f<7?5:10;else nf=f<=1?1:f<=2?2:f<=5?5:10;return nf*Math.pow(10,exp);}"
+            "function niceScale(mn,mx,ticks){if(!(mx>mn)){mn-=1;mx+=1;}var range=niceNum(mx-mn,false),step=niceNum(range/(ticks-1),true);"
+            "return{mn:Math.floor(mn/step)*step,mx:Math.ceil(mx/step)*step,step:step};}"
+            "function fmtVal(v){if(!isFinite(v))return'';if(Math.abs(v)>=100||Math.abs(v-Math.round(v))<1e-6)return String(Math.round(v));return(Math.round(v*10)/10).toFixed(1);}"
+            "function fmtTime(t0,iv,i,n){if(t0>0){var d=new Date((t0+i*iv)*1000),hh=d.getUTCHours(),mm=d.getUTCMinutes();"
+            "return(hh<10?'0':'')+hh+':'+(mm<10?'0':'')+mm;}var ago=(n-1-i)*iv;if(ago<=0)return'сейчас';"
+            "if(ago<3600)return'-'+Math.round(ago/60)+'м';var h=ago/3600;return'-'+(h>=10?Math.round(h):(Math.round(h*10)/10))+'ч';}"
+            "function chart(cv,series,colors,ymin,ymax,meta){if(!cv)return;var c=cv.getContext('2d'),w=cv.width,h=cv.height,pl=44,pr=10,pt=10,pb=24;"
+            "c.clearRect(0,0,w,h);c.fillStyle='#191d22';c.fillRect(0,0,w,h);"
+            "if(!series||!series.length||!series[0]||!series[0].length){c.fillStyle='#9aa4ae';c.font='11px sans-serif';c.fillText('нет данных',pl,h/2);return;}"
+            "var n=series[0].length,s,i,v,mn=ymin,mx=ymax,smn=Infinity,smx=-Infinity,ok=false;"
+            "for(s=0;s<series.length;s++)for(i=0;i<n;i++){v=series[s][i];if(!isFinite(v))continue;ok=true;if(v<smn)smn=v;if(v>smx)smx=v;}"
+            "if(!ok){c.fillStyle='#9aa4ae';c.font='11px sans-serif';c.fillText('нет данных',pl,h/2);return;}"
+            "if(mn==null)mn=smn;if(mx==null)mx=smx;var sc=niceScale(mn,mx,5);mn=sc.mn;mx=sc.mx;var rng=mx-mn||1,pw=w-pl-pr,ph=h-pt-pb;"
+            "var iv=(meta&&meta.iv)||0,t0=(meta&&meta.t0)||0;c.font='10px sans-serif';"
+            "for(v=mn;v<=mx+sc.step*0.001;v+=sc.step){var y=pt+ph*(1-(v-mn)/rng);c.strokeStyle='#2b3138';c.beginPath();c.moveTo(pl,y);c.lineTo(w-pr,y);c.stroke();"
+            "c.fillStyle='#9aa4ae';c.textAlign='right';c.textBaseline='middle';c.fillText(fmtVal(v),pl-4,y);}"
+            "c.strokeStyle='#3b434d';c.beginPath();c.moveTo(pl,pt);c.lineTo(pl,pt+ph);c.lineTo(w-pr,pt+ph);c.stroke();"
+            "var xt=Math.min(5,n),xi;c.fillStyle='#9aa4ae';c.textAlign='center';c.textBaseline='top';"
+            "for(xi=0;xi<xt;xi++){var idx=xt===1?0:Math.round(xi*(n-1)/(xt-1)),x=pl+pw*(n===1?0.5:idx/(n-1));"
+            "c.strokeStyle='#2b3138';c.beginPath();c.moveTo(x,pt+ph);c.lineTo(x,pt+ph+3);c.stroke();c.fillText(fmtTime(t0,iv,idx,n),x,pt+ph+5);}"
+            "for(s=0;s<series.length;s++){c.strokeStyle=colors[s]||'#60a5fa';c.lineWidth=1.5;c.beginPath();var pen=false;"
+            "for(i=0;i<n;i++){v=series[s][i];if(!isFinite(v)){pen=false;continue;}"
+            "var x=pl+pw*(n===1?0.5:i/(n-1)),y=pt+ph*(1-(v-mn)/rng);if(pen)c.lineTo(x,y);else c.moveTo(x,y);pen=true;}c.stroke();}}"
+            "function setStatsNote(t,kind){var el=document.getElementById('stats-note');if(!el)return;el.hidden=!t;el.classList.remove('ok','bad');"
+            "if(kind)el.classList.add(kind);el.textContent=t||'';}"
+            "function drawStats(m){var s=m.s||[],n=s.length,rx=[],tx=[],fr=[],dr=[],atx=[],arx=[],nf=[],rs=[],sn=[],q=[],batt=[],temp=[],i;"
+            "var meta={iv:m.iv||0,t0:m.t0||0};"
+            "for(i=0;i<n;i++){var r=s[i];rx.push(r[0]|0);tx.push(r[1]|0);fr.push(r[2]|0);dr.push(r[4]|0);"
+            "atx.push((r[6]|0)/10);arx.push((r[7]|0)/10);nf.push(r[8]|0);rs.push(r[9]|0);sn.push((r[10]|0)/4);q.push(r[11]|0);"
+            "var bv=r[12]|0;batt.push(bv>0?bv:NaN);var tv=r[13]|0;temp.push(tv===-32768?NaN:tv/10);}"
+            "chart(document.getElementById('c-pkt'),[rx,tx],['#60a5fa','#86efac'],0,null,meta);"
+            "chart(document.getElementById('c-fd'),[fr,dr],['#fbbf24','#c084fc'],0,null,meta);"
+            "chart(document.getElementById('c-air'),[atx,arx],['#fb7185','#38bdf8'],0,null,meta);"
+            "chart(document.getElementById('c-rf'),[nf,rs,sn],['#9aa4ae','#60a5fa','#86efac'],null,null,meta);"
+            "chart(document.getElementById('c-q'),[q],['#fbbf24'],0,null,meta);"
+            "chart(document.getElementById('c-batt'),[batt],['#86efac'],null,null,meta);"
+            "chart(document.getElementById('c-temp'),[temp],['#fb7185'],null,null,meta);"
+            "if(!n)setStatsNote('Пока нет сэмплов. Первый интервал — около 5 минут.','');"
+            "else setStatsNote('Точек: '+n+', шаг '+(m.iv||0)+' с'+(m.t0?' · время UTC':' · относительное время'),'ok');}"
+            "function loadStats(force){if(statsBusy&&!force)return;var pane=document.getElementById('pane-stats');"
+            "if(!pane||!pane.classList.contains('on'))return;statsBusy=true;"
+            "fetch('/api/stats?h='+statsH,{credentials:'same-origin'}).then(function(r){if(!r.ok)throw new Error('http');return r.json();})"
+            ".then(function(m){drawStats(m);}).catch(function(){setStatsNote('Не удалось загрузить статистику','bad');})"
+            ".then(function(){statsBusy=false;});}"
+            "function stopStats(){if(statsTimer){clearInterval(statsTimer);statsTimer=0;}}"
+            "function armStats(){stopStats();statsTimer=setInterval(function(){loadStats(false);},300000);loadStats(true);}"
+            "var sf=document.getElementById('stats-filters');"
+            "if(sf)sf.onclick=function(ev){var el=ev.target;while(el&&el!==sf&&!(el.getAttribute&&el.getAttribute('data-h')))el=el.parentNode;"
+            "if(!el||el===sf)return;statsH=parseInt(el.getAttribute('data-h'),10)||24;var bt=sf.querySelectorAll('button'),j;"
+            "for(j=0;j<bt.length;j++)bt[j].classList.toggle('on',bt[j]===el);loadStats(true);};"
+            "function showTab(name){if(!name||!document.getElementById('pane-'+name))return false;"
+            "var p=document.querySelectorAll('.pane'),b=document.querySelectorAll('#nav button'),i;"
+            "for(i=0;i<p.length;i++)p[i].classList.toggle('on',p[i].id==='pane-'+name);"
+            "for(i=0;i<b.length;i++)b[i].classList.toggle('on',b[i].getAttribute('data-tab')===name);"
+            "try{sessionStorage.setItem('mc-tab',name);}catch(e){}tabSet=true;"
+            "if(name==='stats')armStats();else stopStats();return true;}"
+            "function tabOf(el){while(el&&el!==document.body){if(el.classList&&el.classList.contains('pane'))return el.id.slice(5);el=el.parentNode;}return '';}"
+            "function reveal(id){if(!id)return false;if(showTab(id))return true;var el=document.getElementById(id),name=el&&tabOf(el);"
+            "if(!name||!showTab(name))return false;var pane=document.getElementById('pane-'+name);"
+            "if(pane&&el!==pane.firstElementChild&&el.scrollIntoView)el.scrollIntoView();return true;}"
+            "var nav=document.getElementById('nav');"
+            "if(nav)nav.onclick=function(ev){var el=ev.target;while(el&&el!==nav&&!(el.getAttribute&&el.getAttribute('data-tab')))el=el.parentNode;"
+            "if(!el||el===nav)return;var name=el.getAttribute('data-tab');showTab(name);if(history.replaceState)history.replaceState(null,'','#'+name);};"
             "var fwNote=document.getElementById('fw-note');"
             "if(fwNote&&/[?&]fw=1(?:&|$)/.test(location.search)){var ver=document.getElementById('ver');var prev='';"
             "try{prev=sessionStorage.getItem('mc-fw')||'';sessionStorage.removeItem('mc-fw');}catch(e){}"
             "var same=!!(prev&&ver&&prev===ver.textContent);fwNote.hidden=false;fwNote.classList.add(same?'bad':'ok');"
             "fwNote.textContent=same?'Репитер перезагрузился, но версия прошивки не изменилась.':'Прошивка обновлена. Репитер загрузился с новой версией.';"
-            "var fwBox=document.getElementById('fw');if(fwBox&&fwBox.scrollIntoView)fwBox.scrollIntoView();"
-            "if(history.replaceState)history.replaceState(null,'','/'+(location.hash||''));}"
+            "showTab('sys');"
+            "if(history.replaceState)history.replaceState(null,'','/#sys');}"
             "var rn0=document.getElementById('radio-note');if(rn0&&rn0.getAttribute('data-boot')==='1')watchBoot();"
-            "var at=/[?&]at=([A-Za-z0-9_-]+)/.exec(location.search);"
-            "if(at){var box=document.getElementById(at[1]);if(box&&box.scrollIntoView)box.scrollIntoView();"
-            "if(history.replaceState)history.replaceState(null,'','/#'+at[1]);}"
+            "if(!tabSet){var at=/[?&]at=([A-Za-z0-9_-]+)/.exec(location.search);"
+            "if(at){reveal(at[1]);if(history.replaceState)history.replaceState(null,'','/#'+at[1]);}"
+            "else if(!reveal((location.hash||'').replace(/^#/,''))){var saved='';"
+            "try{saved=sessionStorage.getItem('mc-tab')||'';}catch(e){}if(saved)showTab(saved);}}"
+            "var sp0=document.getElementById('pane-stats');if(sp0&&sp0.classList.contains('on'))armStats();"
             "var fw=document.getElementById('fw-form');"
             "if(fw)fw.onsubmit=function(ev){ev.preventDefault();var input=fw.querySelector('input[type=file]');var file=input&&input.files&&input.files[0];"
             "var note=document.getElementById('fw-note'),bar=document.getElementById('fw-bar'),btn=fw.querySelector('button');"
@@ -1337,7 +1784,7 @@ static void pushLive(bool force) {
   uint32_t submitted = submit_seq.load(std::memory_order_acquire);
   uint32_t finished = result_seq.load(std::memory_order_acquire);
   bool changed = submitted != pushed_submit || finished != pushed_result;
-  if (!force && !changed && last_push_ms && (uint32_t)(now - last_push_ms) < 1000) return;
+  if (!force && !changed && last_push_ms && (uint32_t)(now - last_push_ms) < 5000) return;
   if (!socket) return;
   socket->cleanupClients();
   if (!socket->count()) {
@@ -1387,15 +1834,26 @@ static void pushLive(bool force) {
   appendJsonEscaped(cursor, left, live_html, strlen(live_html));
   appendRaw(cursor, left, ",\"out\":");
   appendJsonEscaped(cursor, left, console, strlen(console));
+  appendRaw(cursor, left, ",\"rs\":");
+  appendRegionStatsJson(page_buf[slot], cursor, left);
   appendRaw(cursor, left, ",\"rn\":");
   appendJsonEscaped(cursor, left, radio_note, strlen(radio_note));
   appendRaw(cursor, left, ",\"nn\":");
   appendJsonEscaped(cursor, left, node_note, strlen(node_note));
   appendRaw(cursor, left, ",\"pn\":");
   appendJsonEscaped(cursor, left, power_note, strlen(power_note));
+  appendRaw(cursor, left, ",\"mn\":");
+  appendJsonEscaped(cursor, left, mqtt_note, strlen(mqtt_note));
+  appendRaw(cursor, left, ",\"tn\":");
+  appendJsonEscaped(cursor, left, tel_note, strlen(tel_note));
+  appendRaw(cursor, left, ",\"gn\":");
+  appendJsonEscaped(cursor, left, region_note, strlen(region_note));
+  uint8_t reload_regions = region_reload.load(std::memory_order_acquire);
+  appendRaw(cursor, left, reload_regions ? ",\"gr\":1" : ",\"gr\":0");
   appendRaw(cursor, left, radio_reboot.load(std::memory_order_acquire) ? ",\"rb\":1}" : ",\"rb\":0}");
   if (left > 64) {
     socket->textAll(live_json);
+    if (reload_regions) region_reload.store(0, std::memory_order_release);
     last_push_ms = now;
     pushed_submit = submitted;
     pushed_result = finished;
@@ -1426,9 +1884,69 @@ static const char* actionCommand(const String& name) {
   return nullptr;
 }
 
+static std::atomic_flag stats_gate = ATOMIC_FLAG_INIT;
+static char stats_json[STATS_JSON_BYTES];
+static RepeaterStatsSlot stats_slots[REPEATER_STATS_EXPORT_MAX];
+
+static void sendStats(AsyncWebServerRequest* request) {
+  // Cookie from the page load, or browser-cached Basic auth.
+  if (!cookieOk(request)) {
+    if (!allowed(request)) return;
+  }
+  if (stats_gate.test_and_set(std::memory_order_acquire)) {
+    request->send(503, "text/plain; charset=utf-8", "busy");
+    return;
+  }
+  // Need room for the String copy inside beginResponse / TCP.
+  if (ESP.getMaxAllocHeap() < STATS_JSON_BYTES + 4096) {
+    releaseLiveBuffers();
+  }
+  if (ESP.getMaxAllocHeap() < STATS_JSON_BYTES + 4096) {
+    stats_gate.clear(std::memory_order_release);
+    request->send(503, "text/plain; charset=utf-8", "no memory");
+    return;
+  }
+  uint8_t hours = 24;
+  if (request->hasParam("h")) {
+    int h = request->getParam("h")->value().toInt();
+    if (h == 1 || h == 3 || h == 6 || h == 12 || h == 24) hours = (uint8_t)h;
+  }
+  RepeaterStatsSeriesMeta meta;
+  uint16_t n = the_mesh.exportStatsHistory(hours, stats_slots, REPEATER_STATS_EXPORT_MAX, meta);
+  char* cursor = stats_json;
+  size_t left = STATS_JSON_BYTES;
+  stats_json[0] = 0;
+  appendFmt(cursor, left, "{\"h\":%u,\"iv\":%lu,\"n\":%u,\"t0\":%lu,\"s\":[",
+            (unsigned)meta.hours, (unsigned long)meta.interval_secs, (unsigned)n, (unsigned long)meta.t0);
+  for (uint16_t i = 0; i < n && left > 64; i++) {
+    const RepeaterStatsSlot& s = stats_slots[i];
+    if (i) appendRaw(cursor, left, ",");
+    appendFmt(cursor, left, "[%u,%u,%u,%u,%u,%u,%u,%u,%d,%d,%d,%u,%u,%d]",
+              (unsigned)s.recv_d, (unsigned)s.sent_d, (unsigned)s.flood_rx_d, (unsigned)s.flood_tx_d,
+              (unsigned)s.direct_rx_d, (unsigned)s.direct_tx_d, (unsigned)s.tx_air_ds, (unsigned)s.rx_air_ds,
+              (int)s.noise, (int)s.rssi, (int)s.snr_q4, (unsigned)s.queue,
+              (unsigned)s.batt_mv, (int)s.temp_c_x10);
+  }
+  appendRaw(cursor, left, "]}");
+  // Copy into the response so the static buffer can be reused immediately.
+  AsyncWebServerResponse* response =
+      request->beginResponse(200, "application/json; charset=utf-8", (const char*)stats_json);
+  stats_gate.clear(std::memory_order_release);
+  response->addHeader("Cache-Control", "no-store");
+  request->send(response);
+}
+
 static void sendPage(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
+  if (ESP.getMaxAllocHeap() < PAGE_BYTES + PAGE_HEAP_RESERVE) {
+    // Drop WS live buffers so a refresh can recover without reboot.
+    releaseLiveBuffers();
+  }
   char* page = (char*)malloc(PAGE_BYTES);
+  if (!page) {
+    releaseLiveBuffers();
+    page = (char*)malloc(PAGE_BYTES);
+  }
   if (!page) {
     request->send(503, "text/plain", "no memory");
     return;
@@ -1450,7 +1968,10 @@ static void sendPage(AsyncWebServerRequest* request) {
     reply[CMD_CAP - 1] = 0;
   }
   uint32_t slot = page_slot.load(std::memory_order_acquire);
-  renderPage(page_buf[slot], busy, pending, command, reply, page, PAGE_BYTES);
+  const char* anchor = "status";
+  if (request->hasParam("fw")) anchor = "fw";
+  else if (request->hasParam("at")) anchor = request->getParam("at")->value().c_str();
+  renderPage(page_buf[slot], busy, pending, command, reply, page, PAGE_BYTES, paneForAnchor(anchor));
   AsyncWebServerResponse* response = request->beginResponse(200, "text/html; charset=utf-8", page);
   free(page);
   response->addHeader("Cache-Control", "no-store");
@@ -1538,27 +2059,27 @@ static void onMqtt(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
   if (request->hasParam("mode", true) && request->getParam("mode", true)->value() == "off") {
     queueMqttOff();
-    request->redirect("/");
+    request->redirect("/?at=net");
     return;
   }
   if (request->hasParam("mode", true) && request->getParam("mode", true)->value() == "manual") {
     acceptMqttManual(request);
-    request->redirect("/");
+    request->redirect("/?at=net");
     return;
   }
   if (!request->hasParam("config", true)) {
     setMqttNote("Вставьте строку настройки");
-    request->redirect("/");
+    request->redirect("/?at=net");
     return;
   }
   const String& config = request->getParam("config", true)->value();
   if (config.length() > 12000) {
     setMqttNote("Строка слишком длинная");
-    request->redirect("/");
+    request->redirect("/?at=net");
     return;
   }
   acceptMqttFields(config);
-  request->redirect("/");
+  request->redirect("/?at=net");
 }
 
 static void commaDot(char* text) {
@@ -1649,6 +2170,54 @@ static int queueNode(const RepeaterNodeForm& form) {
     return 1;
   }
   return 0;
+}
+
+static int queueRegion(const RepeaterRegionForm& form) {
+  if (region_job.load(std::memory_order_acquire)) return 1;
+  RepeaterRegionForm* job = (RepeaterRegionForm*)malloc(sizeof(RepeaterRegionForm));
+  if (!job) return 2;
+  *job = form;
+  region_hold_form = form;
+  region_hold.store(1, std::memory_order_release);
+  RepeaterRegionForm* expected = nullptr;
+  if (!region_job.compare_exchange_strong(expected, job)) {
+    free(job);
+    region_hold.store(0, std::memory_order_release);
+    return 1;
+  }
+  return 0;
+}
+
+static void handleRegion(AsyncWebServerRequest* request) {
+  if (!allowed(request)) return;
+  char op[12];
+  op[0] = 0;
+  readText(request, "op", op, sizeof(op));
+  RepeaterRegionForm form;
+  memset(&form, 0, sizeof(form));
+  readText(request, "name", form.name, sizeof(form.name));
+  readText(request, "parent", form.parent, sizeof(form.parent));
+  if (strcmp(op, "flood") == 0) {
+    form.op = REGION_OP_FLOOD;
+    form.flood_ok = request->hasParam("flood", true) ? 1 : 0;
+  } else if (strcmp(op, "add") == 0) {
+    form.op = REGION_OP_ADD;
+  } else if (strcmp(op, "remove") == 0) {
+    form.op = REGION_OP_REMOVE;
+  } else if (strcmp(op, "default") == 0) {
+    form.op = REGION_OP_DEFAULT;
+  } else if (strcmp(op, "home") == 0) {
+    form.op = REGION_OP_HOME;
+  } else {
+    setRegionNote("Неизвестная операция");
+    request->redirect("/?at=regions");
+    return;
+  }
+  int queued = queueRegion(form);
+  if (queued == 2) setRegionNote("Не хватило памяти");
+  else if (queued) setRegionNote("Предыдущие настройки ещё сохраняются");
+  else setRegionNote("Сохраняем настройки регионов…");
+  request->redirect("/?at=regions");
 }
 
 static void handleRadio(AsyncWebServerRequest* request) {
@@ -1803,16 +2372,16 @@ static void handleNode(AsyncWebServerRequest* request) {
 static void handleCmd(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
   if (!request->hasParam("cmd", true)) {
-    request->redirect("/");
+    request->redirect("/?at=console");
     return;
   }
   char command[CMD_CAP];
   copyCommand(command, sizeof(command), request->getParam("cmd", true)->value());
   if (!command[0] || !enqueueCommand(command)) {
-    request->redirect(command[0] ? "/?busy=1" : "/");
+    request->redirect(command[0] ? "/?at=console&busy=1" : "/?at=console");
     return;
   }
-  request->redirect("/");
+  request->redirect("/?at=console");
 }
 
 static bool ntpHostOk(const char* value) {
@@ -1833,7 +2402,7 @@ static void handleTel(AsyncWebServerRequest* request) {
   TelJob* job = (TelJob*)malloc(sizeof(TelJob));
   if (!job) {
     setTelNote("Не хватило памяти");
-    request->redirect("/");
+    request->redirect("/?at=tel");
     return;
   }
   memset(job, 0, sizeof(TelJob));
@@ -1860,7 +2429,7 @@ static void handleTel(AsyncWebServerRequest* request) {
     if (!digits || port < 1) {
       free(job);
       setTelNote("Порт должен быть от 1 до 65535");
-      request->redirect("/");
+      request->redirect("/?at=tel");
       return;
     }
     job->port = (uint16_t)port;
@@ -1882,11 +2451,11 @@ static void handleTel(AsyncWebServerRequest* request) {
   if (!tel_job.compare_exchange_strong(expected, job)) {
     free(job);
     setTelNote("Предыдущие настройки ещё сохраняются");
-    request->redirect("/");
+    request->redirect("/?at=tel");
     return;
   }
   setTelNote("Сохраняем настройки…");
-  request->redirect("/");
+  request->redirect("/?at=tel");
 }
 
 static void handlePower(AsyncWebServerRequest* request) {
@@ -1906,8 +2475,8 @@ static void handlePower(AsyncWebServerRequest* request) {
 static void handleNtp(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
   if (request->hasParam("sync", true)) {
-    if (!enqueueCommand("ntp sync")) request->redirect("/?busy=1");
-    else request->redirect("/");
+    if (!enqueueCommand("ntp sync")) request->redirect("/?at=console&busy=1");
+    else request->redirect("/?at=console");
     return;
   }
   const char* mode = "off";
@@ -1925,19 +2494,29 @@ static void handleNtp(AsyncWebServerRequest* request) {
   } else {
     snprintf(command, sizeof(command), "set ntp off");
   }
-  if (!enqueueCommand(command)) request->redirect("/?busy=1");
-  else request->redirect("/");
+  if (!enqueueCommand(command)) request->redirect("/?at=ntp&busy=1");
+  else request->redirect("/?at=ntp");
 }
 
 static void handleAct(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
   const char* command = nullptr;
   if (request->hasParam("act", true)) command = actionCommand(request->getParam("act", true)->value());
+  char at[16];
+  at[0] = 0;
+  readText(request, "at", at, sizeof(at));
+  const char* pane = "console";
+  if (!strcmp(at, "regions") || !strcmp(at, "status") || !strcmp(at, "sys") || !strcmp(at, "stats")) {
+    pane = at;
+  }
+  char loc[40];
   if (!command || !enqueueCommand(command)) {
-    request->redirect(command ? "/?busy=1" : "/");
+    snprintf(loc, sizeof(loc), command ? "/?at=%s&busy=1" : "/?at=%s", pane);
+    request->redirect(loc);
     return;
   }
-  request->redirect("/");
+  snprintf(loc, sizeof(loc), "/?at=%s", pane);
+  request->redirect(loc);
 }
 
 static void onUptime(AsyncWebServerRequest* request) {
@@ -2085,6 +2664,9 @@ static void onFwUpload(AsyncWebServerRequest* request, String filename, size_t i
       return;
     }
     board.setInhibitSleep(true);
+    // Free WS HTML/JSON buffers so Update has contiguous heap.
+    releaseLiveBuffers();
+    if (socket) socket->closeAll();
   }
   if (request != fw_owner || fw_phase.load(std::memory_order_acquire) != FW_RX) return;
   uint32_t now = millis();
@@ -2098,6 +2680,7 @@ static void onFwUpload(AsyncWebServerRequest* request, String filename, size_t i
       fwFail("Файл не похож на прошивку ESP32. Нужен .bin без merged.");
       return;
     }
+    releaseLiveBuffers();
     if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
       Update.printError(Serial);
       fwFail(fwErrText());
@@ -2130,7 +2713,7 @@ static void onFwStatus(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
   // The uptime probe is /fw?t=… . A browser refresh of /fw must get the page, not a number.
   if (!request->hasParam("t")) {
-    request->redirect("/");
+    request->redirect("/?at=fw");
     return;
   }
   char body[16];
@@ -2219,6 +2802,7 @@ void RepeaterWeb::poll(bool enabled) {
   serviceTelJob();
   serviceRadioJob();
   serviceNodeJob();
+  serviceRegionJob();
   servicePowerJob();
 
   uint32_t ip = 0;
@@ -2246,14 +2830,19 @@ void RepeaterWeb::poll(bool enabled) {
     return request->authenticate("admin", admin_pass[slot]);
   });
   socket->onEvent([](AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventType type, void*, uint8_t*, size_t) {
-    if (type == WS_EVT_CONNECT && client) client->setCloseClientOnQueueFull(false);
+    if (type == WS_EVT_CONNECT && client) {
+      client->setCloseClientOnQueueFull(false);
+      last_push_ms = 0;  // deliver pending region reload / notes promptly
+    }
   });
   server->addHandler(socket);
   server->on("/", HTTP_GET, sendPage);
+  server->on("/api/stats", HTTP_GET, sendStats);
   server->on("/cmd", HTTP_POST, handleCmd);
   server->on("/radio", HTTP_POST, handleRadio);
   server->on("/up", HTTP_GET, onUptime);
   server->on("/node", HTTP_POST, handleNode);
+  server->on("/region", HTTP_POST, handleRegion);
   server->on("/power", HTTP_POST, handlePower);
   server->on("/ntp", HTTP_POST, handleNtp);
   server->on("/tel", HTTP_POST, handleTel);
@@ -2275,6 +2864,7 @@ void RepeaterWeb::poll(bool enabled) {
     const String& url = request->url();
     if (url == "/radio") request->redirect("/?at=radio");
     else if (url == "/node") request->redirect("/?at=node");
+    else if (url == "/region") request->redirect("/?at=regions");
     else if (url == "/power") request->redirect("/?at=power");
     else request->redirect("/");
   });
@@ -2284,11 +2874,23 @@ void RepeaterWeb::poll(bool enabled) {
   Serial.printf("Web: http://%u.%u.%u.%u/\n", addr[0], addr[1], addr[2], addr[3]);
 }
 
+bool RepeaterWeb::webBusy() const {
+  if (commandPending()) return true;
+#ifndef DISABLE_WIFI_OTA
+  uint8_t phase = fw_phase.load(std::memory_order_acquire);
+  if (phase == FW_RX || phase == FW_OK) return true;
+#endif
+  return false;
+}
+
 #else
 
 extern "C" void repeaterWebStop() {}
 
 void RepeaterWeb::poll(bool) {}
 void RepeaterWeb::stop() {}
+bool RepeaterWeb::commandQueued() const { return false; }
+bool RepeaterWeb::viewerConnected() const { return false; }
+bool RepeaterWeb::webBusy() const { return false; }
 
 #endif

@@ -68,6 +68,33 @@ public:
     return _level;
   }
 
+  // Drop the previous window and latch the step for this voltage.
+  // The screen-on path uses this so the icon matches the battery now,
+  // instead of the samples taken before the display went off.
+  int latch(uint16_t mv, int min_mv, int max_mv) {
+    _count = 0;
+    _idx = 0;
+    _level = -1;
+    for (int i = 0; i < WINDOW; i++) _samples[i] = 0;
+    int lvl = 0;
+    for (int i = 0; i < WINDOW; i++) lvl = push(mv, min_mv, max_mv);
+    return lvl;
+  }
+
+  // Median of samples[0..n). Sorts the array in place.
+  static uint16_t median(uint16_t* samples, int n) {
+    for (int i = 1; i < n; i++) {
+      uint16_t v = samples[i];
+      int j = i;
+      while (j > 0 && samples[j - 1] > v) {
+        samples[j] = samples[j - 1];
+        j--;
+      }
+      samples[j] = v;
+    }
+    return n > 0 ? samples[n / 2] : 0;
+  }
+
   int level() const { return _level < 0 ? 0 : _level; }
 
   // Millivolts at the bottom of the latched step. Stable until the step changes.

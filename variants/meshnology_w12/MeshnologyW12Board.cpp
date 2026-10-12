@@ -28,6 +28,7 @@ void MeshnologyW12Board::begin() {
   }
 
   void MeshnologyW12Board::onBeforeTransmit(void) {
+    if (!isTxLedEnabled()) return;
     neopixelWrite(NEOPIXEL_LED, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS);   // turn TX neopixel on (White)
   }
 

@@ -1,5 +1,13 @@
 #include "SerialBLEInterface.h"
 #include "esp_mac.h"
+#include <esp_bt.h>
+
+extern void companionNoteLinkActivity() __attribute__((weak));
+extern uint32_t companionIdlePeriodMs() __attribute__((weak));
+
+static void noteLinkActivity() {
+  if (companionNoteLinkActivity) companionNoteLinkActivity();
+}
 
 // See the following for generating UUIDs:
 // https://www.uuidgenerator.net/
@@ -9,6 +17,32 @@
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
 #define ADVERT_RESTART_DELAY  1000   // millis
+
+// Advertising units are 0.625 ms. A 3 s period still shows up in a scan, but
+// the phone's connect window often misses the burst, so the link is flaky.
+// 0.5–1 s is long enough for the radio to sleep between bursts and short
+// enough that a connect request lands.
+#define BLE_ADV_UNITS_MIN  800
+#define BLE_ADV_UNITS_MAX  1600
+// Connection-interval units are 1.25 ms. Idle grows as 100 * 8^(t/20s),
+// from 100 ms to 800 ms. A transfer still uses the fast set, then the
+// curve starts over.
+#define BLE_CONN_IDLE_LATENCY  0
+#define BLE_CONN_IDLE_TIMEOUT  400  // 4 s, in 10 ms units
+#define BLE_CONN_FAST_MIN      16   // 20 ms
+#define BLE_CONN_FAST_MAX      30   // 37.5 ms
+#define BLE_CONN_FAST_LATENCY  0
+#define BLE_CONN_FAST_TIMEOUT  400
+#define BLE_CONN_FAST_HOLD_MS  2500
+#define CONN_MODE_IDLE  1
+#define CONN_MODE_FAST  2
+
+static void applyIdleAdvertising(BLEAdvertising* adv) {
+  adv->setMinInterval(BLE_ADV_UNITS_MIN);
+  adv->setMaxInterval(BLE_ADV_UNITS_MAX);
+  adv->setMinPreferred(80);   // 100 ms, first staircase step
+  adv->setMaxPreferred(80);
+}
 
 void SerialBLEInterface::begin(const char* prefix, char* name, uint32_t pin_code) {
   _pin_code = pin_code;
@@ -95,6 +129,13 @@ void SerialBLEInterface::onConnect(BLEServer* pServer) {
 void SerialBLEInterface::onConnect(BLEServer* pServer, esp_ble_gatts_cb_param_t *param) {
   BLE_DEBUG_PRINTLN("onConnect(), conn_id=%d, mtu=%d", param->connect.conn_id, pServer->getPeerMTU(param->connect.conn_id));
   last_conn_id = param->connect.conn_id;
+  memcpy(peer_addr, param->connect.remote_bda, sizeof(peer_addr));
+  peer_known = true;
+  conn_mode = 0;
+  conn_idle_units = 0;
+  conn_fast_until = 0;
+  conn_update_not_before = 0;
+  conn_params_after = millis() + 1500;
 }
 
 void SerialBLEInterface::onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param_t* param) {
@@ -104,6 +145,11 @@ void SerialBLEInterface::onMtuChanged(BLEServer* pServer, esp_ble_gatts_cb_param
 void SerialBLEInterface::onDisconnect(BLEServer* pServer) {
   BLE_DEBUG_PRINTLN("onDisconnect()");
   deviceConnected = false;
+  peer_known = false;
+  conn_mode = 0;
+  conn_idle_units = 0;
+  conn_fast_until = 0;
+  conn_update_not_before = 0;
   if (_isEnabled) {
     adv_restart_time = millis() + ADVERT_RESTART_DELAY;
   }
@@ -144,11 +190,7 @@ void SerialBLEInterface::enable() {
   // Start the service
   pService->start();
 
-  // Start advertising
-
-  //pServer->getAdvertising()->setMinInterval(500);
-  //pServer->getAdvertising()->setMaxInterval(1000);
-
+  applyIdleAdvertising(pServer->getAdvertising());
   pServer->getAdvertising()->start();
   adv_restart_time = 0;
 }
@@ -162,6 +204,11 @@ void SerialBLEInterface::disable() {
   pServer->disconnect(last_conn_id);
   pService->stop();
   oldDeviceConnected = deviceConnected = false;
+  peer_known = false;
+  conn_mode = 0;
+  conn_idle_units = 0;
+  conn_fast_until = 0;
+  conn_update_not_before = 0;
   adv_restart_time = 0;
 }
 
@@ -172,6 +219,9 @@ size_t SerialBLEInterface::writeFrame(const uint8_t src[], size_t len) {
   }
 
   if (deviceConnected && len > 0) {
+    noteLinkActivity();
+    conn_fast_until = millis() + BLE_CONN_FAST_HOLD_MS;
+    if (conn_fast_until == 0) conn_fast_until = 1;
     if (send_queue_len >= FRAME_QUEUE_SIZE) {
       BLE_DEBUG_PRINTLN("writeFrame(), send_queue is full!");
       return 0;
@@ -193,6 +243,9 @@ bool SerialBLEInterface::isWriteBusy() const {
 }
 
 size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
+  // disable() then BLEDevice::deinit() leaves pServer dangling. The
+  // interface manager still polls this object while the link is off.
+  if (!_isEnabled) return 0;
   if (send_queue_len > 0   // first, check send queue
     && millis() >= _last_write + BLE_WRITE_MIN_INTERVAL    // space the writes apart
   ) {
@@ -208,11 +261,13 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
     }
   }
 
+  size_t got = 0;
   Frame frame;
   if (xQueueReceive(recv_queue, &frame, 0) == pdTRUE) {
     memcpy(dest, frame.buf, frame.len);
     BLE_DEBUG_PRINTLN("readBytes: sz=%d, hdr=%d", (uint32_t) frame.len, (uint32_t) dest[0]);
-    return frame.len;
+    got = frame.len;
+    noteLinkActivity();
   }
 
   if (deviceConnected != oldDeviceConnected) {
@@ -220,9 +275,6 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
       clearBuffers();
 
       BLE_DEBUG_PRINTLN("SerialBLEInterface -> disconnecting...");
-
-      //pServer->getAdvertising()->setMinInterval(500);
-      //pServer->getAdvertising()->setMaxInterval(1000);
 
       adv_restart_time = millis() + ADVERT_RESTART_DELAY;
     } else {
@@ -239,13 +291,66 @@ size_t SerialBLEInterface::checkRecvFrame(uint8_t dest[]) {
   if (adv_restart_time && millis() >= adv_restart_time) {
     if (pServer->getConnectedCount() == 0) {
       BLE_DEBUG_PRINTLN("SerialBLEInterface -> re-starting advertising");
+      applyIdleAdvertising(pServer->getAdvertising());
       pServer->getAdvertising()->start();  // re-Start advertising
     }
     adv_restart_time = 0;
   }
-  return 0;
+
+  maintainConnParams();
+  return got;
+}
+
+void SerialBLEInterface::maintainConnParams() {
+  if (!deviceConnected || !peer_known) return;
+  bool want_fast = send_queue_len > 0 ||
+      (conn_fast_until != 0 && (long)(millis() - conn_fast_until) < 0);
+  // Let pairing finish before asking for the slow interval. A contact sync
+  // may start immediately and needs the fast interval without that wait.
+  if (!want_fast && (conn_params_after == 0 || (long)(millis() - conn_params_after) < 0)) return;
+  uint8_t want = want_fast ? CONN_MODE_FAST : CONN_MODE_IDLE;
+  uint32_t period_ms = 100;
+  if (!want_fast && companionIdlePeriodMs) period_ms = companionIdlePeriodMs();
+  uint16_t units = (uint16_t)((period_ms * 4) / 5);
+  if (units < 80) units = 80;
+  if (units > 640) units = 640;
+  // The curve moves every wake. Ask the phone only after a 25% rise, about
+  // every 2 s. A shorter interval (the user just did something) applies at once.
+  if (want == conn_mode) {
+    if (want_fast) return;
+    if (conn_idle_units != 0 && units >= conn_idle_units &&
+        units < conn_idle_units + conn_idle_units / 4) return;
+  }
+  if (conn_update_not_before != 0 && (long)(millis() - conn_update_not_before) < 0) return;
+  esp_ble_conn_update_params_t update = {};
+  memcpy(update.bda, peer_addr, sizeof(update.bda));
+  if (want_fast) {
+    update.min_int = BLE_CONN_FAST_MIN;
+    update.max_int = BLE_CONN_FAST_MAX;
+    update.latency = BLE_CONN_FAST_LATENCY;
+    update.timeout = BLE_CONN_FAST_TIMEOUT;
+  } else {
+    update.min_int = units;
+    update.max_int = units;
+    update.latency = BLE_CONN_IDLE_LATENCY;
+    update.timeout = BLE_CONN_IDLE_TIMEOUT;
+  }
+  if (esp_ble_gap_update_conn_params(&update) == ESP_OK) {
+    conn_mode = want;
+    conn_idle_units = want_fast ? 0 : units;
+    // A parameter change can drop the controller out of modem sleep and
+    // leave it there. Put it back, or the idle current climbs to ~26 mA.
+    esp_bt_sleep_enable();
+  } else {
+    conn_update_not_before = millis() + 3000;
+    if (conn_update_not_before == 0) conn_update_not_before = 1;
+  }
 }
 
 bool SerialBLEInterface::isConnected() const {
   return deviceConnected;  //pServer != NULL && pServer->getConnectedCount() > 0;
+}
+
+bool SerialBLEInterface::isLinkUp() const {
+  return deviceConnected || (pServer && pServer->getConnectedCount() > 0);
 }

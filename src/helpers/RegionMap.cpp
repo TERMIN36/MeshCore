@@ -279,6 +279,25 @@ bool RegionMap::removeRegion(const RegionEntry& region) {
   return true;  // success
 }
 
+bool RegionMap::removeRegionRecursive(uint16_t id) {
+  if (id == 0) return false;
+
+  bool progress = true;
+  while (progress) {
+    progress = false;
+    for (int i = 0; i < num_regions; i++) {
+      if (regions[i].parent != id) continue;
+      if (!removeRegionRecursive(regions[i].id)) return false;
+      progress = true;
+      break;  // array shifted; rescan
+    }
+  }
+
+  RegionEntry* region = findById(id);
+  if (!region) return true;
+  return removeRegion(*region);
+}
+
 bool RegionMap::clear() {
   num_regions = 0;
   return true;  // success

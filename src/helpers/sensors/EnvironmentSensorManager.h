@@ -21,10 +21,18 @@ protected:
 
   bool     gps_detected = false;
   bool     gps_active = false;
+  bool     gps_powered = false;
+  bool     gps_window_on = false;
+  bool     gps_force_window = false;
   uint32_t gps_update_interval_sec = 1;
+  uint32_t gps_power_interval_sec = 0; // 0 = stay powered while GPS is enabled
+  unsigned long gps_window_deadline = 0;
 
   #if ENV_INCLUDE_GPS
   LocationProvider* _location;
+  bool gpsUsesWindows() const;
+  void powerGps(bool on);
+  void serviceGpsWindow();
   void start_gps();
   void stop_gps();
   void initBasicGPS();
@@ -50,4 +58,7 @@ public:
   const char* getSettingName(int i) const override;
   const char* getSettingValue(int i) const override;
   bool setSettingValue(const char* name, const char* value) override;
+  bool gpsHoldsCpu() const override;
+  void noteGpsDeadline(uint32_t ms_until) override;
+  uint32_t millisUntilGpsWake() const override;
 };

@@ -13,8 +13,33 @@ namespace mesh {
 #define MIN_TX_BUDGET_AIRTIME_DIV  2      // require at least 1/N of estimated airtime as budget before TX
 
 #ifndef NOISE_FLOOR_CALIB_INTERVAL
-  #define NOISE_FLOOR_CALIB_INTERVAL   2000     // 2 seconds
+  #define NOISE_FLOOR_CALIB_INTERVAL   2000     // 2 seconds, while the floor gates TX
 #endif
+#ifndef NOISE_FLOOR_CALIB_IDLE_INTERVAL
+  #define NOISE_FLOOR_CALIB_IDLE_INTERVAL  5000   // 5 seconds, display and web snapshot
+#endif
+
+static uint32_t msUntil(uint32_t now, unsigned long at, uint32_t wait) {
+  if (at == 0) return wait;
+  long left = (long)(at - now);
+  if (left < 0) left = 0;
+  if ((uint32_t)left < wait) return (uint32_t)left;
+  return wait;
+}
+
+uint32_t Dispatcher::millisUntilRadioWork() const {
+  // A transmit in progress has to notice TX-done. Sleeping until the noise
+  // sample would hold the reply for seconds.
+  if (outbound) return 0;
+  uint32_t now = (uint32_t)_ms->getMillis();
+  uint32_t wait = 0xFFFFFFFFu;
+  wait = msUntil(now, next_floor_calib_time, wait);
+  if (getAGCResetInterval() > 0) wait = msUntil(now, next_agc_reset_time, wait);
+  if ((long)(next_tx_time - now) > 0) wait = msUntil(now, next_tx_time, wait);
+  uint32_t queued = 0;
+  if (_mgr->nextDeadline(queued)) wait = msUntil(now, queued, wait);
+  return wait;
+}
 
 void Dispatcher::begin() {
   n_sent_flood = n_sent_direct = 0;
@@ -64,10 +89,20 @@ uint32_t Dispatcher::getCADFailMaxDuration() const {
 }
 
 void Dispatcher::loop() {
+  // The floor is sampled for channel-busy checks only when a threshold or CAD
+  // is on. Otherwise a fresh 8-sample average every five seconds is enough.
+  bool floor_fast = getInterferenceThreshold() != 0 || getCADEnabled();
+  if (floor_fast) {
+    unsigned long now = _ms->getMillis();
+    if ((long)(next_floor_calib_time - now) > (long)NOISE_FLOOR_CALIB_INTERVAL) {
+      next_floor_calib_time = now + NOISE_FLOOR_CALIB_INTERVAL;
+    }
+  }
   if (millisHasNowPassed(next_floor_calib_time)) {
     _radio->triggerNoiseFloorCalibrate(getInterferenceThreshold());
     _radio->setCADEnabled(getCADEnabled());
-    next_floor_calib_time = futureMillis(NOISE_FLOOR_CALIB_INTERVAL);
+    unsigned long interval = floor_fast ? NOISE_FLOOR_CALIB_INTERVAL : NOISE_FLOOR_CALIB_IDLE_INTERVAL;
+    next_floor_calib_time = futureMillis((int)interval);
   }
   _radio->loop();
 

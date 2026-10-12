@@ -1,5 +1,11 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
+#if defined(ESP32) && defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
+  #include <esp_pm.h>
+#endif
+#if defined(ESP32) && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  #include <HWCDC.h>
+#endif
 
 #include "MyMesh.h"
 
@@ -132,6 +138,49 @@ void setup() {
   board.onBootComplete();
 }
 
+#if defined(ESP32)
+// Heltec V4 Serial is the USB-Serial/JTAG block. Light sleep stops its clock,
+// Windows drops the COM port, and the browser's writer is gone before the
+// first command. SOF means a host is on the bus; a charger with no data
+// does not send SOF, so screen-off sleep still happens there.
+static bool usbHostAttached() {
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  static uint32_t attached_until = 0;
+  if (HWCDC::isPlugged()) {
+    attached_until = millis() + 2000;
+    if (attached_until == 0) attached_until = 1;
+    return true;
+  }
+  return attached_until != 0 && (int32_t)(millis() - attached_until) < 0;
+#else
+  return false;
+#endif
+}
+
+// Automatic light sleep is entered from the idle task, not only from
+// waitAutoLightSleep. This lock does not change the CPU clock.
+static void usbKeepCpuAwake(bool awake) {
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  static esp_pm_lock_handle_t lock = nullptr;
+  static bool held = false;
+  static bool unavailable = false;
+  if (unavailable || awake == held) return;
+  if (awake) {
+    if (!lock && esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb-cli", &lock) != ESP_OK) {
+      lock = nullptr;
+      unavailable = true;
+      return;
+    }
+    if (lock && esp_pm_lock_acquire(lock) == ESP_OK) held = true;
+  } else if (lock && esp_pm_lock_release(lock) == ESP_OK) {
+    held = false;
+  }
+#else
+  (void)awake;
+#endif
+}
+#endif
+
 void loop() {
 #ifdef DISPLAY_CLASS
   ui_task.pollButton();
@@ -229,17 +278,57 @@ void loop() {
 #endif
 #if defined(ESP32)
   // Automatic light sleep runs while this task is blocked. LoRa stays in RX.
-  // DIO is not a wakeup source for this sleep, so do not sleep while the line
-  // is already high; RadioLibWrapper::loop latches that level on the next pass.
-  if (the_mesh.wifiLightSleep()) {
-    uint32_t irq = board.getIRQGpio();
-    if (irq == (uint32_t)-1 || irq > 255 || digitalRead((uint8_t)irq) == LOW) delay(20);
+  // When DIO can wake the sleep, block until the next maintenance deadline.
+  // Otherwise keep the short pause: a level check on the next pass catches
+  // a packet the sleep missed. A host on native USB, or a CLI line already
+  // started, must not enter that sleep: the port disappears mid-connect.
+  bool usb_up = usbHostAttached();
+  usbKeepCpuAwake(usb_up);
+  bool cli_busy = command[0] != 0 || Serial.available();
+  if (usb_up && !cli_busy) {
+    delay(10);
+  } else if (!usb_up && !cli_busy && the_mesh.wifiLightSleep() && !the_mesh.webBusy()) {
+    uint32_t sleep_ms = 5000;
+#ifdef DISPLAY_CLASS
+    // The click is completed in the main loop, not inside the wait. A multi
+    // second block swallows the release, so the screen change lands late.
+    // While the panel is on it already dominates the current; keep the long
+    // sleep for the screen-off idle.
+    if (ui_task.keepsCpuAwake() && sleep_ms > 20) sleep_ms = 20;
+#endif
+    uint32_t radio_ms = the_mesh.millisUntilRadioWork();
+    if (radio_ms < sleep_ms) sleep_ms = radio_ms;
+#ifdef HAS_EXTERNAL_WATCHDOG
+    unsigned long wdt_ms = external_watchdog.getIntervalMs();
+    if (wdt_ms < sleep_ms) sleep_ms = (uint32_t)wdt_ms;
+#endif
+    int slept = sleep_ms > 0 ? board.waitAutoLightSleep(sleep_ms) : 1;
+    if (slept < 0) {
+      uint32_t irq = board.getIRQGpio();
+      if (irq == (uint32_t)-1 || irq > 255 || digitalRead((uint8_t)irq) == LOW) delay(20);
+    }
+  } else if (!usb_up && !the_mesh.hasPendingWork() && command[0] == 0 && !Serial.available()
+#ifdef DISPLAY_CLASS
+             && !ui_task.keepsCpuAwake()
+#endif
+  ) {
+    // Wi-Fi is down, so manual light sleep does not drop a station. LoRa stays
+    // in RX. Wake on a packet, the button, or the next advert / noise / clock
+    // deadline, and never stay down longer than a minute.
+    uint32_t sleep_ms = 60000;
+    uint32_t mesh_ms = the_mesh.millisUntilIdleWork();
+    if (mesh_ms < sleep_ms) sleep_ms = mesh_ms;
+#ifdef HAS_EXTERNAL_WATCHDOG
+    unsigned long wdt_ms = external_watchdog.getIntervalMs();
+    if (wdt_ms < sleep_ms) sleep_ms = (uint32_t)wdt_ms;
+#endif
+    if (sleep_ms > 0) board.idleSleep(sleep_ms);
   }
 #endif
   if (the_mesh.getNodePrefs()->powersaving_enabled && !the_mesh.hasPendingWork()) {
 #if defined(NRF52_PLATFORM)
     board.sleep(0); // nrf ignores seconds param, sleeps whenever possible
-#else
+#elif !defined(ESP32)
     if (the_mesh.millisHasNowPassed(POWERSAVING_FIRSTSLEEP_SECS * 1000)) { // To check if it is time to sleep
       board.sleep(30); // Sleep. Wake up after a while or when receiving a LoRa packet
     }

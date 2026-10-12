@@ -43,7 +43,16 @@ namespace mesh {
 #define  BD_STARTUP_RX_PACKET  1
 
 class MainBoard {
+  static bool& txLedStorage() {
+    static bool enabled = true;
+    return enabled;
+  }
 public:
+  // Transmit indicator. Boards still run onBeforeTransmit for the radio path;
+  // the LED itself stays dark while this is off.
+  static void setTxLedEnabled(bool enabled) { txLedStorage() = enabled; }
+  static bool isTxLedEnabled() { return txLedStorage(); }
+
   virtual uint16_t getBattMilliVolts() = 0;
   virtual float getMCUTemperature() { return NAN; }
   virtual bool setAdcMultiplier(float multiplier) { return false; };

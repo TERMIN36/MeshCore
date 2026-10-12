@@ -176,8 +176,7 @@ void UITask::renderRadioScreen() {
   _display->print(tmp);
 
   _display->setCursor(0, 52);
-  if (_board->canControlLoRaFemLna()) _display->print("3x profile  hold LNA");
-  else _display->print("3x: profile");
+  _display->print("3x: profile");
 }
 
 void UITask::renderWifiScreen() {
@@ -188,7 +187,21 @@ void UITask::renderWifiScreen() {
   renderBatteryIndicator();
 
   _display->setCursor(0, 16);
-  _display->print(_node_prefs->wifi_enabled ? "state: on" : "state: off");
+  if (!_node_prefs->wifi_enabled) {
+    _display->print("state: off");
+  } else {
+    char ip[16];
+    int8_t rssi = 0;
+    if (!the_mesh.copyWifiAddress(ip, sizeof(ip))) {
+      _display->print("no link");
+    } else if (the_mesh.copyWifiRssi(rssi)) {
+      char tmp[16];
+      sprintf(tmp, "%d dBm", (int)rssi);
+      _display->print(tmp);
+    } else {
+      _display->print("state: on");
+    }
+  }
 
   _display->setCursor(0, 28);
   if (_node_prefs->wifi_ssid[0]) {
@@ -224,9 +237,25 @@ void UITask::showNextPage() {
   _next_refresh = 0;
 }
 
+bool UITask::keepsCpuAwake() const {
+  if (_display && _display->isOn()) return true;
+  return _awake_until != 0 && (long)(_awake_until - millis()) > 0;
+}
+
 void UITask::pollButton() {
 #if defined(PIN_USER_BTN) && defined(DISPLAY_CLASS)
+  if (!_btn_live) {
+    if (user_btn.isPressed()) return;
+    _btn_live = true;
+    user_btn.cancelClick();
+  }
   int ev = user_btn.check();
+  // Stay awake through the multi-click window so a press that woke the CPU
+  // still becomes a click instead of being swallowed by the next sleep.
+  if (ev != BUTTON_EVENT_NONE || user_btn.isPressed()) {
+    _awake_until = millis() + 400;
+    if (_awake_until == 0) _awake_until = 1;
+  }
   // A short press is a click. A bouncy press is often reported as a double
   // click, and that used to be ignored, so the WiFi page never appeared.
   // E-ink stays visually on after auto-off, so a click must change the page
@@ -237,9 +266,19 @@ void UITask::pollButton() {
     _display->turnOn();
     _auto_off = millis() + AUTO_OFF_MILLIS;
     if (_page == 2) {
-      _node_prefs->wifi_enabled = _node_prefs->wifi_enabled ? 0 : 1;
+      bool turning_off = _node_prefs->wifi_enabled != 0;
+      _node_prefs->wifi_enabled = turning_off ? 0 : 1;
       the_mesh.savePrefs();
-      the_mesh.applyWifiConfig();
+      if (turning_off) {
+        // Paint the notice with the normal full-screen refresh. Stopping the
+        // station from this click only pushes the first OLED page.
+        _restart_notice = true;
+        _restart_after = millis() + 1200;
+        if (_restart_after == 0) _restart_after = 1;
+        _next_refresh = 0;
+      } else {
+        the_mesh.applyWifiConfig();
+      }
     } else if (_page == 1) {
       uint8_t next = radioNextProfile(the_mesh.radioProfile());
       the_mesh.applyRadioProfile(next);
@@ -252,25 +291,56 @@ void UITask::pollButton() {
     }
     _next_refresh = 0;
   } else if (ev == BUTTON_EVENT_LONG_PRESS) {
-      _display->turnOn();
-      _auto_off = millis() + AUTO_OFF_MILLIS;
-      if (_page == 1 && _powering_off_at == 0 && _board->canControlLoRaFemLna()) {
-        bool enable = !_board->isLoRaFemLnaEnabled();
-        if (_board->setLoRaFemLnaEnabled(enable)) {
-          _node_prefs->radio_fem_rxgain = enable ? 1 : 0;
-          the_mesh.savePrefs();
-        }
-        _next_refresh = 0;
+      if (millis() < _started_at + BOOT_SCREEN_MILLIS) {
+        user_btn.cancelClick();
       } else {
-        Serial.println("Powering Off");
-        _powering_off_at = millis() + POWEROFF_DELAY;
+        _display->turnOn();
+        _auto_off = millis() + AUTO_OFF_MILLIS;
+        if (_page == 1 && _powering_off_at == 0 && _board->canControlLoRaFemLna()) {
+          bool enable = !_board->isLoRaFemLnaEnabled();
+          if (_board->setLoRaFemLnaEnabled(enable)) {
+            _node_prefs->radio_fem_rxgain = enable ? 1 : 0;
+            the_mesh.savePrefs();
+          }
+          _next_refresh = 0;
+        } else {
+          Serial.println("Powering Off");
+          _powering_off_at = millis() + POWEROFF_DELAY;
+        }
       }
   }
 #endif
 }
 
+void UITask::showRestartNotice() {
+  if (!_display) return;
+  // The page refresh must not start a new frame over this one.
+  _restart_notice = true;
+  _display->turnOn();
+  _auto_off = millis() + AUTO_OFF_MILLIS;
+  _display->startFrame();
+  _display->setTextSize(1);
+  _display->setColor(UIColor::primary_txt);
+  _display->drawTextCentered(_display->width() / 2, 20, "WiFi off");
+  _display->drawTextCentered(_display->width() / 2, 36, "Restarting...");
+  _display->endFrame();
+}
+
 void UITask::loop() {
   pollButton();
+
+  if (_restart_notice && _display) {
+    if (millis() >= _next_refresh) {
+      showRestartNotice();
+      _next_refresh = millis() + 1000;
+    }
+    if (_restart_after != 0 && (long)(millis() - _restart_after) >= 0) {
+      _restart_after = 0;
+      the_mesh.applyWifiConfig();
+      _restart_notice = false;
+    }
+    return;
+  }
 
   if (_display->isOn()) {
     if (millis() >= _next_refresh) {

@@ -73,8 +73,8 @@ CYR_EINK = CyrFont(*_cyr, "CYR_EINK")
 CYR_EINK2 = CyrFont(*_cyr, "CYR_EINK2")
 ICONS = parse_c(os.path.join(ROOT, "examples", "companion_radio", "ui-new", "icons.h"))[0]
 with open(os.path.join(ROOT, "src", "helpers", "FirmwareVersion.h"), encoding="utf-8") as _f:
-    _ver = dict(re.findall(r'#define\s+(MESHCORE_BASE_VERSION|FORK_VERSION)\s+"([^"]*)"', _f.read()))
-VERSION = "%s-%s" % (_ver["MESHCORE_BASE_VERSION"], _ver["FORK_VERSION"])
+    _ver = dict(re.findall(r'#define\s+(FORK_VERSION)\s+"([^"]*)"', _f.read()))
+VERSION = _ver["FORK_VERSION"]
 
 
 def load_gfx_font(name):

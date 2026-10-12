@@ -80,6 +80,8 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   //    fs->remove("/com_prefs");  // remove old
     }
   }
+  _prefs->tx_led = _prefs->tx_led ? 1 : 0;
+  mesh::MainBoard::setTxLedEnabled(_prefs->tx_led != 0);
 }
 
 void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy prefs loader
@@ -638,6 +640,16 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     _prefs->cad_enabled = memcmp(&config[4], "on", 2) == 0;
     savePrefs();
     strcpy(reply, "OK");
+  } else if (memcmp(config, "tx.led ", 7) == 0) {
+    const char* value = &config[7];
+    if (strcmp(value, "on") != 0 && strcmp(value, "off") != 0) {
+      strcpy(reply, "Error: on or off");
+    } else {
+      _prefs->tx_led = strcmp(value, "on") == 0;
+      mesh::MainBoard::setTxLedEnabled(_prefs->tx_led != 0);
+      savePrefs();
+      strcpy(reply, "OK");
+    }
   } else if (memcmp(config, "agc.reset.interval ", 19) == 0) {
     _prefs->agc_reset_interval = atoi(&config[19]) / 4;
     savePrefs();
@@ -1224,6 +1236,8 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     sprintf(reply, "> %d", (uint32_t) _prefs->interference_threshold);
   } else if (memcmp(config, "cad", 3) == 0) {
     sprintf(reply, "> %s", _prefs->cad_enabled ? "on" : "off");
+  } else if (memcmp(config, "tx.led", 6) == 0) {
+    sprintf(reply, "> %s", _prefs->tx_led ? "on" : "off");
   } else if (memcmp(config, "agc.reset.interval", 18) == 0) {
     sprintf(reply, "> %d", ((uint32_t) _prefs->agc_reset_interval) * 4);
   } else if (memcmp(config, "multi.acks", 10) == 0) {
@@ -1594,10 +1608,20 @@ void CommonCLI::handleRegionCmd(char* command, char* reply) {
   } else if (n >= 3 && strcmp(parts[1], "remove") == 0) {
     auto region = _region_map->findByName(parts[2]);
     if (region) {
-      if (_region_map->removeRegion(*region)) {
+      auto def = _region_map->getDefaultRegion();
+      auto home = _region_map->getHomeRegion();
+      uint16_t def_id = def ? def->id : 0;
+      uint16_t home_id = (home && !home->isWildcard()) ? home->id : 0;
+      uint16_t id = region->id;
+      if (_region_map->removeRegionRecursive(id)) {
+        if (def_id && !_region_map->findById(def_id)) {
+          _region_map->setDefaultRegion(NULL);
+          _callbacks->onDefaultRegionChanged(NULL);
+        }
+        if (home_id && !_region_map->findById(home_id)) _region_map->setHomeRegion(NULL);
         strcpy(reply, "OK");
       } else {
-        strcpy(reply, "Err - not empty");
+        strcpy(reply, "Err - remove failed");
       }
     } else {
       strcpy(reply, "Err - not found");

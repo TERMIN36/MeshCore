@@ -25,6 +25,7 @@
 
 // Station WiFi power while MQTT is up. None is the always-on radio.
 // Modem sleeps the WiFi radio between beacons. Light adds CPU light sleep.
+// A clean firmware starts at Light. A saved prefs value replaces it.
 #define WIFI_POWER_NONE       0
 #define WIFI_POWER_MODEM      1
 #define WIFI_POWER_LIGHT      2
@@ -85,6 +86,7 @@ public:
   uint8_t path_hash_mode = 0;   // which path mode to use when sending
   uint8_t loop_detect = 0;
   uint8_t cad_enabled = 0;      // hardware Channel Activity Detection before TX (boolean)
+  uint8_t tx_led = 1;           // blink the board LED while transmitting
   uint8_t extra_sf[4];
   uint8_t time_valid = 0;       // 1 once GPS, admin, or a trusted node has set the clock
   uint8_t clock_nodes[CLOCK_NODE_MAX][32];  // pubkeys to poll for time; empty slots are zeros
@@ -99,7 +101,7 @@ public:
   float mqtt_ant_m = 0;
   // Station WiFi. MQTT uses this link and does not keep its own SSID.
   uint8_t wifi_enabled = 0;
-  uint8_t wifi_ps = WIFI_POWER_NONE;
+  uint8_t wifi_ps = WIFI_POWER_LIGHT;
   char wifi_ssid[33] = {};
   char wifi_wpass[64] = {};
   // NTP over station WiFi. Empty server means unset; enabling fills pool.ntp.org.
@@ -129,6 +131,7 @@ private:
       def("hs", _parent->home_sf);
       def("hc", _parent->home_cr);
       def("cad", _parent->cad_enabled);
+      def("txled", _parent->tx_led);
       def("int_thr", _parent->interference_threshold);
       def("rxgain", _parent->rx_boosted_gain);
       def("fem_rxgain", _parent->radio_fem_rxgain);

@@ -19,6 +19,14 @@ class SerialBLEInterface : public BaseSerialInterface, BLESecurityCallbacks, BLE
   uint32_t _pin_code;
   unsigned long _last_write;
   unsigned long adv_restart_time;
+  esp_bd_addr_t peer_addr;
+  bool peer_known;
+  uint8_t conn_mode;
+  uint16_t conn_idle_units;
+  unsigned long conn_params_after;
+  unsigned long conn_fast_until;
+  unsigned long conn_update_not_before;
+  void maintainConnParams();
 
   struct Frame {
     uint8_t len;
@@ -61,6 +69,12 @@ public:
     _isEnabled = false;
     _last_write = 0;
     last_conn_id = 0;
+    peer_known = false;
+    conn_mode = 0;
+    conn_idle_units = 0;
+    conn_params_after = 0;
+    conn_fast_until = 0;
+    conn_update_not_before = 0;
     recv_queue = xQueueCreateStatic(
       FRAME_QUEUE_SIZE, sizeof(Frame), recv_queue_storage, &recv_queue_state
     );
@@ -81,6 +95,8 @@ public:
   bool isEnabled() const override { return _isEnabled; }
 
   bool isConnected() const override;
+  // True from the radio link up, including pairing, before authentication finishes.
+  bool isLinkUp() const;
 
   bool isWriteBusy() const override;
   size_t writeFrame(const uint8_t src[], size_t len) override;

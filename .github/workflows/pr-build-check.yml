@@ -8,6 +8,8 @@ on:
       - 'examples/**'
       - 'variants/**'
       - 'platformio.ini'
+      - 'arch/esp32/**'
+      - '.github/actions/setup-build-environment/**'
       - '.github/workflows/pr-build-check.yml'
   push:
     branches: [main, dev]
@@ -16,6 +18,8 @@ on:
       - 'examples/**'
       - 'variants/**'
       - 'platformio.ini'
+      - 'arch/esp32/**'
+      - '.github/actions/setup-build-environment/**'
       - '.github/workflows/pr-build-check.yml'
 
 jobs:
@@ -42,6 +46,8 @@ jobs:
           - wio-e5-mini_repeater
           # ESP32-C6
           - LilyGo_Tlora_C6_repeater_
+          # ESP32-C3
+          - Xiao_C3_repeater
           # LR1110 (nRF52)
           - wio_wm1110_repeater
           # SX1276 (ESP32)

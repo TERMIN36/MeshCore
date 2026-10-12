@@ -18,6 +18,8 @@ jobs:
 
       - name: Setup Build Environment
         uses: ./.github/actions/setup-build-environment
+        with:
+          pm_frameworks: false
 
       - name: Run Unit Tests
         run: pio test -e native -e native_kiss_modem -vv

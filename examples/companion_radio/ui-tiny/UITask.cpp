@@ -1,4 +1,5 @@
 #include "UITask.h"
+#include "../CompanionLink.h"
 #include <helpers/TxtDataHelpers.h>
 #include <helpers/ui/BatteryLevel.h>
 #include "../MyMesh.h"
@@ -21,10 +22,23 @@
   #define BATT_MAX_MILLIVOLTS 4200
 #endif
 
-static uint16_t stableBattMilliVolts(uint16_t raw) {
+// Set when the display turns on. The next status-bar update discards the
+// stale window and latches the voltage measured at wake.
+static bool s_fresh_batt = false;
+
+static uint16_t stableBattMilliVolts(uint16_t raw, bool fresh) {
   static BatteryLevelFilter filter;
-  filter.push(raw, BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS);
+  if (fresh) filter.latch(raw, BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS);
+  else filter.push(raw, BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS);
   return filter.displayMilliVolts(BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS);
+}
+
+static uint16_t medianBattMilliVolts(UITask* task) {
+  uint16_t reads[BatteryLevelFilter::WINDOW];
+  for (int i = 0; i < BatteryLevelFilter::WINDOW; i++) {
+    reads[i] = task->getBattMilliVolts();
+  }
+  return BatteryLevelFilter::median(reads, BatteryLevelFilter::WINDOW);
 }
 
 #ifdef PIN_STATUS_LED
@@ -253,12 +267,16 @@ public:
       display.drawTextRightAlign(display.width(), 26, tmp);
 
     } else if (_page == HomePage::BLUETOOTH) {
+      uint8_t link_mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
+      const char* name = "BLE";
+      if (link_mode == LINK_MODE_WIFI) name = "WiFi";
+      else if (link_mode == LINK_MODE_OFF) name = "off";
       display.setColor(UIColor::corp_blue);
       display.drawXbm((display.width() - 32) / 2, 8,
-          _task->isBluetoothEnabled() ? bluetooth_on : bluetooth_off,
+          link_mode == LINK_MODE_BLE ? bluetooth_on : bluetooth_off,
           32, 32);
       display.setTextSize(1);
-      // display.drawTextCentered(display.width() / 2, 40 - 11, "toggle: " PRESS_LABEL);
+      display.drawTextCentered(display.width() / 2, 42, name);
 #if ENV_INCLUDE_GPS == 1
     } else if (_page == HomePage::GPS) {
       LocationProvider* nmea = sensors.getLocationProvider();
@@ -402,11 +420,25 @@ public:
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::BLUETOOTH) {
-      if (_task->isBluetoothEnabled()) {  // toggle Bluetooth on/off
+#if defined(BLE_PIN_CODE)
+      uint8_t mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
+#if defined(ESP32) && !defined(WIFI_SSID)
+      if (mode == LINK_MODE_BLE) mode = LINK_MODE_WIFI;
+      else if (mode == LINK_MODE_WIFI) mode = LINK_MODE_OFF;
+      else mode = LINK_MODE_BLE;
+#else
+      mode = mode == LINK_MODE_OFF ? LINK_MODE_BLE : LINK_MODE_OFF;
+#endif
+      if (_node_prefs) _node_prefs->link_mode = mode;
+      the_mesh.savePrefs();
+      companionApplyLink();
+#else
+      if (_task->isBluetoothEnabled()) {
         _task->disableBluetooth();
       } else {
         _task->enableBluetooth();
       }
+#endif
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::RECENT) {
@@ -444,7 +476,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _display = display;
   _sensors = sensors;
   _auto_off = millis() + AUTO_OFF_MILLIS;
-  _cached_batt_mv = stableBattMilliVolts(getBattMilliVolts());
+  _cached_batt_mv = stableBattMilliVolts(medianBattMilliVolts(this), true);
 
 #if defined(PIN_USER_BTN)
   user_btn.begin();
@@ -528,6 +560,7 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   if (_display != NULL) {
     if (!_display->isOn() && !hasConnection()) {
       _display->turnOn();
+      s_fresh_batt = true;
     }
     if (_display->isOn()) {
     _auto_off = millis() + AUTO_OFF_MILLIS;  // extend the auto-off timer
@@ -684,7 +717,12 @@ void UITask::loop() {
   if (curr) curr->poll();
 
   if (_display != NULL && _display->isOn()) {
-        _statusBar.update(*_display,
+    if (s_fresh_batt) {
+      s_fresh_batt = false;
+      _cached_batt_mv = stableBattMilliVolts(medianBattMilliVolts(this), true);
+      next_batt_chck = millis() + 8000;
+    }
+    _statusBar.update(*_display,
         _node_prefs->node_name,
         _cached_batt_mv,
         isBuzzerQuiet(),
@@ -742,7 +780,7 @@ void UITask::loop() {
 #ifdef AUTO_SHUTDOWN_MILLIVOLTS
   if (millis() > next_batt_chck) {
     uint16_t milliVolts = getBattMilliVolts();
-    _cached_batt_mv = stableBattMilliVolts(milliVolts);
+    _cached_batt_mv = stableBattMilliVolts(milliVolts, false);
     if (milliVolts > 0 && milliVolts < AUTO_SHUTDOWN_MILLIVOLTS) {
       if(!board.isExternalPowered()) {
         if (_display != NULL) {
@@ -761,7 +799,7 @@ void UITask::loop() {
   }
 #else
   if (_display != NULL && _display->isOn() && millis() >= next_batt_chck) {
-    _cached_batt_mv = stableBattMilliVolts(getBattMilliVolts());
+    _cached_batt_mv = stableBattMilliVolts(getBattMilliVolts(), false);
     next_batt_chck = millis() + 8000;
   }
 #endif
@@ -771,6 +809,7 @@ char UITask::checkDisplayOn(char c) {
   if (_display != NULL) {
     if (!_display->isOn()) {
       _display->turnOn();   // turn display on and consume event
+      s_fresh_batt = true;
       c = 0;
     }
     _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer

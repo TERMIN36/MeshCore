@@ -28,6 +28,20 @@ struct RepeaterClockSource {
 #ifndef REPEATER_PAGE_CLOCKS
 #define REPEATER_PAGE_CLOCKS 16
 #endif
+#ifndef REPEATER_PAGE_REGIONS
+#define REPEATER_PAGE_REGIONS 32
+#endif
+
+struct RepeaterRegionEntry {
+  char name[31];
+  char parent[31];
+  uint8_t depth;
+  uint8_t flood_ok;
+  uint8_t is_default;
+  uint8_t is_home;
+  uint32_t rx;
+  uint32_t fwd;
+};
 
 struct RepeaterPageInfo {
   char name[32];
@@ -39,6 +53,8 @@ struct RepeaterPageInfo {
   char ip[16];
   uint8_t wifi_ps;
   uint8_t wifi_ps_active;
+  uint8_t wifi_up;
+  int8_t wifi_rssi;
   char ntp_server[64];
   char mqtt[24];
   char tel[24];
@@ -118,8 +134,21 @@ struct RepeaterPageInfo {
   uint32_t flood_rx;
   uint32_t direct_rx;
   uint32_t recv_errors;
+  uint8_t region_count;
+  uint8_t wildcard_flood;
+  char region_default[31];
+  char region_home[31];
+  uint32_t region_unscoped_rx;
+  uint32_t region_unscoped_fwd;
+  uint32_t region_drop_unknown;
+  uint32_t region_drop_denied;
+  uint32_t region_drop_unscoped;
+  uint32_t region_drop_hop;
+  uint32_t region_drop_loop;
+  uint32_t region_drop_nofwd;
   RepeaterClockSource clocks[REPEATER_PAGE_CLOCKS];
   RepeaterNeighbour neighbours[REPEATER_PAGE_NEIGHBOURS];
+  RepeaterRegionEntry regions[REPEATER_PAGE_REGIONS];
 };
 
 // Posted from the status page and applied on the main loop.
@@ -163,9 +192,28 @@ struct RepeaterNodeForm {
   uint8_t flood_hours;
 };
 
+enum : uint8_t {
+  REGION_OP_FLOOD = 1,
+  REGION_OP_ADD = 2,
+  REGION_OP_REMOVE = 3,
+  REGION_OP_DEFAULT = 4,
+  REGION_OP_HOME = 5
+};
+
+struct RepeaterRegionForm {
+  uint8_t op;
+  uint8_t flood_ok;
+  char name[31];
+  char parent[31];
+};
+
 // HTTP status page. Starts once the station has an address, stops when WiFi is off, and binds again if the address changes.
 class RepeaterWeb {
 public:
   void poll(bool enabled);
   void stop();
+  bool commandQueued() const;
+  bool viewerConnected() const;
+  // A queued command or a firmware upload. The CPU should not light-sleep.
+  bool webBusy() const;
 };

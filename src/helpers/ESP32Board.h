@@ -14,7 +14,11 @@
 #include <Wire.h>
 #include "soc/rtc.h"
 #include "esp_system.h"
+#include <esp_sleep.h>
+#include <driver/gpio.h>
 #include <driver/rtc_io.h>
+#include <esp_timer.h>
+#include <soc/gpio_struct.h>
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
 #include <driver/temp_sensor.h>
 #endif
@@ -23,12 +27,94 @@ class ESP32Board : public mesh::MainBoard {
 protected:
   uint8_t startup_reason;
   bool inhibit_sleep = false;
+  // GPIO0 has no pull while the pad is in its sleep config, so a low-level
+  // wakeup on the user button returns at once and the CPU never stays down.
+  static inline bool allowBtnWake = true;
   static inline portMUX_TYPE sleepMux = portMUX_INITIALIZER_UNLOCKED;
+
+  static void clearGpioInt(gpio_num_t pin) {
+    if ((int)pin < 0) return;
+    if ((int)pin < 32) GPIO.status_w1tc = 1U << (int)pin;
+    else GPIO.status1_w1tc.val = 1U << ((int)pin - 32);
+  }
+
+  // gpio_wakeup_enable hands an RTC pad to the RTC controller and can enable
+  // the sleep mux. Both survive esp_restart(), digitalRead stays low, and the
+  // button looks dead until the RESET pin clears the RTC domain.
+  static void releaseRtcPad(int pin) {
+    if (pin < 0 || pin >= GPIO_NUM_MAX) return;
+    gpio_num_t gpio = (gpio_num_t)pin;
+    gpio_sleep_sel_dis(gpio);
+    gpio_hold_dis(gpio);
+    gpio_wakeup_disable(gpio);
+    if (!rtc_gpio_is_valid_gpio(gpio)) return;
+    rtc_gpio_hold_dis(gpio);
+    rtc_gpio_wakeup_disable(gpio);
+    rtc_gpio_deinit(gpio);
+  }
+
+  static void restoreUserButton() {
+#if defined(PIN_USER_BTN)
+    if (PIN_USER_BTN < 0) return;
+    gpio_num_t button = (gpio_num_t)PIN_USER_BTN;
+    releaseRtcPad(PIN_USER_BTN);
+    gpio_reset_pin(button);
+    gpio_set_direction(button, GPIO_MODE_INPUT);
+#if (USER_BTN_PRESSED) == LOW
+    gpio_set_pull_mode(button, GPIO_PULLUP_ONLY);
+#else
+    gpio_set_pull_mode(button, GPIO_PULLDOWN_ONLY);
+#endif
+    gpio_sleep_sel_dis(button);
+#endif
+  }
+
+  // The Arduino GPIO trampoline is in flash. A packet edge during light sleep
+  // used to run it before the cache was back and reboot the chip, so the
+  // interrupt was masked and the CPU only woke for the noise-floor timer
+  // (about 2 s, or 5 s). installSafeRadioIsr replaces that trampoline with
+  // an IRAM handler. Light sleep still needs a level wake: the edge ISR does
+  // not run while the CPU clock is gated.
+  static inline bool radio_irq_held = false;
+  static inline bool radio_isr_safe = false;
+  static inline void (*radio_isr_hook)() = nullptr;
+
+  static void IRAM_ATTR radioWakeIsr(void* arg);
+
+  void holdRadioIrq(bool hold) {
+    gpio_num_t pin = (gpio_num_t)getIRQGpio();
+    if ((int)pin < 0 || (int)pin >= GPIO_NUM_MAX) return;
+    if (hold && !radio_isr_safe) {
+      gpio_intr_disable(pin);
+      radio_irq_held = true;
+      return;
+    }
+    if (hold) {
+      radio_irq_held = true;
+      gpio_sleep_sel_dis(pin);
+      gpio_set_intr_type(pin, GPIO_INTR_POSEDGE);
+      gpio_intr_enable(pin);
+      return;
+    }
+    radio_irq_held = false;
+    gpio_set_intr_type(pin, GPIO_INTR_POSEDGE);
+    gpio_intr_enable(pin);
+  }
+
+  void restoreRadioIrq() {
+    if (radio_irq_held) return;
+    holdRadioIrq(false);
+  }
 
 public:
   void begin() {
     // for future use, sub-classes SHOULD call this from their begin()
-    startup_reason = BD_STARTUP_NORMAL;    
+    startup_reason = BD_STARTUP_NORMAL;
+    // A crash during light sleep leaves the RTC wake armed. Soft reset does
+    // not clear it, so the next boot wakes at once and looks like a reboot loop.
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    releaseRtcPad((int)getIRQGpio());
+    restoreUserButton();    
 
   #ifdef ESP32_CPU_FREQ
     setCpuFrequencyMhz(ESP32_CPU_FREQ);
@@ -99,6 +185,36 @@ public:
 
   bool canSelectMcuSleep() const override { return !inhibit_sleep; }
 
+  // Automatic light sleep (esp_pm), used while a manual esp_light_sleep_start()
+  // would drop Bluedroid. min frequency is the XTAL floor light sleep requires.
+  // Light sleep is accepted only when that minimum equals the crystal register.
+  // After a 240 MHz boot the register often holds the CPU clock. 32 MHz is a
+  // real crystal; any other reading on these boards is a 40 MHz crystal.
+  static uint32_t lightSleepXtalMhz() {
+    uint32_t xtal = getXtalFrequencyMhz();
+    if (xtal == 32 || xtal == 40) return xtal;
+    rtc_clk_xtal_freq_update(RTC_XTAL_FREQ_40M);
+    return 40;
+  }
+
+  bool setAutoLightSleep(bool enable);
+
+  // Block until timeout, or until LoRa DIO / the user button wakes the CPU.
+  //  0  waited
+  //  1  DIO is already high; the caller should service the radio
+  // -1  this pin cannot wake light sleep
+  int waitAutoLightSleep(uint32_t timeout_ms);
+
+  // Called from the LoRa DIO ISR. Wakes waitAutoLightSleep and stops a level storm.
+  static void IRAM_ATTR noteRadioIrqFromIsr();
+  // Replace Arduino's flash GPIO trampoline on the LoRa DIO pin. hook must be IRAM.
+  static void installSafeRadioIsr(void (*hook)(), uint32_t pin);
+  // Light sleep does not run a GPIO edge ISR: the CPU clock is gated. A high
+  // level on DIO is what wakes it. The ISR, if installed, is one-shot so a
+  // held line cannot storm, then the edge handler is restored.
+  bool armRadioLightWake();
+  void disarmRadioLightWake();
+
   void idleSleep(uint32_t timeout_ms) override {
     if (inhibit_sleep) {
       delay(1); // Give MCU to OTA or WiFi to run
@@ -106,43 +222,75 @@ public:
     }
 
     gpio_num_t wakeupPin = (gpio_num_t)getIRQGpio();
-#if defined(PIN_USER_BTN)
-    bool btn_wake = PIN_USER_BTN >= 0 && (int)PIN_USER_BTN != (int)wakeupPin;
-#endif
+    if ((int)wakeupPin < 0) return;
+
+    // Skip sleep if a LoRa packet is already waiting. The main loop's level
+    // poll calls setFlag(); the edge interrupt would already have missed it.
+    if (gpio_get_level(wakeupPin) == HIGH) {
+      delay(1);
+      return;
+    }
+
+    // The edge ISR stays for while the CPU is awake. Light sleep itself only
+    // wakes on the level source armed here; otherwise a packet waits for the
+    // noise-floor timer.
+    if (!armRadioLightWake() || esp_sleep_enable_gpio_wakeup() != ESP_OK) {
+      disarmRadioLightWake();
+      restoreRadioIrq();
+      delay(1);
+      return;
+    }
 
     if (timeout_ms > 0) {
       esp_sleep_enable_timer_wakeup((uint64_t)timeout_ms * 1000ULL);
     }
 
-    portENTER_CRITICAL(&sleepMux);
+#if defined(PIN_USER_BTN)
+    bool btn_wake = false;
+    gpio_num_t button = (gpio_num_t)PIN_USER_BTN;
+    int pressed = ((USER_BTN_PRESSED) == LOW) ? 0 : 1;
+    // Do not switch this pad to its sleep config. On GPIO0 that reads low
+    // and the low-level wakeup returns before the CPU has stayed asleep.
+    if (allowBtnWake && PIN_USER_BTN >= 0 && (int)button != (int)wakeupPin &&
+        gpio_get_level(button) != pressed &&
+        gpio_wakeup_enable(button,
+            (USER_BTN_PRESSED) == LOW ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL) == ESP_OK) {
+      btn_wake = true;
+      clearGpioInt(button);
+    }
+#else
+    gpio_num_t button = GPIO_NUM_NC;
+    bool btn_wake = false;
+    int pressed = 0;
+#endif
 
-    // Skip sleep if a LoRa packet is already waiting
+    // A packet that arrived while wakeup was being armed must not be slept through.
     if (gpio_get_level(wakeupPin) == HIGH) {
-      portEXIT_CRITICAL(&sleepMux);
+      if (btn_wake) restoreUserButton();
+      disarmRadioLightWake();
+      restoreRadioIrq();
       delay(1);
       return;
     }
 
-    esp_sleep_enable_gpio_wakeup();
-    gpio_wakeup_enable(wakeupPin, GPIO_INTR_HIGH_LEVEL);
-#if defined(PIN_USER_BTN)
-    if (btn_wake) {
-      gpio_wakeup_enable((gpio_num_t)PIN_USER_BTN,
-          (USER_BTN_PRESSED) == LOW ? GPIO_INTR_LOW_LEVEL : GPIO_INTR_HIGH_LEVEL);
-    }
-#endif
-
+    int64_t t0 = esp_timer_get_time();
     esp_light_sleep_start();
-
-    gpio_wakeup_disable(wakeupPin);
+    int64_t asleep = esp_timer_get_time() - t0;
+    bool dio_high = gpio_get_level(wakeupPin) == HIGH;
 #if defined(PIN_USER_BTN)
-    if (btn_wake) {
-      gpio_wakeup_disable((gpio_num_t)PIN_USER_BTN);
-    }
+    bool btn_down = PIN_USER_BTN >= 0 && gpio_get_level(button) == pressed;
+#else
+    bool btn_down = false;
 #endif
-    gpio_set_intr_type(wakeupPin, GPIO_INTR_POSEDGE);
 
-    portEXIT_CRITICAL(&sleepMux);
+    disarmRadioLightWake();
+    if (btn_wake) restoreUserButton();
+    restoreRadioIrq();
+
+    if (btn_wake && !dio_high && !btn_down && asleep < 2000 &&
+        esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
+      allowBtnWake = false;
+    }
   }
 
   void sleep(uint32_t secs) override {
@@ -153,6 +301,7 @@ public:
 
 #if defined(P_LORA_TX_LED)
   void onBeforeTransmit() override {
+    if (!isTxLedEnabled()) return;
     digitalWrite(P_LORA_TX_LED, HIGH);   // turn TX LED on
   }
   void onAfterTransmit() override {
@@ -162,6 +311,7 @@ public:
   #define NEOPIXEL_BRIGHTNESS    64  // white brightness (max 255)
 
   void onBeforeTransmit() override {
+    if (!isTxLedEnabled()) return;
     neopixelWrite(P_LORA_TX_NEOPIXEL_LED, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS, NEOPIXEL_BRIGHTNESS);   // turn TX neopixel on (White)
   }
   void onAfterTransmit() override {

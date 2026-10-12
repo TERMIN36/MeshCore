@@ -1,9 +1,11 @@
 
 #define RADIOLIB_STATIC_ONLY 1
+#include <Arduino.h>
 #include "RadioLibWrappers.h"
 
 #if defined(ESP32)
 #include <esp_pm.h>
+#include <helpers/ESP32Board.h>
 #endif
 
 // Hardware CAD is a few symbols. This still covers SF12 at 62.5 kHz, and it
@@ -53,7 +55,7 @@ static bool irqPinValid(uint32_t pin) {
 #define STATE_TX_DONE    4
 #define STATE_INT_READY 16
 
-#define NUM_NOISE_FLOOR_SAMPLES  64
+#define NUM_NOISE_FLOOR_SAMPLES  8
 #define SAMPLING_THRESHOLD  14
 
 static volatile uint8_t state = STATE_IDLE;
@@ -67,10 +69,18 @@ static
 void setFlag(void) {
   // we sent a packet, set the flag
   state |= STATE_INT_READY;
+#if defined(ESP32)
+  ESP32Board::noteRadioIrqFromIsr();
+#endif
 }
 
 void RadioLibWrapper::begin() {
   _radio->setPacketReceivedAction(setFlag);  // this is also SentComplete interrupt
+#if defined(ESP32)
+  // attachInterrupt just installed Arduino's flash trampoline. Swap in the
+  // IRAM handler so a packet edge can wake light sleep without rebooting.
+  ESP32Board::installSafeRadioIsr(setFlag, _board->getIRQGpio());
+#endif
   _preamble_sf = getSpreadingFactor();
   _radio->setPreambleLength(preambleLengthForSF(_preamble_sf)); // longer preamble for lower SF improves reliability
   state = STATE_IDLE;
@@ -80,6 +90,8 @@ void RadioLibWrapper::begin() {
   }
 
   _noise_floor = 0;
+  _noise_floor_hold = 0;
+  _floor_open = false;
   _threshold = 0;
   _cad_enabled = false;
   _nf_paused = false;
@@ -110,6 +122,14 @@ void RadioLibWrapper::triggerNoiseFloorCalibrate(int threshold) {
   }
 }
 
+void RadioLibWrapper::repeatNoiseFloor() {
+  if (_nf_paused) return;
+  if (_num_floor_samples >= NUM_NOISE_FLOOR_SAMPLES) {
+    _num_floor_samples = 0;
+    _floor_sample_sum = 0;
+  }
+}
+
 void RadioLibWrapper::doResetAGC() {
   _radio->sleep();  // warm sleep to reset analog frontend
 }
@@ -121,11 +141,9 @@ void RadioLibWrapper::resetAGC() {
   doResetAGC();
   state = STATE_IDLE;   // trigger a startReceive()
 
-  // Reset noise floor sampling so it reconverges from scratch.
-  // Without this, a stuck _noise_floor of -120 makes the sampling threshold
-  // too low (-106) to accept normal samples (~-105), self-reinforcing the
-  // stuck value even after the receiver has recovered.
-  _noise_floor = 0;
+  // Reopen acceptance so a floor clamped at -120 can rise again, but keep the
+  // number on the web. Clearing it to 0 showed up as a one-frame glitch.
+  _floor_open = true;
   _num_floor_samples = 0;
   _floor_sample_sum = 0;
 }
@@ -137,18 +155,36 @@ void RadioLibWrapper::loop() {
   if (irqPinValid(irq) && digitalRead((uint8_t)irq) == HIGH) setFlag();
 
   if (_nf_paused) return;
-  if (state == STATE_RX && _num_floor_samples < NUM_NOISE_FLOOR_SAMPLES) {
-    if (!isReceivingPacket()) {
-      int rssi = getCurrentRSSI();
-      if (rssi < _noise_floor + SAMPLING_THRESHOLD) {  // only consider samples below current floor + sampling THRESHOLD
+  // STATE_INT_READY is OR-ed in when DIO is high. Sampling must still run,
+  // or a held line leaves the published floor at its initial 0.
+  bool in_rx = (state & ~STATE_INT_READY) == STATE_RX;
+  if (in_rx && _num_floor_samples < NUM_NOISE_FLOOR_SAMPLES) {
+    // One sample per loop stays at 0 on the web for about a minute of
+    // light sleep. A single pass finishes the average.
+    int misses = 0;
+    for (int n = 0; n < NUM_NOISE_FLOOR_SAMPLES && _num_floor_samples < NUM_NOISE_FLOOR_SAMPLES; n++) {
+      if (isReceivingPacket()) break;
+      int rssi = (int)getCurrentRSSI();
+      // Instant RSSI is negative. 0 means the SPI read failed.
+      if (rssi >= 0 || rssi < -140) {
+        if (++misses >= 4) break;
+        continue;
+      }
+      misses = 0;
+      int gate = _floor_open ? 0 : (int)_noise_floor;
+      if (rssi < gate + SAMPLING_THRESHOLD) {
         _num_floor_samples++;
         _floor_sample_sum += rssi;
       }
     }
-  } else if (_num_floor_samples >= NUM_NOISE_FLOOR_SAMPLES && _floor_sample_sum != 0) {
-    _noise_floor = _floor_sample_sum / NUM_NOISE_FLOOR_SAMPLES;
-    if (_noise_floor < -120) {
-      _noise_floor = -120;    // clamp to lower bound of -120dBi
+  }
+  if (_num_floor_samples >= NUM_NOISE_FLOOR_SAMPLES && _floor_sample_sum != 0) {
+    int average = _floor_sample_sum / NUM_NOISE_FLOOR_SAMPLES;
+    if (average < -120) average = -120;
+    if (average < 0) {
+      _noise_floor = (int16_t)average;
+      _noise_floor_hold = _noise_floor;
+      _floor_open = false;
     }
     _floor_sample_sum = 0;
 
@@ -213,7 +249,19 @@ uint32_t RadioLibWrapper::getEstAirtimeFor(int len_bytes) {
 }
 
 bool RadioLibWrapper::startSendRaw(const uint8_t* bytes, int len) {
+  // Keep the radio-path work in onBeforeTransmit, then put the indicator
+  // back if the user turned the transmit LED off.
+#if defined(P_LORA_TX_LED)
+  int tx_led_idle = mesh::MainBoard::isTxLedEnabled() ? -1 : digitalRead(P_LORA_TX_LED);
+#endif
   _board->onBeforeTransmit();
+#if defined(P_LORA_TX_LED)
+  if (tx_led_idle >= 0) digitalWrite(P_LORA_TX_LED, (uint8_t)tx_led_idle);
+#elif defined(P_LORA_TX_NEOPIXEL_LED)
+  if (!mesh::MainBoard::isTxLedEnabled()) neopixelWrite(P_LORA_TX_NEOPIXEL_LED, 0, 0, 0);
+#elif defined(NEOPIXEL_LED)
+  if (!mesh::MainBoard::isTxLedEnabled()) neopixelWrite(NEOPIXEL_LED, 0, 0, 0);
+#endif
   int err = _radio->startTransmit((uint8_t *) bytes, len);
   if (err == RADIOLIB_ERR_NONE) {
     state = STATE_TX_WAIT;

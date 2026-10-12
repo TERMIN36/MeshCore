@@ -12,7 +12,13 @@ class UITask {
   char _version_info[32];
   unsigned long _powering_off_at = 0;
   unsigned long _started_at = 0;
+  unsigned long _awake_until = 0;
   uint8_t _page = 0;
+  // A pad left in RTC mode reads held across a software reset. Ignore it
+  // until a release, or the boot screen ends in a power-off restart.
+  bool _btn_live = false;
+  unsigned long _restart_after = 0;
+  bool _restart_notice = false;
 
   void renderCurrScreen();
   void renderStatusScreen();
@@ -26,4 +32,8 @@ public:
 
   void pollButton();
   void loop();
+  // Shown once, just before a restart that drops the CPU back to the idle clock.
+  void showRestartNotice();
+  // Screen refresh and the click window need the CPU. Off-screen idle can sleep.
+  bool keepsCpuAwake() const;
 };

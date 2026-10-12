@@ -3,18 +3,18 @@
 #include <stddef.h>
 #include <string.h>
 
-// Firmware version is "<upstream MeshCore release>-<fork version>", e.g. v1.17.1-0.1.3.
+// Own fork version line (no upstream MeshCore version prefix).
 // Release tags must match it exactly; build.sh appends "-<commit hash>".
-// A candidate tag may add a suffix, for example v1.17.1-0.1.3-rc1.
-#define MESHCORE_BASE_VERSION  "v1.17.1"
-#define FORK_VERSION           "0.1.4"
+// A candidate tag may add a suffix, for example v0.2.0-rc4.
+// Device-facing builds can override FIRMWARE_VERSION (e.g. termin36-v0.2.0-rc4).
+#define FORK_VERSION  "v0.2.0"
 
 #ifndef FIRMWARE_VERSION
-  #define FIRMWARE_VERSION  MESHCORE_BASE_VERSION "-" FORK_VERSION
+  #define FIRMWARE_VERSION  FORK_VERSION
 #endif
 
 // Copies the version without the trailing "-<commit hash>" added by build.sh:
-// v1.17.1-0.1.3-abc1234 -> v1.17.1-0.1.3
+// termin36-v0.2.0-rc4-abc1234 -> termin36-v0.2.0-rc4
 inline void firmwareVersionNoHash(char* dest, size_t size, const char* ver) {
   if (size == 0) return;
   size_t len = strlen(ver);

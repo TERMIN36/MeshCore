@@ -721,8 +721,11 @@ bool EnvironmentSensorManager::setSettingValue(const char* name, const char* val
     return true;
   }
   if (strcmp(name, "gps_interval") == 0) {
-    uint32_t interval_seconds = atoi(value);
+    uint32_t interval_seconds = (uint32_t)atoi(value);
+    gps_power_interval_sec = interval_seconds;
     gps_update_interval_sec = interval_seconds > 0 ? interval_seconds : 1;
+    if (gps_active && gpsUsesWindows()) gps_force_window = true;
+    else if (gps_active) powerGps(true);
     return true;
   }
   #endif
@@ -837,6 +840,7 @@ bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin){
     gpsResetPin = ioPin;
     i2cGPSFlag = true;
     gps_active = true;
+    gps_powered = true;
     gps_detected = true;
 
     _location = &RAK12500_provider;
@@ -850,6 +854,7 @@ bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin){
 #endif
     serialGPSFlag = true;
     gps_active = true;
+    gps_powered = true;
     gps_detected = true;
     return true;
   }
@@ -860,35 +865,75 @@ bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin){
 }
 #endif
 
+bool EnvironmentSensorManager::gpsUsesWindows() const {
+  if (!gps_active || gps_power_interval_sec == 0) return false;
+#ifdef PERSISTANT_GPS
+  return false;
+#elif defined(RAK_WISBLOCK_GPS)
+  return gpsResetPin != 0;
+#else
+  return _location && _location->canPowerOff();
+#endif
+}
+
+void EnvironmentSensorManager::powerGps(bool on) {
+  if (on == gps_powered) return;
+#ifdef RAK_WISBLOCK_GPS
+  pinMode(gpsResetPin, OUTPUT);
+  digitalWrite(gpsResetPin, on ? HIGH : LOW);
+  gps_powered = on;
+  return;
+#else
+  if (on) {
+    _location->begin();
+    _location->reset();
+#ifndef PIN_GPS_EN
+    MESH_DEBUG_PRINTLN("Start GPS is N/A on this board. Actual GPS state unchanged");
+#endif
+  } else {
+    _location->stop();
+#ifndef PIN_GPS_EN
+    MESH_DEBUG_PRINTLN("Stop GPS is N/A on this board. Actual GPS state unchanged");
+#endif
+  }
+  gps_powered = on;
+#endif
+}
+
+void EnvironmentSensorManager::serviceGpsWindow() {
+  uint32_t now = millis();
+  if (!gps_window_on) {
+    if (!gps_force_window && (long)(now - gps_window_deadline) < 0) return;
+    powerGps(true);
+    _location->syncTime(); // drop a fix left over from the previous window
+    gps_window_on = true;
+    gps_force_window = false;
+    gps_window_deadline = now + GPS_ON_WINDOW_MS;
+  }
+  if (gps_powered) _location->loop();
+  if (_location->isValid() || (long)(now - gps_window_deadline) >= 0) {
+    if (_location->isValid()) {
+      node_lat = ((double)_location->getLatitude()) / 1000000.;
+      node_lon = ((double)_location->getLongitude()) / 1000000.;
+      node_altitude = ((double)_location->getAltitude()) / 1000.0;
+    }
+    powerGps(false);
+    gps_window_on = false;
+    gps_window_deadline = now + gps_power_interval_sec * 1000UL;
+  }
+}
+
 void EnvironmentSensorManager::start_gps() {
   gps_active = true;
-  #ifdef RAK_WISBLOCK_GPS
-    pinMode(gpsResetPin, OUTPUT);
-    digitalWrite(gpsResetPin, HIGH);
-    return;
-  #endif
-
-  _location->begin();
-  _location->reset();
-
-#ifndef PIN_GPS_EN
-  MESH_DEBUG_PRINTLN("Start GPS is N/A on this board. Actual GPS state unchanged");
-#endif
+  if (gpsUsesWindows()) gps_force_window = true;
+  else powerGps(true);
 }
 
 void EnvironmentSensorManager::stop_gps() {
   gps_active = false;
-  #ifdef RAK_WISBLOCK_GPS
-    pinMode(gpsResetPin, OUTPUT);
-    digitalWrite(gpsResetPin, LOW);
-    return;
-  #endif
-
-  _location->stop();
-
-  #ifndef PIN_GPS_EN
-  MESH_DEBUG_PRINTLN("Stop GPS is N/A on this board. Actual GPS state unchanged");
-  #endif
+  gps_force_window = false;
+  gps_window_on = false;
+  powerGps(false);
 }
 #endif // ENV_INCLUDE_GPS
 
@@ -897,9 +942,8 @@ void EnvironmentSensorManager::loop() {
 
   #if ENV_INCLUDE_GPS
   static unsigned long next_gps_update = 0;
-  if (gps_active) {
-    _location->loop();
-  }
+  if (gpsUsesWindows()) serviceGpsWindow();
+  else if (gps_active) _location->loop();
   if ((long)(millis() - next_gps_update) > 0) {
 
     if(gps_active){
@@ -948,3 +992,36 @@ void EnvironmentSensorManager::loop() {
   #endif  // ENV_INCLUDE_BME680_BSEC
 }
 #endif // ENV_INCLUDE_GPS || ENV_INCLUDE_BME680_BSEC
+
+bool EnvironmentSensorManager::gpsHoldsCpu() const {
+#if ENV_INCLUDE_GPS
+  if (!gps_active) return false;
+  if (!gpsUsesWindows()) return true;
+  return gps_powered;
+#else
+  return false;
+#endif
+}
+
+void EnvironmentSensorManager::noteGpsDeadline(uint32_t ms_until) {
+#if ENV_INCLUDE_GPS
+  if (!gpsUsesWindows() || gps_powered || gps_window_on) return;
+  if (_location && _location->isValid()) return;
+  if (ms_until <= GPS_ON_WINDOW_MS) gps_force_window = true;
+#else
+  (void)ms_until;
+#endif
+}
+
+uint32_t EnvironmentSensorManager::millisUntilGpsWake() const {
+#if ENV_INCLUDE_GPS
+  if (!gpsUsesWindows() || gps_powered || gps_force_window) {
+    return gps_force_window ? 0 : 0xFFFFFFFFu;
+  }
+  long left = (long)(gps_window_deadline - millis());
+  if (left < 0) return 0;
+  return (uint32_t)left;
+#else
+  return 0xFFFFFFFFu;
+#endif
+}

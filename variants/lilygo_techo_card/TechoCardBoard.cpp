@@ -58,6 +58,7 @@ uint16_t TechoCardBoard::getBattMilliVolts() {
 }
 
 void TechoCardBoard::onBeforeTransmit() {
+    if (!isTxLedEnabled()) return;
     Led_A.setPixelColor(0, 20, 20, 20);   // turn TX LED on
     Led_A.show();
 }

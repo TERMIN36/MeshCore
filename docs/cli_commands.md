@@ -622,6 +622,20 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 ---
 
+#### Enable or disable the transmit LED
+**Usage:**
+- `get tx.led`
+- `set tx.led <on|off>`
+
+**Description:** When enabled, the board LED lights for the duration of each LoRa transmission. Turning it off leaves the radio path unchanged.
+
+**Parameters:**
+- `on|off`: Enable or disable the transmit indicator
+
+**Default:** `on`
+
+---
+
 #### View or change the AGC Reset Interval
 **Usage:**
 - `get agc.reset.interval`
@@ -879,7 +893,7 @@ region save
 **Parameters:**
 - `name`: Region name
 
-**Note:** Must remove all child regions before the region can be removed 
+**Note:** Removes the region and all nested child regions.
 
 ---
 
@@ -1170,6 +1184,18 @@ region save
 
 ---
 
+### Companion link (ESP32 BLE builds)
+
+On Companion builds with Bluetooth, the Link page and these commands choose how the phone connects. BLE and Wi-Fi are mutually exclusive.
+
+**Usage:**
+- `set link ble|wifi|off`
+- `set wifi.ssid <name>`
+- `set wifi.password <secret>` (alias `wifi.pwd`)
+- `get tx.led` / `set tx.led on|off` — board LED during LoRa TX only (default `on`)
+
+A clean firmware starts on the most economical Power profile (Eco max). A saved link mode is kept across reboot.
+
 ### Repeater Wi-Fi, MQTT bridge, and MeshCoreTel
 
 The ESP32 repeater web panel and these commands share one configuration. The web panel is `http://<address>` from the Wi-Fi screen. Sign in as `admin` with the repeater admin password.
@@ -1185,7 +1211,7 @@ The ESP32 repeater web panel and these commands share one configuration. The web
 - `get wifi.password`
 - `get wifi.ps`
 
-`modem` sleeps the Wi-Fi radio between beacons. `light` also sleeps the CPU when the build allows it. MQTT stays connected in both modes.
+`modem` sleeps the Wi-Fi radio between beacons. `light` also sleeps the CPU when the build allows it. MQTT stays connected in both modes. A clean firmware starts at `light`. A saved setting is kept.
 
 #### MQTT bridge
 

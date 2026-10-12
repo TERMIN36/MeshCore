@@ -1,6 +1,12 @@
 #include "SerialWifiInterface.h"
 #include <WiFi.h>
 
+extern void companionNoteLinkActivity() __attribute__((weak));
+
+static void noteLinkActivity() {
+  if (companionNoteLinkActivity) companionNoteLinkActivity();
+}
+
 void SerialWifiInterface::begin(int port) {
   // wifi setup is handled outside of this class, only starts the server
   server.begin(port);
@@ -16,6 +22,10 @@ void SerialWifiInterface::enable() {
 
 void SerialWifiInterface::disable() {
   _isEnabled = false;
+  deviceConnected = false;
+  client.stop();
+  resetReceivedFrameHeader();
+  clearBuffers();
 }
 
 size_t SerialWifiInterface::writeFrame(const uint8_t src[], size_t len) {
@@ -25,6 +35,7 @@ size_t SerialWifiInterface::writeFrame(const uint8_t src[], size_t len) {
   }
 
   if (deviceConnected && len > 0) {
+    noteLinkActivity();
     if (send_queue_len >= FRAME_QUEUE_SIZE) {
       WIFI_DEBUG_PRINTLN("writeFrame(), send_queue is full!");
       return 0;
@@ -157,6 +168,7 @@ size_t SerialWifiInterface::checkRecvFrame(uint8_t dest[]) {
 
         // ready for next frame
         resetReceivedFrameHeader();
+        noteLinkActivity();
         return frame_length;
 
       }

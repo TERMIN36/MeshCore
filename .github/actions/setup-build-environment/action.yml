@@ -1,4 +1,12 @@
 name: Setup Build Environment
+description: Install PlatformIO and, for firmware jobs, the ESP32 power-management frameworks.
+
+inputs:
+  pm_frameworks:
+    description: Download the pm-cores release and point platformio.local.ini at it.
+    required: false
+    default: "true"
+
 runs:
   using: "composite"
   steps:
@@ -36,3 +44,151 @@ runs:
           VERSION_STRING=$(echo "$BRANCH_NAME" | tr '/' '-')
         fi
         echo "GIT_TAG_VERSION=${VERSION_STRING}" >> $GITHUB_ENV
+
+    - name: Write empty PlatformIO local config
+      if: inputs.pm_frameworks != 'true'
+      shell: bash
+      run: |
+        printf '%s\n' '; This job does not build ESP32 firmware. extra_configs requires this file.' \
+          > platformio.local.ini
+
+    - name: Resolve PM cores release
+      if: inputs.pm_frameworks == 'true'
+      id: pm-meta
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        if ! meta=$(gh release view pm-cores --repo "$GITHUB_REPOSITORY" --json assets \
+          --jq '[.assets[] | select(.name | test("framework-arduinoespressif32-.*-pm\\.tar\\.gz$")) | {name,size,updatedAt}] | sort_by(.name)'); then
+          echo "::error::Release pm-cores is missing. Run the Build PM Cores workflow before firmware builds."
+          exit 1
+        fi
+        count=$(printf '%s' "$meta" | jq 'length')
+        if [ "$count" -lt 4 ]; then
+          echo "::error::Release pm-cores has $count framework archives, expected 4."
+          echo "$meta"
+          exit 1
+        fi
+        rev=$(printf '%s' "$meta" | sha256sum | awk '{print $1}')
+        echo "rev=$rev" >> "$GITHUB_OUTPUT"
+        echo "PM cores revision $rev"
+
+    - name: Restore PM cores
+      if: inputs.pm_frameworks == 'true'
+      id: pm-cache
+      uses: actions/cache@v5
+      with:
+        path: |
+          .cache/framework-arduinoespressif32-s3-pm
+          .cache/framework-arduinoespressif32-c3-pm
+          .cache/framework-arduinoespressif32-esp32-pm
+          .cache/framework-arduinoespressif32-c6-pm
+        key: pm-cores-${{ steps.pm-meta.outputs.rev || 'unused' }}
+
+    - name: Download PM cores
+      if: inputs.pm_frameworks == 'true' && steps.pm-cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        mkdir -p .cache
+        gh release download pm-cores --repo "$GITHUB_REPOSITORY" --dir .cache \
+          --pattern 'framework-arduinoespressif32-*-pm.tar.gz' --clobber
+        shopt -s nullglob
+        archives=(.cache/framework-arduinoespressif32-*-pm.tar.gz)
+        if [ "${#archives[@]}" -lt 4 ]; then
+          echo "::error::Expected 4 PM core archives, found ${#archives[@]}"
+          exit 1
+        fi
+        for archive in "${archives[@]}"; do
+          tar -C .cache -xzf "$archive"
+          rm -f "$archive"
+        done
+
+    - name: Verify PM cores and write platformio.local.ini
+      if: inputs.pm_frameworks == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        verify_tree() {
+          local root="$1"
+          shift
+          local header count=0
+          if [ ! -d "$root" ]; then
+            echo "::error::Missing PM framework directory $root"
+            exit 1
+          fi
+          while IFS= read -r header; do
+            count=$((count + 1))
+            local name
+            for name in "$@"; do
+              if ! grep -q "#define ${name} 1" "$header"; then
+                echo "::error::Missing ${name} in ${header}"
+                exit 1
+              fi
+            done
+            if grep -q "#define CONFIG_ESP_SLEEP_POWER_DOWN_FLASH 1" "$header"; then
+              echo "::error::Flash power-down is enabled in ${header}"
+              exit 1
+            fi
+          done < <(find "$root" -name sdkconfig.h | sort)
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No sdkconfig.h under $root"
+            exit 1
+          fi
+          echo "sdkconfig ok ($count): $root"
+        }
+
+        verify_tree .cache/framework-arduinoespressif32-s3-pm/tools/sdk/esp32s3 \
+          CONFIG_PM_ENABLE \
+          CONFIG_FREERTOS_USE_TICKLESS_IDLE \
+          CONFIG_BT_CTRL_MODEM_SLEEP \
+          CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1 \
+          CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL \
+          CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP
+
+        verify_tree .cache/framework-arduinoespressif32-c3-pm/tools/sdk/esp32c3 \
+          CONFIG_PM_ENABLE \
+          CONFIG_FREERTOS_USE_TICKLESS_IDLE \
+          CONFIG_BT_CTRL_MODEM_SLEEP \
+          CONFIG_BT_CTRL_MODEM_SLEEP_MODE_1 \
+          CONFIG_BT_CTRL_LPCLK_SEL_MAIN_XTAL \
+          CONFIG_BT_CTRL_MAIN_XTAL_PU_DURING_LIGHT_SLEEP
+
+        verify_tree .cache/framework-arduinoespressif32-esp32-pm/tools/sdk/esp32 \
+          CONFIG_PM_ENABLE \
+          CONFIG_FREERTOS_USE_TICKLESS_IDLE \
+          CONFIG_BTDM_CTRL_MODEM_SLEEP \
+          CONFIG_BTDM_CTRL_MODEM_SLEEP_MODE_ORIG \
+          CONFIG_BTDM_CTRL_LPCLK_SEL_MAIN_XTAL
+
+        verify_tree .cache/framework-arduinoespressif32-c6-pm/esp32c6 \
+          CONFIG_PM_ENABLE \
+          CONFIG_FREERTOS_USE_TICKLESS_IDLE \
+          CONFIG_BT_LE_SLEEP_ENABLE \
+          CONFIG_BT_LE_LP_CLK_SRC_MAIN_XTAL \
+          CONFIG_ESP_PHY_MAC_BB_PD
+
+        root="$GITHUB_WORKSPACE"
+        cat > platformio.local.ini <<EOF
+        ; Generated on the runner. Points ESP32 sections at the pm-cores release.
+        [esp32s3_base]
+        platform_packages =
+          framework-arduinoespressif32 @ file://${root}/.cache/framework-arduinoespressif32-s3-pm
+
+        [esp32_pm_base]
+        platform_packages =
+          framework-arduinoespressif32 @ file://${root}/.cache/framework-arduinoespressif32-esp32-pm
+
+        [esp32c3_base]
+        platform_packages =
+          framework-arduinoespressif32 @ file://${root}/.cache/framework-arduinoespressif32-c3-pm
+
+        [esp32c6_base]
+        platform_packages =
+          framework-arduinoespressif32-libs @ file://${root}/.cache/framework-arduinoespressif32-c6-pm
+        EOF

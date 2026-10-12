@@ -16,6 +16,7 @@ public:
   const char* getManufacturerName() const override ;
 
   void onBeforeTransmit() override {
+    if (!isTxLedEnabled()) return;
     expander.digitalWrite(EXP_PIN_LED, HIGH);   // turn TX LED on
   }
   void onAfterTransmit() override {

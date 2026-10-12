@@ -58,7 +58,7 @@ public:
   uint8_t  beacon_pub[32];       // contact public key when beacon_mode == BEACON_CHAT
   uint8_t autoadd_config = 0;    // bitmask for auto-add contacts config
   uint8_t rx_boosted_gain = 0; // SX126x RX boosted gain mode (0=power saving, 1=boosted)
-  uint8_t mcu_sleep = 0;       // 1 = light-sleep the MCU while idle (ESP32)
+  uint8_t mcu_sleep = 1;       // 1 = light-sleep the MCU while idle (ESP32). Clean firmware is Eco max.
   uint8_t radio_fem_rxgain = 0; // external LoRa FEM RX gain (LNA)
   uint8_t radio_fem_txgain = 0; // external LoRa FEM TX gain (low by default)
   uint8_t _client_repeat = 0;  // DEPRECATED -> use repeat.disable_fwd
@@ -69,9 +69,13 @@ public:
   int16_t tz_offset_mins = 0;  // local time = UTC + this many minutes
   uint8_t ui_lang = UI_LANG_RU;  // weekday line on the e-ink clock
   uint8_t clock_saver = 1;       // 1 = e-ink clock screensaver
+  uint8_t tx_led = 1;            // 1 = blink the board LED while transmitting
   uint8_t eink_refresh = EINK_REFRESH_CLEAR;
   uint8_t time_valid = 0;        // 1 once GPS, phone, manual set, or a trusted node has set the clock
   uint8_t clock_nodes[CLOCK_NODE_MAX][32];  // pubkeys to poll for time; empty slots are zeros
+  uint8_t link_mode = 0;         // LINK_MODE_BLE, LINK_MODE_WIFI, or LINK_MODE_OFF
+  char wifi_ssid[33] = {};
+  char wifi_wpass[64] = {};
 
 private:
   class RadioPrefs : public ConfigSerializer {  // COPIED from CommonCLI (for now)
@@ -156,11 +160,15 @@ private:
       def("tel_base", _parent->telemetry_mode_base);
       def("tel_loc", _parent->telemetry_mode_loc);
       def("tel_env", _parent->telemetry_mode_env);
+      def("txled", _parent->tx_led);       // blink while transmitting
       def("tz", _parent->tz_offset_mins);  // minutes east of UTC
       def("lang", _parent->ui_lang);       // 0 = ru, 1 = en
       def("clk", _parent->clock_saver);   // e-ink clock screensaver
       def("eref", _parent->eink_refresh); // e-ink refresh choice, see EINK_REFRESH_*
       def("tvalid", _parent->time_valid);
+      def("link", _parent->link_mode);
+      def("ssid", _parent->wifi_ssid, sizeof(_parent->wifi_ssid));
+      def("wpass", _parent->wifi_wpass, sizeof(_parent->wifi_wpass));
       for (int i = 0; i < CLOCK_NODE_MAX; i++) {
         char key[8];
         clockNodePrefKey(key, sizeof(key), i);
@@ -191,6 +199,8 @@ public:
     memset(default_scope_key, 0, sizeof(default_scope_key));
     memset(beacon_pub, 0, sizeof(beacon_pub));
     memset(clock_nodes, 0, sizeof(clock_nodes));
+    wifi_ssid[0] = 0;
+    wifi_wpass[0] = 0;
   }
   // new accessor methods
   bool isRepeatEn() const { return repeat.disable_fwd == 0; }

@@ -17,6 +17,7 @@ public:
   uint8_t getStartupReason() const override { return startup_reason; }
 
   void onBeforeTransmit() override {
+    if (!isTxLedEnabled()) return;
     digitalWrite(LED_BUILTIN, HIGH);   // turn TX LED on
   }
 
