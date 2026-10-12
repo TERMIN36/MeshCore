@@ -33,8 +33,8 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   _node_prefs = node_prefs;
   _display->turnOn();
 
-  // "v1.17.1-0.1.1 (date)" is wider than a 128px screen, so the splash shows the version only
-  firmwareVersionNoHash(_version_info, sizeof(_version_info), firmware_version);
+  // Splash shows the version number only (no termin36- prefix; brand is separate).
+  firmwareVersionForSplash(_version_info, sizeof(_version_info), firmware_version);
 }
 
 void UITask::renderCurrScreen() {

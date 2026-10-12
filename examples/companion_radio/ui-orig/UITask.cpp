@@ -55,8 +55,8 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     _display->turnOn();
   }
 
-  // "v1.17.1-0.1.1 (date)" is wider than a 128px screen, so the splash shows the version only
-  firmwareVersionNoHash(_version_info, sizeof(_version_info), FIRMWARE_VERSION);
+  // Splash shows the version number only (no termin36- prefix; brand is separate).
+  firmwareVersionForSplash(_version_info, sizeof(_version_info), FIRMWARE_VERSION);
 
 #ifdef PIN_BUZZER
   buzzer.begin();

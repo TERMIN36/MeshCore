@@ -29,3 +29,15 @@ inline void firmwareVersionNoHash(char* dest, size_t size, const char* ver) {
   memcpy(dest, ver, len);
   dest[len] = 0;
 }
+
+// Splash screens already show "by Termin36" — keep only the version number:
+// termin36-v0.2.0-rc4-abc1234 -> v0.2.0-rc4
+inline void firmwareVersionForSplash(char* dest, size_t size, const char* ver) {
+  firmwareVersionNoHash(dest, size, ver);
+  static const char kPrefix[] = "termin36-";
+  const size_t plen = sizeof(kPrefix) - 1;
+  if (strncmp(dest, kPrefix, plen) == 0) {
+    size_t n = strlen(dest + plen);
+    memmove(dest, dest + plen, n + 1);
+  }
+}

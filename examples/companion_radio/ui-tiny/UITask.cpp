@@ -67,7 +67,7 @@ class SplashScreen : public UIScreen {
 
 public:
   SplashScreen(UITask* task) : _task(task) {
-    firmwareVersionNoHash(_version_info, sizeof(_version_info), FIRMWARE_VERSION);
+    firmwareVersionForSplash(_version_info, sizeof(_version_info), FIRMWARE_VERSION);
 
     version_after = millis() + BOOT_SCREEN_MILLIS / 2;
     dismiss_after = millis() + BOOT_SCREEN_MILLIS;
