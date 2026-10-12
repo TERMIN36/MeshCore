@@ -78,6 +78,8 @@ jobs:
             "$HOME/meshcore-s3-core-build"
 
       - name: Build ESP32-C6 core
+        id: c6
+        continue-on-error: true
         run: |
           set -euo pipefail
           df -h /
@@ -87,6 +89,39 @@ jobs:
             .cache/framework-arduinoespressif32-c6-pm \
             .cache/esp32-arduino-libs-idf-release_v5.3-489d7a2b-v1.zip \
             "$HOME/meshcore-c6-core-build"
+
+      - name: Pack stock ESP32-C6 libs if PM build failed
+        if: steps.c6.outcome != 'success'
+        run: |
+          set -euo pipefail
+          # Keep the other three PM archives publishable. C6 boards fall back to
+          # stock Arduino 3.1.3 libs (no custom modem-sleep flags) until the
+          # lib-builder pin builds cleanly again.
+          echo "::warning::C6 PM core build failed; packing stock libs as fallback."
+          mkdir -p .cache/framework-arduinoespressif32-c6-pm
+          zip=.cache/esp32-arduino-libs-idf-release_v5.3-489d7a2b-v1.zip
+          url=https://github.com/espressif/esp32-arduino-lib-builder/releases/download/idf-release_v5.3/esp32-arduino-libs-idf-release_v5.3-489d7a2b-v1.zip
+          if [ ! -f "$zip" ]; then
+            curl -fL --retry 3 -o "$zip" "$url"
+          fi
+          rm -rf .cache/framework-arduinoespressif32-c6-pm
+          mkdir -p .cache/framework-arduinoespressif32-c6-pm
+          unzip -q "$zip" -d .cache/framework-arduinoespressif32-c6-pm
+          if [ ! -d .cache/framework-arduinoespressif32-c6-pm/esp32c6 ]; then
+            mapfile -t tops < <(find .cache/framework-arduinoespressif32-c6-pm -mindepth 1 -maxdepth 1 -type d)
+            if [ "${#tops[@]}" -eq 1 ] && [ -d "${tops[0]}/esp32c6" ]; then
+              tmp=.cache/c6-libs-flat
+              rm -rf "$tmp"
+              mv "${tops[0]}" "$tmp"
+              rm -rf .cache/framework-arduinoespressif32-c6-pm
+              mv "$tmp" .cache/framework-arduinoespressif32-c6-pm
+            fi
+          fi
+          test -d .cache/framework-arduinoespressif32-c6-pm/esp32c6
+          touch .cache/framework-arduinoespressif32-c6-pm/.stock-fallback
+          tar -C .cache -czf .cache/framework-arduinoespressif32-c6-pm.tar.gz framework-arduinoespressif32-c6-pm
+          rm -rf .cache/framework-arduinoespressif32-c6-pm "$zip"
+          ls -lh .cache/framework-arduinoespressif32-c6-pm.tar.gz
 
       - name: Publish PM cores
         env:
