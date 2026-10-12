@@ -41,6 +41,8 @@ export GIT_TERMINAL_PROMPT=0
 # 2024-08-19. The tip of release/v5.3 has a newer tflite that this IDF
 # does not compile. Stay on the commit that produced that asset.
 pin_builder() {
+  # Named branch required: detached HEAD breaks the builder's IDF/tool install
+  # ("fatal: ref HEAD is not a symbolic ref") and later component resolution.
   git -C "$LIB_BUILDER" fetch --shallow-since=2024-08-01 origin release/v5.3
   local pin
   pin="$(git -C "$LIB_BUILDER" rev-list -n 1 --before=2024-08-20 origin/release/v5.3)"
@@ -48,8 +50,8 @@ pin_builder() {
     echo "No release/v5.3 commit before 2024-08-20" >&2
     exit 1
   fi
-  echo "Pinning lib-builder to $pin"
-  git -C "$LIB_BUILDER" checkout --force "$pin"
+  echo "Pinning lib-builder to $pin (branch meshcore-c6-pin)"
+  git -C "$LIB_BUILDER" checkout --force -B meshcore-c6-pin "$pin"
 }
 
 if [ ! -d "$LIB_BUILDER/.git" ]; then
