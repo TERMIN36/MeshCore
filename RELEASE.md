@@ -2,7 +2,19 @@
 
 GitHub Actions is set up to automatically build and release firmware.
 
-It will automatically build firmware when one of the following tag formats are pushed.
+## Combined release (`v*` tags)
+
+Push a tag like `v0.2.0` or `v0.2.0-rc4`. The Release workflow builds companion, repeater and room-server, then publishes **three zip bundles** (one per role) to avoid GitHub rate limits from hundreds of individual assets:
+
+- `companion-<tag>.zip`
+- `repeater-<tag>.zip`
+- `room-server-<tag>.zip`
+
+Inside each zip are the per-board `.bin` / `-merged.bin` / `.uf2` / DFU `.zip` files.
+
+## Per-role draft tags
+
+These still build a single role and create a **draft** release with loose files:
 
 - `companion-v1.0.0`
 - `repeater-v1.0.0`

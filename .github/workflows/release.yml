@@ -89,6 +89,46 @@ jobs:
           merge-multiple: true
           path: out
 
+      # One zip per role avoids GitHub secondary rate limits from hundreds of asset uploads.
+      - name: Pack role bundles
+        run: |
+          set -euo pipefail
+          VER="${{ github.ref_name }}"
+          mkdir -p bundles/companion bundles/repeater bundles/room-server
+          shopt -s nullglob
+          unclassified=0
+          for f in out/*; do
+            [ -f "$f" ] || continue
+            base=$(basename "$f")
+            base_lc=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+            case "$base_lc" in
+              *companion*) dest=bundles/companion ;;
+              *room_server*|*room-server*) dest=bundles/room-server ;;
+              *repeater*) dest=bundles/repeater ;;
+              *)
+                echo "::warning::Unclassified firmware file: $base"
+                unclassified=$((unclassified + 1))
+                continue
+                ;;
+            esac
+            mv "$f" "$dest/"
+          done
+          for role in companion repeater room-server; do
+            count=$(find "bundles/$role" -type f | wc -l)
+            if [ "$count" -lt 1 ]; then
+              echo "::error::No firmware files for role $role"
+              exit 1
+            fi
+            echo "Packing $role ($count files)"
+            (cd "bundles/$role" && zip -q -r "../../${role}-${VER}.zip" .)
+            ls -lh "${role}-${VER}.zip"
+          done
+          if [ "$unclassified" -gt 0 ]; then
+            echo "::error::$unclassified unclassified file(s) left in out/"
+            ls -la out/ || true
+            exit 1
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
@@ -99,5 +139,8 @@ jobs:
           # every tag has a dash (v1.17.1-0.1.1), only -rc/-beta/-alpha suffixes mark a prerelease
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
           make_latest: ${{ !(contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha')) }}
-          files: out/*
+          files: |
+            companion-${{ github.ref_name }}.zip
+            repeater-${{ github.ref_name }}.zip
+            room-server-${{ github.ref_name }}.zip
           fail_on_unmatched_files: true
