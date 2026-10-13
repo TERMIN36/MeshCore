@@ -199,12 +199,13 @@ build_firmware() {
   # breaks stm32_base casts like -DRADIOLIB_ARDUINOHAL_PIN_MODE_CAST=(PinMode).
   # Version/date go into a header; arch/inject_firmware_build_info.py -includes it.
   # DISABLE_DEBUG=1 is also applied there via CCFLAGS.
-  mkdir -p out
+  # Keep the header out of out/ — release packing treats everything in out/ as firmware.
+  mkdir -p .pio
   {
     echo '#pragma once'
     echo "#define FIRMWARE_BUILD_DATE \"${FIRMWARE_BUILD_DATE}\""
     echo "#define FIRMWARE_VERSION \"${FIRMWARE_VERSION_STRING}\""
-  } > out/FirmwareBuildInfo.h
+  } > .pio/FirmwareBuildInfo.h
 
   # build firmware target
   pio_retry run -e $1

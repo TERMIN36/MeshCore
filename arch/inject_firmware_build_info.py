@@ -6,7 +6,7 @@ Import("env")
 import os
 
 proj = env.subst("$PROJECT_DIR")
-hdr = os.path.join(proj, "out", "FirmwareBuildInfo.h")
+hdr = os.path.join(proj, ".pio", "FirmwareBuildInfo.h")
 if os.path.isfile(hdr):
     env.Append(CCFLAGS=["-include", hdr])
 

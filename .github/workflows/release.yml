@@ -105,6 +105,11 @@ jobs:
               *companion*) dest=bundles/companion ;;
               *room_server*|*room-server*) dest=bundles/room-server ;;
               *repeater*) dest=bundles/repeater ;;
+              *.h|firmwarebuildinfo.h)
+                # build metadata accidentally under out/ — ignore
+                rm -f "$f"
+                continue
+                ;;
               *)
                 echo "::warning::Unclassified firmware file: $base"
                 unclassified=$((unclassified + 1))
