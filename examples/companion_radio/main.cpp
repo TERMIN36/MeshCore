@@ -138,16 +138,16 @@ static bool companion_clock_locked = false;
 #endif
 #if __has_include(<soc/system_reg.h>)
 #include <soc/system_reg.h>
+#endif
+#if defined(SYSTEM_WIFI_CLK_EN_REG)
 #define MESHCORE_HAS_WIFI_CLK_REG 1
-#else
+#elif __has_include(<soc/dport_reg.h>)
 #include <soc/dport_reg.h>
 #include <soc/dport_access.h>
 #define SYSTEM_WIFI_CLK_EN_REG DPORT_WIFI_CLK_EN_REG
 #define SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M DPORT_WIFI_CLK_WIFI_BT_COMMON_M
 #define SYSTEM_BT_BASEBAND_EN DPORT_BT_BASEBAND_EN
 #define SYSTEM_BT_LC_EN DPORT_BT_LC_EN
-#define SYSTEM_CPU_PER_CONF_REG DPORT_CPU_PER_CONF_REG
-#define SYSTEM_CPU_WAIT_MODE_FORCE_ON DPORT_CPU_WAIT_MODE_FORCE_ON
 #define MESHCORE_HAS_WIFI_CLK_REG 1
 // Classic ESP32 keeps Wi-Fi and Bluetooth in one power domain.
 #ifndef RTC_CNTL_BT_FORCE_PD
@@ -155,6 +155,10 @@ static bool companion_clock_locked = false;
 #define RTC_CNTL_BT_FORCE_PU 0
 #define RTC_CNTL_BT_FORCE_ISO 0
 #define RTC_CNTL_BT_FORCE_NOISO 0
+#endif
+#ifdef DPORT_CPU_WAIT_MODE_FORCE_ON
+#define SYSTEM_CPU_PER_CONF_REG DPORT_CPU_PER_CONF_REG
+#define SYSTEM_CPU_WAIT_MODE_FORCE_ON DPORT_CPU_WAIT_MODE_FORCE_ON
 #endif
 #endif
 
@@ -229,7 +233,9 @@ static void companionReleaseModem() {
   companionWifiClkClr(SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
   REG_CLR_BIT(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_XTL_FORCE_PU | RTC_CNTL_BBPLL_FORCE_PU |
                                      RTC_CNTL_BBPLL_I2C_FORCE_PU | RTC_CNTL_BB_I2C_FORCE_PU);
+#ifdef SYSTEM_CPU_WAIT_MODE_FORCE_ON
   companionCpuPerConfClr(SYSTEM_CPU_WAIT_MODE_FORCE_ON);
+#endif
 #endif
   companion_modem_released = true;
 }
@@ -528,7 +534,8 @@ void setup() {
 
 #if defined(ESP32) && defined(BLE_PIN_CODE)
 #include <sdkconfig.h>
-#if defined(CONFIG_BTDM_CTRL_MODEM_SLEEP) || defined(CONFIG_BT_CTRL_MODEM_SLEEP)
+#if (defined(CONFIG_BTDM_CTRL_MODEM_SLEEP) || defined(CONFIG_BT_CTRL_MODEM_SLEEP)) && \
+    !defined(CONFIG_IDF_TARGET_ESP32C6) && !defined(CONFIG_IDF_TARGET_ESP32H2)
 #include <esp_bt.h>
 #define COMPANION_BLE_MODEM_SLEEP 1
 #endif

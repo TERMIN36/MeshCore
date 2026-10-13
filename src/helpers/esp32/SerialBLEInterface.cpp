@@ -340,7 +340,10 @@ void SerialBLEInterface::maintainConnParams() {
     conn_idle_units = want_fast ? 0 : units;
     // A parameter change can drop the controller out of modem sleep and
     // leave it there. Put it back, or the idle current climbs to ~26 mA.
+    // ESP32-C6/H2 Arduino builds do not export esp_bt_sleep_enable().
+#if !defined(CONFIG_IDF_TARGET_ESP32C6) && !defined(CONFIG_IDF_TARGET_ESP32H2)
     esp_bt_sleep_enable();
+#endif
   } else {
     conn_update_not_before = millis() + 3000;
     if (conn_update_not_before == 0) conn_update_not_before = 1;

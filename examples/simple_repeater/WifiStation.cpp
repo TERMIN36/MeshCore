@@ -19,8 +19,10 @@
 #endif
 #if __has_include(<soc/system_reg.h>)
 #include <soc/system_reg.h>
+#endif
+#if defined(SYSTEM_WIFI_CLK_EN_REG)
 #define MESHCORE_HAS_WIFI_CLK_REG 1
-#else
+#elif __has_include(<soc/dport_reg.h>)
 #include <soc/dport_reg.h>
 #include <soc/dport_access.h>
 #define SYSTEM_WIFI_CLK_EN_REG DPORT_WIFI_CLK_EN_REG
