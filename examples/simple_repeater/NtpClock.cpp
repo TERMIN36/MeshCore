@@ -8,6 +8,20 @@
 #include <atomic>
 #include <WiFi.h>
 #include <esp_sntp.h>
+#include <esp_idf_version.h>
+
+// Arduino-ESP32 3.x / IDF 5 (C6) dropped the legacy sntp_* aliases.
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+#ifndef sntp_stop
+#define sntp_stop esp_sntp_stop
+#define sntp_init esp_sntp_init
+#define sntp_setoperatingmode esp_sntp_setoperatingmode
+#define sntp_setservername esp_sntp_setservername
+#define sntp_set_time_sync_notification_cb esp_sntp_set_time_sync_notification_cb
+#define sntp_set_sync_interval esp_sntp_set_sync_interval
+#define sntp_restart esp_sntp_restart
+#endif
+#endif
 
 static constexpr uint32_t NTP_SYNC_INTERVAL_MS = 60UL * 60UL * 1000UL;
 static constexpr uint32_t NTP_HOLD_MS = 24UL * 60UL * 60UL * 1000UL;

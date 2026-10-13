@@ -194,7 +194,9 @@ static inline void companionWifiClkClr(uint32_t mask) {
   REG_CLR_BIT(SYSTEM_WIFI_CLK_EN_REG, mask);
 #endif
 }
+#endif
 
+#if defined(SYSTEM_CPU_PER_CONF_REG) && defined(SYSTEM_CPU_WAIT_MODE_FORCE_ON)
 static inline void companionCpuPerConfClr(uint32_t mask) {
 #if defined(CONFIG_IDF_TARGET_ESP32)
   DPORT_CLEAR_PERI_REG_MASK(SYSTEM_CPU_PER_CONF_REG, mask);
