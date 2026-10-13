@@ -18,7 +18,9 @@
 #include <driver/gpio.h>
 #include <driver/rtc_io.h>
 #include <esp_timer.h>
+#include <soc/gpio_reg.h>
 #include <soc/gpio_struct.h>
+#include <soc/soc_caps.h>
 #if defined(CONFIG_IDF_TARGET_ESP32S2) || defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32C3)
 #include <driver/temp_sensor.h>
 #endif
@@ -32,10 +34,19 @@ protected:
   static inline bool allowBtnWake = true;
   static inline portMUX_TYPE sleepMux = portMUX_INITIALIZER_UNLOCKED;
 
+  // Register macros stay portable across classic/S3 (uint fields) and C3/C6
+  // (typed W1TC structs / no status1 on C3).
   static void clearGpioInt(gpio_num_t pin) {
     if ((int)pin < 0) return;
-    if ((int)pin < 32) GPIO.status_w1tc = 1U << (int)pin;
-    else GPIO.status1_w1tc.val = 1U << ((int)pin - 32);
+    const int n = (int)pin;
+    if (n < 32) {
+      REG_WRITE(GPIO_STATUS_W1TC_REG, 1U << n);
+    }
+#if defined(GPIO_STATUS1_W1TC_REG)
+    else {
+      REG_WRITE(GPIO_STATUS1_W1TC_REG, 1U << (n - 32));
+    }
+#endif
   }
 
   // gpio_wakeup_enable hands an RTC pad to the RTC controller and can enable
@@ -47,10 +58,12 @@ protected:
     gpio_sleep_sel_dis(gpio);
     gpio_hold_dis(gpio);
     gpio_wakeup_disable(gpio);
+#if SOC_RTCIO_INPUT_OUTPUT_SUPPORTED
     if (!rtc_gpio_is_valid_gpio(gpio)) return;
     rtc_gpio_hold_dis(gpio);
     rtc_gpio_wakeup_disable(gpio);
     rtc_gpio_deinit(gpio);
+#endif
   }
 
   static void restoreUserButton() {

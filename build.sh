@@ -211,8 +211,15 @@ build_firmware() {
   fi
   export PLATFORMIO_BUILD_FLAGS="${_PIO_FLAGS_BASE-}"
 
-  # add firmware version info to end of existing platformio build flags in environment vars
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -DFIRMWARE_BUILD_DATE='\"${FIRMWARE_BUILD_DATE}\"' -DFIRMWARE_VERSION='\"${FIRMWARE_VERSION_STRING}\"'"
+  # Quoted -DFIRMWARE_*=\"...\" breaks STM32's /bin/sh -c compile recipe
+  # ("Syntax error: ( unexpected"). Emit a header and -include it instead.
+  mkdir -p out
+  {
+    echo '#pragma once'
+    echo "#define FIRMWARE_BUILD_DATE \"${FIRMWARE_BUILD_DATE}\""
+    echo "#define FIRMWARE_VERSION \"${FIRMWARE_VERSION_STRING}\""
+  } > out/FirmwareBuildInfo.h
+  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -include ${PWD}/out/FirmwareBuildInfo.h"
 
   # disable debug flags if requested
   disable_debug_flags

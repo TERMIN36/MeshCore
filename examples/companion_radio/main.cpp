@@ -130,8 +130,28 @@ static bool companion_clock_locked = false;
 #if defined(ESP32) && defined(BLE_PIN_CODE) && !defined(WIFI_SSID)
 #include <BLEDevice.h>
 #include <soc/rtc_cntl_reg.h>
+#if __has_include(<soc/syscon_reg.h>)
 #include <soc/syscon_reg.h>
+#endif
+#if __has_include(<soc/system_reg.h>)
 #include <soc/system_reg.h>
+#else
+#include <soc/dport_reg.h>
+#include <soc/dport_access.h>
+#define SYSTEM_WIFI_CLK_EN_REG DPORT_WIFI_CLK_EN_REG
+#define SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M DPORT_WIFI_CLK_WIFI_BT_COMMON_M
+#define SYSTEM_BT_BASEBAND_EN DPORT_BT_BASEBAND_EN
+#define SYSTEM_BT_LC_EN DPORT_BT_LC_EN
+#define SYSTEM_CPU_PER_CONF_REG DPORT_CPU_PER_CONF_REG
+#define SYSTEM_CPU_WAIT_MODE_FORCE_ON DPORT_CPU_WAIT_MODE_FORCE_ON
+// Classic ESP32 keeps Wi-Fi and Bluetooth in one power domain.
+#ifndef RTC_CNTL_BT_FORCE_PD
+#define RTC_CNTL_BT_FORCE_PD 0
+#define RTC_CNTL_BT_FORCE_PU 0
+#define RTC_CNTL_BT_FORCE_ISO 0
+#define RTC_CNTL_BT_FORCE_NOISO 0
+#endif
+#endif
 
 static bool companion_wifi_fast = false;
 static bool companion_ble_down = false;
@@ -144,7 +164,33 @@ static bool companion_modem_released = false;
 extern "C" {
 void phy_get_romfunc_addr(void);
 void phy_close_rf(void);
+#if !defined(CONFIG_IDF_TARGET_ESP32)
 void phy_xpd_tsens(void);
+#endif
+}
+
+static inline void companionWifiClkSet(uint32_t mask) {
+#if defined(CONFIG_IDF_TARGET_ESP32)
+  DPORT_SET_PERI_REG_MASK(SYSTEM_WIFI_CLK_EN_REG, mask);
+#else
+  REG_SET_BIT(SYSTEM_WIFI_CLK_EN_REG, mask);
+#endif
+}
+
+static inline void companionWifiClkClr(uint32_t mask) {
+#if defined(CONFIG_IDF_TARGET_ESP32)
+  DPORT_CLEAR_PERI_REG_MASK(SYSTEM_WIFI_CLK_EN_REG, mask);
+#else
+  REG_CLR_BIT(SYSTEM_WIFI_CLK_EN_REG, mask);
+#endif
+}
+
+static inline void companionCpuPerConfClr(uint32_t mask) {
+#if defined(CONFIG_IDF_TARGET_ESP32)
+  DPORT_CLEAR_PERI_REG_MASK(SYSTEM_CPU_PER_CONF_REG, mask);
+#else
+  REG_CLR_BIT(SYSTEM_CPU_PER_CONF_REG, mask);
+#endif
 }
 
 // phy_close_rf has to run while the modem clocks are still on. Cutting the
@@ -152,11 +198,13 @@ void phy_xpd_tsens(void);
 static void companionCloseRadioFrontEnd() {
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
   delay(10);
-  REG_SET_BIT(SYSTEM_WIFI_CLK_EN_REG, SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
+  companionWifiClkSet(SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
   REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
   phy_get_romfunc_addr();
   phy_close_rf();
+#if !defined(CONFIG_IDF_TARGET_ESP32)
   phy_xpd_tsens();
+#endif
 }
 
 static void companionReleaseModem() {
@@ -168,10 +216,10 @@ static void companionReleaseModem() {
   REG_SET_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PU | RTC_CNTL_BT_FORCE_PU);
   REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_NOISO | RTC_CNTL_BT_FORCE_NOISO);
-  REG_CLR_BIT(SYSTEM_WIFI_CLK_EN_REG, SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
+  companionWifiClkClr(SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
   REG_CLR_BIT(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_XTL_FORCE_PU | RTC_CNTL_BBPLL_FORCE_PU |
                                      RTC_CNTL_BBPLL_I2C_FORCE_PU | RTC_CNTL_BB_I2C_FORCE_PU);
-  REG_CLR_BIT(SYSTEM_CPU_PER_CONF_REG, SYSTEM_CPU_WAIT_MODE_FORCE_ON);
+  companionCpuPerConfClr(SYSTEM_CPU_WAIT_MODE_FORCE_ON);
   companion_modem_released = true;
 }
 
