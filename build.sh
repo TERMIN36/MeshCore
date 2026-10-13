@@ -158,13 +158,6 @@ get_source_version() {
   sed -n 's/^#define FORK_VERSION *"\([^"]*\)".*/\1/p' "$header"
 }
 
-# disable all debug logging flags if DISABLE_DEBUG=1 is set
-disable_debug_flags() {
-  if [ "$DISABLE_DEBUG" == "1" ]; then
-    export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -UMESH_DEBUG -UBLE_DEBUG_LOGGING -UWIFI_DEBUG_LOGGING -UBRIDGE_DEBUG -UGPS_NMEA_DEBUG -UCORE_DEBUG_LEVEL -UESPNOW_DEBUG_LOGGING -UDEBUG_RP2040_WIRE -UDEBUG_RP2040_SPI -UDEBUG_RP2040_CORE -UDEBUG_RP2040_PORT -URADIOLIB_DEBUG_SPI -UCFG_DEBUG -URADIOLIB_DEBUG_BASIC -URADIOLIB_DEBUG_PROTOCOL"
-  fi
-}
-
 # Library installs clone from GitHub. A DNS blip would otherwise abort the whole release.
 pio_retry() {
   local attempt
@@ -202,27 +195,16 @@ build_firmware() {
   # e.g: RAK_4631_Repeater-v1.0.0-SHA
   FIRMWARE_FILENAME="$1-${FIRMWARE_VERSION_STRING}"
 
-  # One build.sh run builds many targets. Remember the caller's flags on the first
-  # target and start from them each time, or the version -D flags stack until the
-  # Windows command line limit kills a later compile.
-  if [ -z "${_PIO_FLAGS_SAVED+x}" ]; then
-    _PIO_FLAGS_SAVED=1
-    _PIO_FLAGS_BASE="${PLATFORMIO_BUILD_FLAGS-}"
-  fi
-  export PLATFORMIO_BUILD_FLAGS="${_PIO_FLAGS_BASE-}"
-
-  # Quoted -DFIRMWARE_*=\"...\" breaks STM32's /bin/sh -c compile recipe
-  # ("Syntax error: ( unexpected"). Emit a header and -include it instead.
+  # Do not set PLATFORMIO_BUILD_FLAGS: on Linux that env forces /bin/sh and
+  # breaks stm32_base casts like -DRADIOLIB_ARDUINOHAL_PIN_MODE_CAST=(PinMode).
+  # Version/date go into a header; arch/inject_firmware_build_info.py -includes it.
+  # DISABLE_DEBUG=1 is also applied there via CCFLAGS.
   mkdir -p out
   {
     echo '#pragma once'
     echo "#define FIRMWARE_BUILD_DATE \"${FIRMWARE_BUILD_DATE}\""
     echo "#define FIRMWARE_VERSION \"${FIRMWARE_VERSION_STRING}\""
   } > out/FirmwareBuildInfo.h
-  export PLATFORMIO_BUILD_FLAGS="${PLATFORMIO_BUILD_FLAGS} -include ${PWD}/out/FirmwareBuildInfo.h"
-
-  # disable debug flags if requested
-  disable_debug_flags
 
   # build firmware target
   pio_retry run -e $1

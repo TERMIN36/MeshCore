@@ -10,10 +10,16 @@
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
+#if __has_include(<soc/rtc_cntl_reg.h>)
 #include <soc/rtc_cntl_reg.h>
+#define MESHCORE_HAS_RTC_CNTL_REG 1
+#endif
+#if __has_include(<soc/syscon_reg.h>)
 #include <soc/syscon_reg.h>
+#endif
 #if __has_include(<soc/system_reg.h>)
 #include <soc/system_reg.h>
+#define MESHCORE_HAS_WIFI_CLK_REG 1
 #else
 #include <soc/dport_reg.h>
 #include <soc/dport_access.h>
@@ -21,6 +27,7 @@
 #define SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M DPORT_WIFI_CLK_WIFI_BT_COMMON_M
 #define SYSTEM_BT_BASEBAND_EN DPORT_BT_BASEBAND_EN
 #define SYSTEM_BT_LC_EN DPORT_BT_LC_EN
+#define MESHCORE_HAS_WIFI_CLK_REG 1
 // Classic ESP32 keeps Wi-Fi and Bluetooth in one power domain.
 #ifndef RTC_CNTL_BT_FORCE_PD
 #define RTC_CNTL_BT_FORCE_PD 0
@@ -30,6 +37,7 @@
 #endif
 #endif
 
+#if MESHCORE_HAS_WIFI_CLK_REG
 static inline void wifiClkSet(uint32_t mask) {
 #if defined(CONFIG_IDF_TARGET_ESP32)
   DPORT_SET_PERI_REG_MASK(SYSTEM_WIFI_CLK_EN_REG, mask);
@@ -45,6 +53,7 @@ static inline void wifiClkClr(uint32_t mask) {
   REG_CLR_BIT(SYSTEM_WIFI_CLK_EN_REG, mask);
 #endif
 }
+#endif
 
 extern "C" {
 void phy_get_romfunc_addr(void);
@@ -93,10 +102,12 @@ static void wakeOtherCore() {
 // power domain first latches the analog front-end in the last bias, which
 // draws more than Wi-Fi modem sleep and cannot be reached afterwards.
 static void closeRadioFrontEnd() {
+#if MESHCORE_HAS_RTC_CNTL_REG && MESHCORE_HAS_WIFI_CLK_REG
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
   delay(10);
   wifiClkSet(SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
   REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
+#endif
   phy_get_romfunc_addr();
   phy_close_rf();
 #if !defined(CONFIG_IDF_TARGET_ESP32)
@@ -107,8 +118,10 @@ static void closeRadioFrontEnd() {
 // The IDF helper is refcounted and skips the registers when the count is
 // already zero, which is every boot that did not start the driver. Write the
 // same bits rtc_init uses, and gate the modem clocks, leaving the RNG clock.
+// ESP32-C6 (IDF 5.x) has no soc/rtc_cntl_reg.h — WiFi.mode(OFF) is enough there.
 static void releaseModemPower() {
   closeRadioFrontEnd();
+#if MESHCORE_HAS_RTC_CNTL_REG && MESHCORE_HAS_WIFI_CLK_REG
   REG_SET_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
   REG_SET_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PU | RTC_CNTL_BT_FORCE_PU);
@@ -119,11 +132,14 @@ static void releaseModemPower() {
 #ifdef SYSTEM_CPU_WAIT_MODE_FORCE_ON
   REG_CLR_BIT(SYSTEM_CPU_PER_CONF_REG, SYSTEM_CPU_WAIT_MODE_FORCE_ON);
 #endif
+#endif
 }
 
 static void allowModemPower() {
+#if MESHCORE_HAS_RTC_CNTL_REG
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
   REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
+#endif
 }
 
 static void wifiCpu(bool on) {

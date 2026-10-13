@@ -129,12 +129,16 @@ static bool companion_clock_locked = false;
 
 #if defined(ESP32) && defined(BLE_PIN_CODE) && !defined(WIFI_SSID)
 #include <BLEDevice.h>
+#if __has_include(<soc/rtc_cntl_reg.h>)
 #include <soc/rtc_cntl_reg.h>
+#define MESHCORE_HAS_RTC_CNTL_REG 1
+#endif
 #if __has_include(<soc/syscon_reg.h>)
 #include <soc/syscon_reg.h>
 #endif
 #if __has_include(<soc/system_reg.h>)
 #include <soc/system_reg.h>
+#define MESHCORE_HAS_WIFI_CLK_REG 1
 #else
 #include <soc/dport_reg.h>
 #include <soc/dport_access.h>
@@ -144,6 +148,7 @@ static bool companion_clock_locked = false;
 #define SYSTEM_BT_LC_EN DPORT_BT_LC_EN
 #define SYSTEM_CPU_PER_CONF_REG DPORT_CPU_PER_CONF_REG
 #define SYSTEM_CPU_WAIT_MODE_FORCE_ON DPORT_CPU_WAIT_MODE_FORCE_ON
+#define MESHCORE_HAS_WIFI_CLK_REG 1
 // Classic ESP32 keeps Wi-Fi and Bluetooth in one power domain.
 #ifndef RTC_CNTL_BT_FORCE_PD
 #define RTC_CNTL_BT_FORCE_PD 0
@@ -169,6 +174,7 @@ void phy_xpd_tsens(void);
 #endif
 }
 
+#if MESHCORE_HAS_WIFI_CLK_REG
 static inline void companionWifiClkSet(uint32_t mask) {
 #if defined(CONFIG_IDF_TARGET_ESP32)
   DPORT_SET_PERI_REG_MASK(SYSTEM_WIFI_CLK_EN_REG, mask);
@@ -192,14 +198,17 @@ static inline void companionCpuPerConfClr(uint32_t mask) {
   REG_CLR_BIT(SYSTEM_CPU_PER_CONF_REG, mask);
 #endif
 }
+#endif
 
 // phy_close_rf has to run while the modem clocks are still on. Cutting the
 // power domain first latches the analog front-end in the last bias.
 static void companionCloseRadioFrontEnd() {
+#if MESHCORE_HAS_RTC_CNTL_REG && MESHCORE_HAS_WIFI_CLK_REG
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
   delay(10);
   companionWifiClkSet(SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
   REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
+#endif
   phy_get_romfunc_addr();
   phy_close_rf();
 #if !defined(CONFIG_IDF_TARGET_ESP32)
@@ -212,6 +221,7 @@ static void companionReleaseModem() {
   if (!companion_ble_down || bluetooth_interface.isEnabled()) return;
   if ((WiFi.getMode() & WIFI_MODE_STA) != 0) return;
   companionCloseRadioFrontEnd();
+#if MESHCORE_HAS_RTC_CNTL_REG && MESHCORE_HAS_WIFI_CLK_REG
   REG_SET_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
   REG_SET_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PU | RTC_CNTL_BT_FORCE_PU);
@@ -220,13 +230,16 @@ static void companionReleaseModem() {
   REG_CLR_BIT(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_XTL_FORCE_PU | RTC_CNTL_BBPLL_FORCE_PU |
                                      RTC_CNTL_BBPLL_I2C_FORCE_PU | RTC_CNTL_BB_I2C_FORCE_PU);
   companionCpuPerConfClr(SYSTEM_CPU_WAIT_MODE_FORCE_ON);
+#endif
   companion_modem_released = true;
 }
 
 static void companionAllowModem() {
   if (!companion_modem_released) return;
+#if MESHCORE_HAS_RTC_CNTL_REG
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
   REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
+#endif
   companion_modem_released = false;
 }
 
