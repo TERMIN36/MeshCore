@@ -5,8 +5,8 @@
 
 // Own fork version line (no upstream MeshCore version prefix).
 // Release tags must match it exactly; build.sh appends "-<commit hash>".
-// A candidate tag may add a suffix, for example v0.2.0-rc7.
-// Device-facing builds can override FIRMWARE_VERSION (e.g. termin36-v0.2.0-rc7).
+// A candidate tag may add a suffix, for example v0.2.0-rc8.
+// Device-facing builds can override FIRMWARE_VERSION (e.g. termin36-v0.2.0-rc8).
 #define FORK_VERSION  "v0.2.0"
 
 #ifndef FIRMWARE_VERSION
@@ -14,7 +14,7 @@
 #endif
 
 // Copies the version without the trailing "-<commit hash>" added by build.sh:
-// termin36-v0.2.0-rc7-abc1234 -> termin36-v0.2.0-rc7
+// termin36-v0.2.0-rc8-abc1234 -> termin36-v0.2.0-rc8
 inline void firmwareVersionNoHash(char* dest, size_t size, const char* ver) {
   if (size == 0) return;
   size_t len = strlen(ver);
@@ -31,7 +31,7 @@ inline void firmwareVersionNoHash(char* dest, size_t size, const char* ver) {
 }
 
 // Splash screens already show "by Termin36" — keep only the version number:
-// termin36-v0.2.0-rc7-abc1234 -> v0.2.0-rc7
+// termin36-v0.2.0-rc8-abc1234 -> v0.2.0-rc8
 inline void firmwareVersionForSplash(char* dest, size_t size, const char* ver) {
   firmwareVersionNoHash(dest, size, ver);
   static const char kPrefix[] = "termin36-";

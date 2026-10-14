@@ -4,7 +4,7 @@ GitHub Actions is set up to automatically build and release firmware.
 
 ## Combined release (`v*` tags)
 
-Push a tag like `v0.2.0` or `v0.2.0-rc7`. The Release workflow builds companion, repeater and room-server, then publishes **three zip bundles** (one per role) to avoid GitHub rate limits from hundreds of individual assets:
+Push a tag like `v0.2.0` or `v0.2.0-rc8`. The Release workflow builds companion, repeater and room-server, then publishes **three zip bundles** (one per role) to avoid GitHub rate limits from hundreds of individual assets:
 
 - `companion-<tag>.zip`
 - `repeater-<tag>.zip`
