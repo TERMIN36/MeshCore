@@ -35,6 +35,8 @@ void T096Board::initiateShutdown(uint8_t reason) {
 void T096Board::begin() {
   NRF52Board::begin();
 
+  setBattCal(batt_cal);   // enforce the [1.00, 9.99] range on the T096_BATT_CAL build default
+
 #ifdef NRF52_POWER_MANAGEMENT
   // Boot voltage protection check (may not return if voltage too low)
   checkBootVoltage(&power_config);
@@ -76,7 +78,7 @@ uint16_t T096Board::getBattMilliVolts() {
     adcvalue = analogRead(PIN_VBAT_READ);
     digitalWrite(PIN_BAT_CTL, 0);
 
-    return (uint16_t)((float)adcvalue * MV_LSB * 4.9);
+    return (uint16_t)((float)adcvalue * MV_LSB * batt_cal);
 }
 void T096Board::variant_shutdown() {
  nrf_gpio_cfg_default(PIN_VEXT_EN);

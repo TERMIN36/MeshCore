@@ -36,6 +36,7 @@ public:
   void setHasConnection(bool connected) { _connected = connected; }
   bool hasConnection() const { return _connected; }
   uint16_t getBattMilliVolts() const { return _board->getBattMilliVolts(); }
+  float getMCUTemperature() const { return _board->getMCUTemperature(); }
   bool isBluetoothEnabled() const { return _interfaceManager->isBluetoothEnabled(); }
   virtual bool isDisplayOn() const { return false; }
   void enableBluetooth() { _interfaceManager->enableBluetooth(); }

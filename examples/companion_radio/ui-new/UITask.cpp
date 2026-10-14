@@ -55,6 +55,30 @@
   #define PRESS_LABEL "long press"
 #endif
 
+#ifdef HELTEC_T096
+  #include <InternalFileSystem.h>
+  #define BATT_CAL_FILE "/batt.cal"
+
+  static void loadBattCalibration() {
+    if (!InternalFS.exists(BATT_CAL_FILE)) return;
+    File f = InternalFS.open(BATT_CAL_FILE, FILE_O_READ);
+    if (!f) return;
+    float v = 0;
+    if (f.read((uint8_t*)&v, sizeof(v)) == sizeof(v) && v >= 1.0f && v <= 9.99f) {
+      board.setBattCal(v);
+    }
+    f.close();
+  }
+
+  static void saveBattCalibration(float v) {
+    InternalFS.remove(BATT_CAL_FILE);
+    File f = InternalFS.open(BATT_CAL_FILE, FILE_O_WRITE);
+    if (!f) return;
+    f.write((uint8_t*)&v, sizeof(v));
+    f.close();
+  }
+#endif
+
 #include "icons.h"
 
 struct PowerChoice {
@@ -187,6 +211,7 @@ class HomeScreen : public UIScreen {
     NEIGHBORS,
     RADIO,
     POWER,
+    BATT,
     SCAN,
     FSCAN,
     BLUETOOTH,
@@ -209,6 +234,9 @@ class HomeScreen : public UIScreen {
   uint8_t _page;
   uint8_t _setup_row;
   bool _setup_edit;
+#ifdef HELTEC_T096
+  bool _cal_edit;
+#endif
   bool _shutdown_init;
   AdvertPath recent[UI_RECENT_LIST_SIZE];
   NeighborInfo neighbor_list[NEIGHBOR_TABLE_SIZE];
@@ -449,13 +477,30 @@ class HomeScreen : public UIScreen {
 public:
   HomeScreen(UITask* task, mesh::RTCClock* rtc, SensorManager* sensors, NodePrefs* node_prefs)
      : _task(task), _rtc(rtc), _sensors(sensors), _node_prefs(node_prefs), _page(0),
-       _setup_row(0), _setup_edit(false), _shutdown_init(false), scan_peak(-127), fscan_state(FSCAN_IDLE), fscan_n(0),
+       _setup_row(0), _setup_edit(false), _shutdown_init(false)
+#ifdef HELTEC_T096
+       , _cal_edit(false)
+#endif
+       , scan_peak(-127), fscan_state(FSCAN_IDLE), fscan_n(0),
        sensors_lpp(200) {  }
+
+#ifdef HELTEC_T096
+  void stepBattCal(int dir) {
+    int c100 = (int)(board.battCal() * 100.0f + 0.5f) + dir;
+    if (c100 < 100) c100 = 100;
+    if (c100 > 999) c100 = 999;
+    board.setBattCal(c100 / 100.0f);
+    _task->requestRefresh();
+  }
+#endif
 
   bool allowsClock() const {
     if (_node_prefs && _node_prefs->clock_saver == 0) return false;
     if (_page == HomePage::SCAN || _page == HomePage::FSCAN) return false;
     if (_page == HomePage::NEIGHBORS) return false;
+#ifdef HELTEC_T096
+    if (_page == HomePage::BATT && _cal_edit) return false;
+#endif
 #if ENV_INCLUDE_GPS == 1
     if (_page == HomePage::BEACON) return false;
 #endif
@@ -711,6 +756,57 @@ public:
         const char* hint = hold ? hold : "mode: " PRESS_LABEL;
         display.drawTextCentered(display.width() / 2, y, hint);
       }
+    } else if (_page == HomePage::BATT) {
+      uint16_t mv = _task->getBattMilliVolts();
+      int span = BATT_MAX_MILLIVOLTS - BATT_MIN_MILLIVOLTS;
+      int pct = span > 0 ? (int)(((long)mv - BATT_MIN_MILLIVOLTS) * 100 / span) : 0;
+      if (pct < 0) pct = 0;
+      if (pct > 100) pct = 100;
+
+      display.setTextSize(1);
+      display.setColor(UIColor::primary_txt);
+      display.drawTextLeftAlign(0, 18, "Battery");
+      sprintf(tmp, "%d%%", pct);
+      display.drawTextRightAlign(display.width() - 1, 18, tmp);
+
+      display.setTextSize(2);
+#ifdef HELTEC_T096
+      if (_cal_edit) {   // mV precision while editing: every cal step is visible
+        sprintf(tmp, "%u.%03u V", (unsigned)(mv / 1000), (unsigned)(mv % 1000));
+      } else
+#endif
+      {
+        sprintf(tmp, "%u.%02u V", (unsigned)(mv / 1000), (unsigned)((mv % 1000) / 10));
+      }
+      display.drawTextCentered(display.width() / 2, 28, tmp);
+
+      display.setTextSize(1);
+#ifdef HELTEC_T096
+      char tbuf[8];
+      float t = _task->getMCUTemperature();
+      if (isnan(t)) {
+        strcpy(tbuf, "--.-C");
+      } else {
+        int tenths = (int)(t * 10.0f + (t >= 0 ? 0.5f : -0.5f));
+        sprintf(tbuf, "%s%d.%dC", tenths < 0 ? "-" : "", abs(tenths) / 10, abs(tenths) % 10);
+      }
+      int c100 = (int)(board.battCal() * 100.0f + 0.5f);
+      if (_cal_edit) {
+        display.setColor(UIColor::primary_txt);
+        sprintf(tmp, "%s  cal %d.%02d", tbuf, c100 / 100, c100 % 100);
+        display.drawTextCentered(display.width() / 2, 46, tmp);
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextCentered(display.width() / 2, 55, "click:+ dbl:- hold:save");
+      } else {
+        display.setColor(UIColor::secondary_txt);
+        sprintf(tmp, "%s  cal %d.%02d", tbuf, c100 / 100, c100 % 100);
+        display.drawTextCentered(display.width() / 2, 46, tmp);
+      }
+#else
+      display.setColor(UIColor::secondary_txt);
+      sprintf(tmp, "%u mV", (unsigned)mv);
+      display.drawTextCentered(display.width() / 2, 52, tmp);
+#endif
     } else if (_page == HomePage::SCAN) {
       if (scan_cnt == 0) sampleNoise();
       if (scan_cnt > 0) {
@@ -1033,6 +1129,24 @@ public:
   }
 
   bool handleInput(char c) override {
+#ifdef HELTEC_T096
+    if (_page == HomePage::BATT && _cal_edit) {
+      if (c == KEY_NEXT || c == KEY_RIGHT || c == KEY_UP) { stepBattCal(1); return true; }
+      if (c == KEY_PREV || c == KEY_LEFT || c == KEY_DOWN) { stepBattCal(-1); return true; }
+      if (c == KEY_ENTER) {   // long press: save and exit
+        saveBattCalibration(board.battCal());
+        _cal_edit = false;
+        _task->showAlert("Cal saved", 900);
+        _task->requestRefresh();
+      }
+      return true;   // swallow all other keys while editing
+    }
+    if (c == KEY_ENTER && _page == HomePage::BATT) {
+      _cal_edit = true;
+      _task->requestRefresh();
+      return true;
+    }
+#endif
     if (c == KEY_QUAD) {
 #if ENV_INCLUDE_GPS == 1
       if (_page != HomePage::BEACON) return false;
@@ -1120,6 +1234,9 @@ public:
         }
         if (_page == HomePage::POWER) {
           _task->showAlert("Power", 800);
+        }
+        if (_page == HomePage::BATT) {
+          _task->showAlert("Battery", 800);
         }
         if (_page == HomePage::SCAN) {
           _task->showAlert("Noise scan", 800);
@@ -1700,6 +1817,10 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 
   ui_started_at = millis();
   _alert_expiry = 0;
+
+#ifdef HELTEC_T096
+  loadBattCalibration();   // InternalFS is already mounted at this point
+#endif
 
   splash = new SplashScreen(this);
   home = new HomeScreen(this, &rtc_clock, sensors, node_prefs);
