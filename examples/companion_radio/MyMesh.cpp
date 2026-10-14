@@ -2488,7 +2488,7 @@ static void formatLocalDateTime(uint32_t utc, int16_t tz_mins, char* buf, size_t
 void MyMesh::runCLICommand(char* command, Print& out) {
     char line[96];
     if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
-      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, set tx.led on|off, set link ble|wifi|off, set wifi.ssid, set wifi.password, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
+      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, set tx.led on|off, set link ble|wifi|usb|off, set wifi.ssid, set wifi.password, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
     } else if (strcmp(command, "ver") == 0) {
       snprintf(line, sizeof(line), "%s %s\n", FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
       out.print(line);
@@ -2679,12 +2679,14 @@ void MyMesh::runCLICommand(char* command, Print& out) {
         const char* arg = (config[4] == ' ') ? &config[5] : "";
         while (*arg == ' ') arg++;
         if (*arg == 0) {
+          uint8_t shown = companionEffectiveLinkMode(_prefs.link_mode);
           const char* name = "ble";
-          if (_prefs.link_mode == LINK_MODE_WIFI) name = "wifi";
-          else if (_prefs.link_mode == LINK_MODE_OFF) name = "off";
+          if (shown == LINK_MODE_WIFI) name = "wifi";
+          else if (shown == LINK_MODE_USB) name = "usb";
+          else if (shown == LINK_MODE_OFF) name = "off";
           snprintf(line, sizeof(line), "  > link is %s\n", name);
           out.print(line);
-          if (_prefs.link_mode == LINK_MODE_WIFI) {
+          if (shown == LINK_MODE_WIFI) {
             snprintf(line, sizeof(line), "  > ssid %s\n", _prefs.wifi_ssid[0] ? _prefs.wifi_ssid : "(none)");
             out.print(line);
             char ip[16];
@@ -2700,10 +2702,17 @@ void MyMesh::runCLICommand(char* command, Print& out) {
           if (strcmp(arg, "ble") == 0) mode = LINK_MODE_BLE;
           else if (strcmp(arg, "off") == 0) mode = LINK_MODE_OFF;
           else if (strcmp(arg, "wifi") == 0) mode = LINK_MODE_WIFI;
+          else if (strcmp(arg, "usb") == 0) mode = LINK_MODE_USB;
           else {
-            out.print("  Error: link is ble, wifi or off\n");
+            out.print("  Error: link is ble, wifi, usb or off\n");
             mode = 0xFF;
           }
+#if !defined(BLE_PIN_CODE)
+          if (mode == LINK_MODE_BLE) {
+            out.print("  Error: ble is not in this build\n");
+            mode = 0xFF;
+          }
+#endif
 #if !defined(ESP32)
           if (mode == LINK_MODE_WIFI) {
             out.print("  Error: wifi is ESP32 only\n");

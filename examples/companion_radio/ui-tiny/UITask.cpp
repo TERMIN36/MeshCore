@@ -6,10 +6,6 @@
 #include "target.h"
 #include "u8g2_icons.h"
 
-#ifdef WIFI_SSID
-  #include <WiFi.h>
-#endif
-
 #ifndef AUTO_OFF_MILLIS
   #define AUTO_OFF_MILLIS     15000   // 15 seconds
 #endif
@@ -192,12 +188,6 @@ public:
       display.setCursor(0, 19);
       display.print(tmp);
 
-      #ifdef WIFI_SSID
-        IPAddress ip = WiFi.localIP();
-        snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-        display.setTextSize(1);
-        display.drawTextCentered(display.width() / 2, 54, tmp);
-      #endif
       if (_task->hasConnection()) {
         display.setColor(UIColor::warning_txt);
         display.setTextSize(1);
@@ -267,9 +257,10 @@ public:
       display.drawTextRightAlign(display.width(), 26, tmp);
 
     } else if (_page == HomePage::BLUETOOTH) {
-      uint8_t link_mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
+      uint8_t link_mode = companionEffectiveLinkMode(_node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE);
       const char* name = "BLE";
       if (link_mode == LINK_MODE_WIFI) name = "WiFi";
+      else if (link_mode == LINK_MODE_USB) name = "USB";
       else if (link_mode == LINK_MODE_OFF) name = "off";
       display.setColor(UIColor::corp_blue);
       display.drawXbm((display.width() - 32) / 2, 8,
@@ -420,25 +411,10 @@ public:
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::BLUETOOTH) {
-#if defined(BLE_PIN_CODE)
-      uint8_t mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
-#if defined(ESP32) && !defined(WIFI_SSID)
-      if (mode == LINK_MODE_BLE) mode = LINK_MODE_WIFI;
-      else if (mode == LINK_MODE_WIFI) mode = LINK_MODE_OFF;
-      else mode = LINK_MODE_BLE;
-#else
-      mode = mode == LINK_MODE_OFF ? LINK_MODE_BLE : LINK_MODE_OFF;
-#endif
+      uint8_t mode = companionNextLinkMode(_node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE);
       if (_node_prefs) _node_prefs->link_mode = mode;
       the_mesh.savePrefs();
       companionApplyLink();
-#else
-      if (_task->isBluetoothEnabled()) {
-        _task->disableBluetooth();
-      } else {
-        _task->enableBluetooth();
-      }
-#endif
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::RECENT) {

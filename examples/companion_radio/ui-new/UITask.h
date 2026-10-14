@@ -61,6 +61,8 @@ class UITask : public AbstractUITask {
   unsigned long _idle_since;
 
   void userLedHandler();
+  char readInput();
+  static void pollButtonsDuringBusy();
 
   // Button action handlers
   char checkDisplayOn(char c);
@@ -92,7 +94,9 @@ public:
   int  getMsgCount() const { return _msgcount; }
   int  getDeviceStored() const;
   bool hasDisplay() const { return _display != NULL; }
+  bool displayPresent() const { return _display != NULL && _display->isPresent(); }
   bool isEink() const { return _display != NULL && _display->isEink(); }
+  bool canChooseRefresh() const { return _display != NULL && _display->hasRefreshChoice(); }
   void syncDisplayRefresh() {
     if (_display && _node_prefs) _display->setRefreshMode(_node_prefs->eink_refresh);
   }
@@ -147,4 +151,6 @@ public:
   void loop() override;
 
   void shutdown(bool restart = false);
+  // Last image left on e-ink after a manual Off. Other shutdown paths skip it.
+  void paintEinkOff();
 };

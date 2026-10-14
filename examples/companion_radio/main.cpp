@@ -40,24 +40,16 @@ MultiSerialInterface interface_manager;
 #endif
 
 // include wifi interface
-#if defined(WIFI_SSID) || (defined(ESP32) && defined(BLE_PIN_CODE))
+#if defined(ESP32) && defined(BLE_PIN_CODE)
   #ifndef TCP_PORT
     #define TCP_PORT 5000
   #endif
-  #ifdef ESP32
-    // include esp32 wifi interface
-    #include <helpers/esp32/SerialWifiInterface.h>
-    SerialWifiInterface wifi_interface;
-  #elif defined(WIFI_SSID)
-    #error "SerialWifiInterface is not defined for this platform"
-  #endif
+  #include <helpers/esp32/SerialWifiInterface.h>
+  SerialWifiInterface wifi_interface;
 #endif
 
-// include usb interface
-#if defined(ENABLE_USB_INTERFACE)
-  #include <helpers/ArduinoSerialInterface.h>
-  ArduinoSerialInterface usb_serial_interface;
-#endif
+#include <helpers/ArduinoSerialInterface.h>
+ArduinoSerialInterface usb_serial_interface;
 
 // include ethernet interface
 #if defined(ETHERNET_ENABLED)
@@ -116,7 +108,7 @@ void halt() {
 }
 
 /* WIFI RECONNECT TRACKERS */
-#if defined(ESP32) && (defined(WIFI_SSID) || defined(BLE_PIN_CODE))
+#if defined(ESP32) && defined(BLE_PIN_CODE)
   bool wifi_needs_reconnect = false;
   unsigned long last_wifi_reconnect_attempt = 0;
 #endif
@@ -127,7 +119,7 @@ void halt() {
 static bool companion_clock_locked = false;
 #endif
 
-#if defined(ESP32) && defined(BLE_PIN_CODE) && !defined(WIFI_SSID)
+#if defined(ESP32) && defined(BLE_PIN_CODE)
 #include <BLEDevice.h>
 #if __has_include(<soc/rtc_cntl_reg.h>)
 #include <soc/rtc_cntl_reg.h>
@@ -319,13 +311,14 @@ static void companionWifiStart(const char* ssid, const char* pass) {
 
 void companionApplyLink() {
   NodePrefs* prefs = the_mesh.getNodePrefs();
-  uint8_t mode = prefs ? prefs->link_mode : LINK_MODE_BLE;
-#if defined(ESP32) && defined(BLE_PIN_CODE) && !defined(WIFI_SSID)
-  if (mode != LINK_MODE_WIFI && wifi_interface.isEnabled() && (WiFi.getMode() & WIFI_MODE_STA) == 0) {
-    wifi_interface.disable();
-  }
+  uint8_t mode = companionEffectiveLinkMode(prefs ? prefs->link_mode : LINK_MODE_BLE);
+
+  if (mode == LINK_MODE_USB) usb_serial_interface.enable();
+  else usb_serial_interface.disable();
+
+#if defined(ESP32) && defined(BLE_PIN_CODE)
   if (mode == LINK_MODE_WIFI) {
-    if (prefs->wifi_ssid[0]) companionWifiStart(prefs->wifi_ssid, prefs->wifi_wpass);
+    if (prefs && prefs->wifi_ssid[0]) companionWifiStart(prefs->wifi_ssid, prefs->wifi_wpass);
     else {
       companionBleStop();
       companionWifiStop();
@@ -336,33 +329,21 @@ void companionApplyLink() {
   if (wifi_interface.isEnabled() || companion_wifi_fast) {
     companionWifiStop();
   }
-  if (mode == LINK_MODE_OFF) {
+  if (mode == LINK_MODE_BLE) companionBleStart();
+  else {
     companionBleStop();
     companionReleaseModem();
-  } else {
-    companionBleStart();
   }
 #elif defined(BLE_PIN_CODE)
-  if (mode == LINK_MODE_OFF) bluetooth_interface.disable();
-  else bluetooth_interface.enable();
-#else
-  (void)mode;
+  if (mode == LINK_MODE_BLE) bluetooth_interface.enable();
+  else bluetooth_interface.disable();
 #endif
 }
 
 bool companionLinkHoldsCpu() {
-#if defined(ESP32) && defined(WIFI_SSID)
-  // Compile-time station. The macro only means the build can start it;
-  // light sleep waits until STA is actually up.
-  if ((WiFi.getMode() & WIFI_MODE_STA) != 0) return true;
-#endif
-#if defined(ESP32) && defined(BLE_PIN_CODE) && !defined(WIFI_SSID)
-  // Station sleep is allowed. This used to return true for the whole
-  // Wi-Fi session, and hasPendingWork then never reached light sleep.
+  // Station sleep is allowed. Holding the CPU for the whole Wi-Fi session
+  // kept hasPendingWork from reaching light sleep.
   return false;
-#else
-  return false;
-#endif
 }
 
 static uint32_t link_active_ms = 0;
@@ -386,7 +367,7 @@ uint32_t companionIdlePeriodMs() {
 bool companionWifiAddress(char* dest, size_t cap) {
   if (!dest || cap == 0) return false;
   dest[0] = 0;
-#if defined(ESP32) && ((defined(BLE_PIN_CODE) && !defined(WIFI_SSID)) || defined(WIFI_SSID))
+#if defined(ESP32) && defined(BLE_PIN_CODE)
   if (WiFi.status() != WL_CONNECTED) return false;
   IPAddress ip = WiFi.localIP();
   if (ip == IPAddress((uint32_t)0)) return false;
@@ -475,7 +456,7 @@ void setup() {
 #endif
 
 // add wifi interface
-#if defined(ESP32) && (defined(WIFI_SSID) || defined(BLE_PIN_CODE))
+#if defined(ESP32) && defined(BLE_PIN_CODE)
   WiFi.onEvent([](WiFiEvent_t event, WiFiEventInfo_t info){
       if (event == ARDUINO_EVENT_WIFI_STA_DISCONNECTED) {
           WIFI_DEBUG_PRINTLN("WiFi disconnected. Flagging for reconnect...");
@@ -485,23 +466,11 @@ void setup() {
           wifi_needs_reconnect = false;
       }
   });
-#endif
-#ifdef WIFI_SSID
-  // Sleep is held by companionLinkHoldsCpu() while STA is up, not by a
-  // boot flag. inhibit_sleep stays free for OTA.
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(WIFI_SSID, WIFI_PWD);
-  wifi_interface.begin(TCP_PORT);
-  interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
-#elif defined(ESP32) && defined(BLE_PIN_CODE)
   interface_manager.addInterface(InterfaceType::WiFi, &wifi_interface);
 #endif
 
-// add usb interface
-#if defined(ENABLE_USB_INTERFACE)
   usb_serial_interface.begin(Serial);
   interface_manager.addInterface(InterfaceType::USB, &usb_serial_interface);
-#endif
 
 // add ethernet interface
 #if defined(ETHERNET_ENABLED)
@@ -518,9 +487,7 @@ void setup() {
 #endif
 
   the_mesh.startInterface(interface_manager);
-#if defined(BLE_PIN_CODE)
   companionApplyLink();
-#endif
   sensors.begin();
 
 #if ENV_INCLUDE_GPS == 1
@@ -635,7 +602,7 @@ static void companionBleLightSleep(uint32_t sleep_ms) {
 }
 #endif
 
-#if defined(ESP32) && defined(BLE_PIN_CODE) && !defined(WIFI_SSID)
+#if defined(ESP32) && defined(BLE_PIN_CODE)
 static bool wifi_cpu_light = false;
 
 static void companionWifiCpuAwake() {
@@ -805,15 +772,7 @@ void loop() {
 #endif
   }
 
-#if defined(ESP32) && defined(WIFI_SSID)
-  // Safely attempt to reconnect every 10 seconds if flagged
-  if (wifi_needs_reconnect && (millis() - last_wifi_reconnect_attempt > 10000)) {
-    WIFI_DEBUG_PRINTLN("Attempting manual WiFi reconnect...");
-    WiFi.disconnect();
-    WiFi.reconnect();
-    last_wifi_reconnect_attempt = millis();
-  }
-#elif defined(ESP32) && defined(BLE_PIN_CODE)
+#if defined(ESP32) && defined(BLE_PIN_CODE)
   NodePrefs* prefs = the_mesh.getNodePrefs();
   bool wifi_link = prefs && prefs->link_mode == LINK_MODE_WIFI && prefs->wifi_ssid[0];
   if (wifi_link && wifi_needs_reconnect && (millis() - last_wifi_reconnect_attempt > 10000)) {

@@ -25,6 +25,12 @@
 #define EINK_REFRESH_PERCENT  2  // partial update by a percent of the panel
 #define EINK_REFRESH_COUNT    3
 
+// Saver on the settings page. Stored in clock_saver ("clk"): 0 and 1 stay compatible.
+#define SAVER_OFF             0
+#define SAVER_CLOCK           1
+#define SAVER_BATT            2
+#define SAVER_COUNT           3
+
 class NodePrefs : public ConfigSerializer {  // persisted to file
 public:
   float airtime_factor = 0;
@@ -68,12 +74,13 @@ public:
   uint8_t default_scope_key[16];
   int16_t tz_offset_mins = 0;  // local time = UTC + this many minutes
   uint8_t ui_lang = UI_LANG_RU;  // weekday line on the e-ink clock
-  uint8_t clock_saver = 1;       // 1 = e-ink clock screensaver
+  uint8_t clock_saver = SAVER_CLOCK;  // SAVER_OFF, SAVER_CLOCK, or SAVER_BATT
+  uint8_t show_msg_now = 1;      // 1 = open the message as it arrives
   uint8_t tx_led = 1;            // 1 = blink the board LED while transmitting
-  uint8_t eink_refresh = EINK_REFRESH_CLEAR;
+  uint8_t eink_refresh = EINK_REFRESH_SHORT;
   uint8_t time_valid = 0;        // 1 once GPS, phone, manual set, or a trusted node has set the clock
   uint8_t clock_nodes[CLOCK_NODE_MAX][32];  // pubkeys to poll for time; empty slots are zeros
-  uint8_t link_mode = 0;         // LINK_MODE_BLE, LINK_MODE_WIFI, or LINK_MODE_OFF
+  uint8_t link_mode = 0;         // LINK_MODE_BLE, LINK_MODE_WIFI, LINK_MODE_OFF, or LINK_MODE_USB
   char wifi_ssid[33] = {};
   char wifi_wpass[64] = {};
 
@@ -163,7 +170,8 @@ private:
       def("txled", _parent->tx_led);       // blink while transmitting
       def("tz", _parent->tz_offset_mins);  // minutes east of UTC
       def("lang", _parent->ui_lang);       // 0 = ru, 1 = en
-      def("clk", _parent->clock_saver);   // e-ink clock screensaver
+      def("clk", _parent->clock_saver);   // SAVER_OFF, SAVER_CLOCK, or SAVER_BATT
+      def("msgnow", _parent->show_msg_now); // 1 = open the message as it arrives
       def("eref", _parent->eink_refresh); // e-ink refresh choice, see EINK_REFRESH_*
       def("tvalid", _parent->time_valid);
       def("link", _parent->link_mode);

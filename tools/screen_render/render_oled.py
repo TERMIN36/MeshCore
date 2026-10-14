@@ -634,22 +634,22 @@ def scr_radio(d, profile="Normal", freq=869.525, bw=250.0, sf=11, cr=5, lna=Fals
     d.drawTextRightAlign(d.width() - 1, 53, "3x: profile")
 
 
-def scr_setup(d, row=0, clock_on=True, mode=0, editing=False):
+def scr_setup(d, row=0, saver="clock", mode=1, show=True, editing=False):
     home_header(d, "SETUP", gps_on=False)
-    rows_l = ("Clock", "ScreenMode")
-    rows_r = ("on" if clock_on else "off", str(mode + 1))
+    rows_l = ("Saver", "ScreenMode", "Messages")
+    rows_r = (saver, str(mode + 1), "show" if show else "don't show")
     d.setTextSize(1)
     w = d.width()
-    for i in range(2):
+    for i in range(3):
         y = 22 + i * 14
         d.setColor(WHITE)
         if editing and i == row:
             d.drawTextLeftAlign(0, y, ">")
         d.drawTextLeftAlign(10, y, rows_l[i])
         d.drawTextRightAlign(w - 8, y, rows_r[i])
-    if d.height() >= 64:
+    if d.height() >= 96:
         d.setColor(WHITE)
-        d.drawTextCentered(w // 2, 52, "triple click" if editing else PRESS_LABEL)
+        d.drawTextCentered(w // 2, d.height() - 11, "triple click" if editing else PRESS_LABEL)
 
 
 def scr_power(d, name, cpu, boost, lna, hold=None, gps_on=False):
@@ -860,17 +860,18 @@ SCREENS = [
 # MeshPocket has no GPS, so its companion build has no GPS / Beacon pages.
 EINK_SCREENS = [s for s in SCREENS if s[0][:2] not in ("13", "14", "15", "16")] + [
     ("19_alert", "Всплывающее уведомление", lambda d: (scr_scan(d), d.alert("Peak reset"))),
-    ("21_setup", "Настройки: часы и алгоритм", lambda d: scr_setup(d)),
+    ("22_setup", "Настройки: заставка и экран", lambda d: scr_setup(d)),
 ]
 
-# States of the e-ink settings page. Labels match the glass: Clock / ScreenMode 1..3.
+# Current e-ink settings page: Saver / ScreenMode / Messages.
+# Older Clock / ScreenMode shots stay in docs/screens as 21_setup.png and setup.png.
 SETUP_SHOTS = [
-    ("21_setup", "long press", {}),
-    ("21_setup_clock", "edit Clock", {"editing": True}),
-    ("21_setup_off", "Clock off", {"clock_on": False, "editing": True}),
-    ("21_setup_1", "ScreenMode 1", {"row": 1, "mode": 0, "editing": True}),
-    ("21_setup_2", "ScreenMode 2", {"row": 1, "mode": 1, "editing": True}),
-    ("21_setup_3", "ScreenMode 3", {"row": 1, "mode": 2, "editing": True}),
+    ("22_setup", "long press", {}),
+    ("22_setup_clock", "edit Saver", {"editing": True}),
+    ("22_setup_batt", "Saver batt", {"saver": "batt", "editing": True}),
+    ("22_setup_off", "Saver off", {"saver": "off", "editing": True}),
+    ("22_setup_1", "ScreenMode 1", {"row": 1, "mode": 0, "editing": True}),
+    ("22_setup_hide", "Messages don't show", {"row": 2, "show": False, "editing": True}),
 ]
 
 COMPARE = [
@@ -1075,7 +1076,7 @@ def main():
         im = to_image_eink(d)
         im.save(os.path.join(out, "meshpocket", fname + ".png"))
         setup_items.append((label, im))
-    sheet(setup_items, 3, "Settings — Mesh Pocket 250x122").save(os.path.join(out, "setup.png"))
+    sheet(setup_items, 3, "Settings — Mesh Pocket 250x122").save(os.path.join(out, "setup_saver.png"))
 
     date_items = []
     for fname, label, fn in HOME_DATE:

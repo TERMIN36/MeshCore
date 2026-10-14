@@ -1184,17 +1184,17 @@ region save
 
 ---
 
-### Companion link (ESP32 BLE builds)
+### Companion link
 
-On Companion builds with Bluetooth, the Link page and these commands choose how the phone connects. BLE and Wi-Fi are mutually exclusive.
+The Link page and these commands choose how the phone connects. Only one channel stays up: Bluetooth, Wi-Fi, USB cable, or off. Which steps appear depends on the board (no Bluetooth → USB and off; no Wi-Fi → that step is skipped). A separate USB or Wi-Fi firmware file is no longer needed.
 
 **Usage:**
-- `set link ble|wifi|off`
+- `set link ble|wifi|usb|off`
 - `set wifi.ssid <name>`
 - `set wifi.password <secret>` (alias `wifi.pwd`)
 - `get tx.led` / `set tx.led on|off` — board LED during LoRa TX only (default `on`)
 
-A clean firmware starts on the most economical Power profile (Eco max). A saved link mode is kept across reboot.
+A clean firmware starts on the most economical Power profile (Eco max). A saved link mode is kept across reboot. Wi-Fi no longer blocks MCU sleep by itself; turn the screen off (and GPS if it holds the board) for the device to sleep.
 
 ### Repeater Wi-Fi, MQTT bridge, and MeshCoreTel
 

@@ -22,7 +22,12 @@ public:
   int height() const { return _h; }
 
   virtual bool isOn() = 0;
+  virtual bool isPresent() const { return true; } // a panel is attached; NullDisplayDriver is not
   virtual bool isEink() { return false; } // default to non-eink, override in eink drivers
+  // ScreenMode on Setup. Only panels that honor setRefreshMode.
+  virtual bool hasRefreshChoice() const { return false; }
+  // Called on every pass of an e-ink BUSY wait, instead of delay(1). Empty elsewhere.
+  virtual void setBusyPoll(void (*fn)()) { (void)fn; }
   // Full panel clear. Drops the ghost of the previous image before a new frame.
   virtual void clean() {}
   // Next frame uses the full waveform, even if few pixels changed.
@@ -47,6 +52,8 @@ public:
   virtual int frameWidth() { return _w; }
   virtual int frameHeight() { return _h; }
   virtual void blit1(int x, int y, int w, int h, const uint8_t* bits) { drawXbm(x, y, bits, w, h); }
+  // Physical pixels. Drivers that scale the logical grid override this.
+  virtual void fillFrameRect(int x, int y, int w, int h) { fillRect(x, y, w, h); }
   virtual uint16_t getTextWidth(const char* str) = 0;
   virtual void drawTextCentered(int mid_x, int y, const char* str) {   // helper method (override to optimise)
     int w = getTextWidth(str);

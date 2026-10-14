@@ -7,9 +7,6 @@
 #include <helpers/TxtDataHelpers.h>
 #include "../MyMesh.h"
 #include "target.h"
-#ifdef WIFI_SSID
-  #include <WiFi.h>
-#endif
 
 #ifndef AUTO_OFF_MILLIS
   #define AUTO_OFF_MILLIS     15000   // 15 seconds
@@ -426,31 +423,72 @@ class HomeScreen : public UIScreen {
     }
   }
 
-  // The gps setting is published only after the module is detected.
-  // Its value is "1" only while that module is switched on.
+  // Saver needs the e-ink clock. ScreenMode needs a panel that honors the refresh choice.
+  // Messages is every board that has a display.
+  enum SetupItem : uint8_t {
+    SETUP_SAVER = 0,
+    SETUP_SCREEN = 1,
+    SETUP_MESSAGES = 2,
+    SETUP_ITEM_COUNT = 3
+  };
+
+  bool setupItemOn(uint8_t item) const {
+    if (item == SETUP_SAVER) return _task->isEink();
+    if (item == SETUP_SCREEN) return _task->canChooseRefresh();
+    if (item == SETUP_MESSAGES) return _task->displayPresent();
+    return false;
+  }
+
+  int setupItemCount() const {
+    int n = 0;
+    for (uint8_t i = 0; i < SETUP_ITEM_COUNT; i++) {
+      if (setupItemOn(i)) n++;
+    }
+    return n;
+  }
+
+  uint8_t setupItemAt(int visible) const {
+    int n = 0;
+    for (uint8_t i = 0; i < SETUP_ITEM_COUNT; i++) {
+      if (!setupItemOn(i)) continue;
+      if (n == visible) return i;
+      n++;
+    }
+    return SETUP_MESSAGES;
+  }
+
   bool isPageVisible(uint8_t page) const {
-    if (page == HomePage::SETUP) return _task->isEink();
+    if (page == HomePage::SETUP) return setupItemCount() > 0;
 #if ENV_INCLUDE_GPS == 1
+    // The gps setting is published only after the module is detected.
+    // Its value is "1" only while that module is switched on.
     if (page == HomePage::BEACON) return _task->getGPSState();
 #endif
     return true;
   }
 
   void stepSetupRow(int dir) {
+    int count = setupItemCount();
+    if (count < 1) return;
     int next = (int)_setup_row + dir;
-    if (next < 0) next = 1;
-    if (next > 1) next = 0;
+    if (next < 0) next = count - 1;
+    if (next >= count) next = 0;
     _setup_row = (uint8_t)next;
   }
 
   void changeSetupValue() {
     if (!_node_prefs) return;
-    if (_setup_row == 0) {
-      _node_prefs->clock_saver = _node_prefs->clock_saver ? 0 : 1;
-    } else {
+    uint8_t item = setupItemAt(_setup_row);
+    if (item == SETUP_SAVER) {
+      uint8_t mode = _node_prefs->clock_saver;
+      if (mode >= SAVER_COUNT) mode = SAVER_OFF;
+      _node_prefs->clock_saver = (uint8_t)((mode + 1) % SAVER_COUNT);
+    } else if (item == SETUP_SCREEN) {
       uint8_t mode = _node_prefs->eink_refresh;
       if (mode >= EINK_REFRESH_COUNT) mode = 0;
       _node_prefs->eink_refresh = (uint8_t)((mode + 1) % EINK_REFRESH_COUNT);
+    } else if (item == SETUP_MESSAGES) {
+      _node_prefs->show_msg_now = _node_prefs->show_msg_now ? 0 : 1;
     }
     the_mesh.savePrefs();
     _task->syncDisplayRefresh();
@@ -476,7 +514,7 @@ public:
        sensors_lpp(200) {  }
 
   bool allowsClock() const {
-    if (_node_prefs && _node_prefs->clock_saver == 0) return false;
+    if (_node_prefs && _node_prefs->clock_saver == SAVER_OFF) return false;
     if (_page == HomePage::SCAN || _page == HomePage::FSCAN) return false;
     if (_page == HomePage::NEIGHBORS) return false;
 #if ENV_INCLUDE_GPS == 1
@@ -507,6 +545,7 @@ public:
       _task->setIdleWakeHint(left > 0 ? (uint32_t)left : 1);
     }
     if (_shutdown_init && !_task->isButtonPressed()) {  // must wait for USR button to be released
+      if (_task->isEink()) _task->paintEinkOff();
       _task->shutdown();
     }
   }
@@ -585,8 +624,8 @@ public:
       display.drawTextCentered(display.width() / 2, 22, tmp);
 
       bool show_date = !display.isEink() && _rtc->getCurrentTime() >= 1000000000UL;
-      uint8_t link_mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
-      #if defined(ESP32) && defined(BLE_PIN_CODE) && !defined(WIFI_SSID)
+      uint8_t link_mode = companionEffectiveLinkMode(_node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE);
+      #if defined(ESP32) && defined(BLE_PIN_CODE)
         char ip[16];
         if (link_mode == LINK_MODE_WIFI && companionWifiAddress(ip, sizeof(ip))) {
           snprintf(tmp, sizeof(tmp), "IP: %s", ip);
@@ -595,13 +634,6 @@ public:
           if (display.height() <= 64) ip_y = show_date ? -1 : 54;
           if (ip_y >= 0) display.drawTextCentered(display.width() / 2, ip_y, tmp);
         }
-      #elif defined(WIFI_SSID)
-        IPAddress ip = WiFi.localIP();
-        snprintf(tmp, sizeof(tmp), "IP: %d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
-        display.setTextSize(1);
-        int ip_y = display.height() - 22;
-        if (display.height() <= 64) ip_y = show_date ? -1 : 54;
-        if (ip_y >= 0) display.drawTextCentered(display.width() / 2, ip_y, tmp);
       #endif
       if (_task->hasConnection()) {
         display.setColor(UIColor::warning_txt);
@@ -867,12 +899,15 @@ public:
         display.drawTextCentered(display.width() / 2, display.height() - 11, "scan: " PRESS_LABEL);
       }
     } else if (_page == HomePage::BLUETOOTH) {
-      uint8_t link_mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
+      uint8_t link_mode = companionEffectiveLinkMode(_node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE);
       const uint8_t* icon = bluetooth_on;
       const char* name = "BLE";
       if (link_mode == LINK_MODE_WIFI) {
         icon = wifi_on;
         name = "WiFi";
+      } else if (link_mode == LINK_MODE_USB) {
+        icon = bluetooth_off;
+        name = "USB";
       } else if (link_mode == LINK_MODE_OFF) {
         icon = bluetooth_off;
         name = "off";
@@ -1066,23 +1101,33 @@ public:
       else sensors_scroll_offset = 0;
 #endif
     } else if (_page == HomePage::SETUP) {
-      uint8_t mode = _node_prefs ? _node_prefs->eink_refresh : EINK_REFRESH_CLEAR;
-      if (mode >= EINK_REFRESH_COUNT) mode = EINK_REFRESH_CLEAR;
-      bool clock_on = _node_prefs && _node_prefs->clock_saver != 0;
+      uint8_t mode = _node_prefs ? _node_prefs->eink_refresh : EINK_REFRESH_SHORT;
+      if (mode >= EINK_REFRESH_COUNT) mode = EINK_REFRESH_SHORT;
+      uint8_t saver = _node_prefs ? _node_prefs->clock_saver : SAVER_CLOCK;
+      const char* saver_name = "off";
+      if (saver == SAVER_CLOCK) saver_name = "clock";
+      else if (saver == SAVER_BATT) saver_name = "batt";
       sprintf(tmp, "%u", (unsigned)mode + 1);
-      const char* rows_l[2] = { "Clock", "ScreenMode" };
-      const char* rows_r[2] = { clock_on ? "on" : "off", tmp };
+      bool show_now = !_node_prefs || _node_prefs->show_msg_now;
+      const char* labels[SETUP_ITEM_COUNT] = { "Saver", "ScreenMode", "Messages" };
+      const char* values[SETUP_ITEM_COUNT] = { saver_name, tmp, show_now ? "show" : "don't show" };
       display.setTextSize(1);
-      for (int i = 0; i < 2; i++) {
-        int y = 22 + i * 14;
+      int shown = 0;
+      int last_y = 22;
+      for (uint8_t item = 0; item < SETUP_ITEM_COUNT; item++) {
+        if (!setupItemOn(item)) continue;
+        int y = 22 + shown * 14;
+        last_y = y;
         display.setColor(UIColor::primary_txt);
-        if (_setup_edit && (uint8_t)i == _setup_row) display.drawTextLeftAlign(0, y, ">");
-        display.drawTextLeftAlign(10, y, rows_l[i]);
-        display.drawTextRightAlign(display.width() - 8, y, rows_r[i]);
+        if (_setup_edit && shown == (int)_setup_row) display.drawTextLeftAlign(0, y, ">");
+        display.drawTextLeftAlign(10, y, labels[item]);
+        display.drawTextRightAlign(display.width() - 8, y, values[item]);
+        shown++;
       }
-      if (display.height() >= 64) {
+      int hint_y = display.height() - 11;
+      if (hint_y >= last_y + 12) {
         display.setColor(UIColor::secondary_txt);
-        display.drawTextCentered(display.width() / 2, 52, _setup_edit ? "triple click" : PRESS_LABEL);
+        display.drawTextCentered(display.width() / 2, hint_y, _setup_edit ? "triple click" : PRESS_LABEL);
       }
     } else if (_page == HomePage::SHUTDOWN) {
       display.setColor(UIColor::corp_blue);
@@ -1243,25 +1288,10 @@ public:
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::BLUETOOTH) {
-#if defined(BLE_PIN_CODE)
-      uint8_t mode = _node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE;
-#if defined(ESP32) && !defined(WIFI_SSID)
-      if (mode == LINK_MODE_BLE) mode = LINK_MODE_WIFI;
-      else if (mode == LINK_MODE_WIFI) mode = LINK_MODE_OFF;
-      else mode = LINK_MODE_BLE;
-#else
-      mode = mode == LINK_MODE_OFF ? LINK_MODE_BLE : LINK_MODE_OFF;
-#endif
+      uint8_t mode = companionNextLinkMode(_node_prefs ? _node_prefs->link_mode : LINK_MODE_BLE);
       if (_node_prefs) _node_prefs->link_mode = mode;
       the_mesh.savePrefs();
       companionApplyLink();
-#else
-      if (_task->isBluetoothEnabled()) {
-        _task->disableBluetooth();
-      } else {
-        _task->enableBluetooth();
-      }
-#endif
       return true;
     }
     if (c == KEY_ENTER && _page == HomePage::RECENT) {
@@ -1631,12 +1661,141 @@ static void clockDraw(DisplayDriver& display, const ClockFace& face, int x, int 
   }
 }
 
+// Two rings and a slash, the same weight as the shutdown preview.
+static void drawPercent(DisplayDriver& display, int x, int y, int size) {
+  float s = (float)size;
+  float thick = s * 0.12f;
+  if (thick < 2.4f) thick = 2.4f;
+  float rad = s * 0.20f;
+  float half = thick * 0.5f;
+  float c0 = s * 0.28f;
+  float c1 = s * 0.72f;
+  float x1 = s * 0.80f, y1 = s * 0.12f;
+  float x2 = s * 0.20f, y2 = s * 0.88f;
+  float vx = x2 - x1, vy = y2 - y1;
+  float l2 = vx * vx + vy * vy;
+  if (l2 < 1.f) l2 = 1.f;
+  for (int row = 0; row < size; row++) {
+    int run = -1;
+    for (int col = 0; col <= size; col++) {
+      bool on = false;
+      if (col < size) {
+        float lx = col + 0.5f, ly = row + 0.5f;
+        float dx0 = lx - c0, dy0 = ly - c0;
+        float dx1 = lx - c1, dy1 = ly - c1;
+        float d0 = sqrtf(dx0 * dx0 + dy0 * dy0);
+        float d1 = sqrtf(dx1 * dx1 + dy1 * dy1);
+        if (fabsf(d0 - rad) <= half || fabsf(d1 - rad) <= half) {
+          on = true;
+        } else {
+          float u = ((lx - x1) * vx + (ly - y1) * vy) / l2;
+          if (u < 0.f) u = 0.f;
+          if (u > 1.f) u = 1.f;
+          float dx = lx - (x1 + u * vx);
+          float dy = ly - (y1 + u * vy);
+          on = dx * dx + dy * dy <= half * half;
+        }
+      }
+      if (on) {
+        if (run < 0) run = col;
+      } else if (run >= 0) {
+        display.fillFrameRect(x + run, y + row, col - run, 1);
+        run = -1;
+      }
+    }
+  }
+}
+
+static void drawBatteryIcon(DisplayDriver& display, int x, int y, int w, int h, int pct) {
+  if (w < 8 || h < 8) return;
+  int stroke = h >= 40 ? 3 : 2;
+  display.fillFrameRect(x, y, w, stroke);
+  display.fillFrameRect(x, y + h - stroke, w, stroke);
+  display.fillFrameRect(x, y, stroke, h);
+  display.fillFrameRect(x + w - stroke, y, stroke, h);
+  int cap_h = h * 46 / 100;
+  int cap_w = h * 16 / 100;
+  if (cap_w < 6) cap_w = 6;
+  display.fillFrameRect(x + w, y + (h - cap_h) / 2, cap_w, cap_h);
+  if (pct <= 0) return;
+  int inset = stroke + 3;
+  int iw = w - inset * 2;
+  int ih = h - inset * 2;
+  if (iw < 1 || ih < 1) return;
+  int fw = pct >= 100 ? iw : iw * pct / 100;
+  if (fw < 1) fw = 1;
+  display.fillFrameRect(x + inset, y + inset, fw, ih);
+}
+
+// Big percent above a horizontal battery. Tuned on 200×200 and 250×122.
+static void drawShutdownCharge(DisplayDriver& display, int pct) {
+  int fw = display.frameWidth();
+  int fh = display.frameHeight();
+  if (fw < 16 || fh < 16) return;
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+
+  bool tall = fh >= 160 && fw >= 190;
+  const ClockFace& face = tall ? CLOCK_DIGIT_WIDE : CLOCK_DIGIT_NARROW;
+  int cy = tall ? fh * 58 / 200 : fh * 36 / 122;
+  int bh = tall ? fh * 50 / 200 : fh * 40 / 122;
+  int by = tall ? fh * 124 / 200 : fh * 72 / 122;
+  int bw = tall ? fw * 160 / 200 : fw * 210 / 250;
+  if (bh < 18) bh = 18;
+  int cap_w = bh * 16 / 100;
+  if (cap_w < 6) cap_w = 6;
+  if (bw + cap_w > fw - 8) bw = fw - 8 - cap_w;
+  int bx = (fw - bw - cap_w) / 2;
+
+  char num[8];
+  sprintf(num, "%d", pct);
+  int top, bot;
+  clockInk(face, num, top, bot);
+  int ink = bot - top;
+  if (ink < 1) ink = 1;
+  int ink_bot = cy + ink / 2;
+  if (by < ink_bot + 6) by = ink_bot + 6;
+  if (by + bh > fh - 2) bh = fh - 2 - by;
+
+  int dw = clockWidth(face, num);
+  int psize = ink * 52 / 100;
+  if (psize < 10) psize = 10;
+  int gap = ink * 8 / 100;
+  if (gap < 4) gap = 4;
+  int total = dw + gap + psize;
+  if (total > fw - 4 && gap > 2) {
+    int cut = total - (fw - 4);
+    if (cut > gap - 2) cut = gap - 2;
+    gap -= cut;
+    total = dw + gap + psize;
+  }
+  int x0 = (fw - total) / 2;
+  if (x0 < 0) x0 = 0;
+  clockDraw(display, face, x0, cy - ink / 2 - top, num);
+  drawPercent(display, x0 + dw + gap, cy - ink / 2 + (ink - psize) / 2, psize);
+  drawBatteryIcon(display, bx, by, bw, bh, pct);
+}
+
+static int shutdownChargePercent(UITask* task) {
+#ifndef BATT_MIN_MILLIVOLTS
+  #define BATT_MIN_MILLIVOLTS 3000
+#endif
+#ifndef BATT_MAX_MILLIVOLTS
+  #define BATT_MAX_MILLIVOLTS 4200
+#endif
+  BatteryLevelFilter filter;
+  int level = filter.latch(medianBattMilliVolts(task), BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS);
+  return level * 100 / BatteryLevelFilter::LEVELS;
+}
+
 class ClockScreen : public UIScreen {
   UITask* _task;
   mesh::RTCClock* _rtc;
   MsgPreviewScreen* _preview;
-
   NodePrefs* _prefs;
+  unsigned long _held_since;
+
+  static const unsigned long HOLD_EXIT_MS = 3000;
 
   static void formatTime(uint32_t t, int16_t tz_mins, char* buf) {
     if (t < 1000000000UL) {
@@ -1651,9 +1810,29 @@ class ClockScreen : public UIScreen {
 
 public:
   ClockScreen(UITask* task, mesh::RTCClock* rtc, MsgPreviewScreen* preview, NodePrefs* prefs)
-    : _task(task), _rtc(rtc), _preview(preview), _prefs(prefs) {}
+    : _task(task), _rtc(rtc), _preview(preview), _prefs(prefs), _held_since(0) {}
+
+  void poll() override {
+    if (!_task->isButtonPressed()) {
+      _held_since = 0;
+      return;
+    }
+    unsigned long now = millis();
+    if (_held_since == 0) _held_since = now;
+    if ((unsigned long)(now - _held_since) < HOLD_EXIT_MS) {
+      _task->setIdleWakeHint(50);
+      return;
+    }
+    _held_since = 0;
+    _task->gotoHomeScreen();
+  }
 
   int render(DisplayDriver& display) override {
+    if (_prefs && _prefs->clock_saver == SAVER_BATT) {
+      display.setColor(UIColor::primary_txt);
+      drawShutdownCharge(display, shutdownChargePercent(_task));
+      return 60000;
+    }
     display.setColor(UIColor::primary_txt);
     int fw = display.frameWidth();
     int fh = display.frameHeight();
@@ -1725,15 +1904,8 @@ public:
     return wait;
   }
 
-  bool handleInput(char c) override {
-    if (c == KEY_ENTER && _preview->reopen()) {
-      _task->showMsgPreview();
-      return true;
-    }
-    if (_preview->unreadCount() > 0) _task->showMsgPreview();
-    else _task->gotoHomeScreen();
-    return true;
-  }
+  // A tap stays on the saver. Leaving is the 3 s hold tracked in poll().
+  bool handleInput(char) override { return false; }
 };
 
 bool UITask::reopenMsgPreview() {
@@ -1742,10 +1914,79 @@ bool UITask::reopenMsgPreview() {
   return true;
 }
 
+static UITask* s_busy_task = nullptr;
+static char s_stashed_key = 0;
+
+char UITask::readInput() {
+  char c = 0;
+#if UI_HAS_JOYSTICK
+  int ev = user_btn.check();
+  if (ev == BUTTON_EVENT_CLICK) {
+    c = checkDisplayOn(KEY_ENTER);
+  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+    c = handleLongPress(KEY_ENTER);  // REVISIT: could be mapped to different key code
+  }
+  ev = joystick_left.check();
+  if (ev == BUTTON_EVENT_CLICK) {
+    c = checkDisplayOn(KEY_LEFT);
+  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+    c = handleLongPress(KEY_LEFT);
+  }
+  ev = joystick_right.check();
+  if (ev == BUTTON_EVENT_CLICK) {
+    c = checkDisplayOn(KEY_RIGHT);
+  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+    c = handleLongPress(KEY_RIGHT);
+  }
+  ev = back_btn.check();
+  if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
+    c = handleTripleClick(KEY_SELECT);
+  }
+#elif defined(PIN_USER_BTN)
+  int ev = user_btn.check();
+  if (ev == BUTTON_EVENT_CLICK) {
+    c = checkDisplayOn(KEY_NEXT);
+  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+    c = handleLongPress(KEY_ENTER);
+  } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
+    c = handleDoubleClick(KEY_PREV);
+  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
+    c = handleTripleClick(KEY_SELECT);
+  } else if (ev == BUTTON_EVENT_QUAD_CLICK) {
+    c = handleQuadClick(KEY_QUAD);
+  }
+#endif
+#if defined(PIN_USER_BTN_ANA)
+  if (abs(millis() - _analogue_pin_read_millis) > 10) {
+    int ev = analog_btn.check();
+    if (ev == BUTTON_EVENT_CLICK) {
+      c = checkDisplayOn(KEY_NEXT);
+    } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+      c = handleLongPress(KEY_ENTER);
+    } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
+      c = handleDoubleClick(KEY_PREV);
+    } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
+      c = handleTripleClick(KEY_SELECT);
+    } else if (ev == BUTTON_EVENT_QUAD_CLICK) {
+      c = handleQuadClick(KEY_QUAD);
+    }
+    _analogue_pin_read_millis = millis();
+  }
+#endif
+  return c;
+}
+
+void UITask::pollButtonsDuringBusy() {
+  if (!s_busy_task) return;
+  char c = s_busy_task->readInput();
+  if (c != 0 && s_stashed_key == 0) s_stashed_key = c;
+}
+
 void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs) {
   _display = display;
   _sensors = sensors;
   _auto_off = millis() + AUTO_OFF_MILLIS;
+  s_busy_task = this;
 
 #if defined(PIN_USER_BTN)
   user_btn.begin();
@@ -1757,6 +1998,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
   _node_prefs = node_prefs;
 
   if (_display != NULL) {
+    if (_display->isEink()) _display->setBusyPoll(&UITask::pollButtonsDuringBusy);
     _display->turnOn();
   }
 
@@ -1856,10 +2098,11 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
   _msgcount = msgcount;
 
   ((MsgPreviewScreen *) msg_preview)->addPreview(path_len, from_name, text, group);
-  if (curr == clock) {
-    _next_refresh = 100;
-  } else {
+  bool show_now = _node_prefs && _node_prefs->show_msg_now;
+  if (show_now) {
     setCurrScreen(msg_preview);
+  } else if (curr == home || curr == clock || curr == msg_preview) {
+    _next_refresh = 100;
   }
 
   if (_display != NULL) {
@@ -1901,6 +2144,15 @@ void UITask::setCurrScreen(UIScreen* c) {
   if (c == home) _idle_since = millis();
 }
 
+void UITask::paintEinkOff() {
+  if (_display == NULL || !_display->isEink()) return;
+  _display->markFull();
+  _display->startFrame(UIColor::window_bkg);
+  _display->setColor(UIColor::primary_txt);
+  drawShutdownCharge(*_display, shutdownChargePercent(this));
+  _display->endFrame();
+}
+
 /*
   hardware-agnostic pre-shutdown activity should be done here
 */
@@ -1935,46 +2187,30 @@ bool UITask::isButtonPressed() const {
 #endif
 }
 
+static bool einkGestureOpen() {
+#if UI_HAS_JOYSTICK
+  if (user_btn.gestureOpen() || joystick_left.gestureOpen() || joystick_right.gestureOpen() || back_btn.gestureOpen()) return true;
+#elif defined(PIN_USER_BTN)
+  if (user_btn.gestureOpen()) return true;
+#endif
+#if defined(PIN_USER_BTN_ANA)
+  if (analog_btn.gestureOpen()) return true;
+#endif
+  return false;
+}
+
 void UITask::loop() {
   _idle_wake_ms = 60000;
+  s_busy_task = this;
   char c = 0;
-#if UI_HAS_JOYSTICK
-  int ev = user_btn.check();
-  if (ev == BUTTON_EVENT_CLICK) {
-    c = checkDisplayOn(KEY_ENTER);
-  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
-    c = handleLongPress(KEY_ENTER);  // REVISIT: could be mapped to different key code
+  // A click finished while the panel still held BUSY. check() already consumed
+  // the edges there, so this pass must not sample the button again.
+  if (s_stashed_key != 0) {
+    c = s_stashed_key;
+    s_stashed_key = 0;
+  } else {
+    c = readInput();
   }
-  ev = joystick_left.check();
-  if (ev == BUTTON_EVENT_CLICK) {
-    c = checkDisplayOn(KEY_LEFT);
-  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
-    c = handleLongPress(KEY_LEFT);
-  }
-  ev = joystick_right.check();
-  if (ev == BUTTON_EVENT_CLICK) {
-    c = checkDisplayOn(KEY_RIGHT);
-  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
-    c = handleLongPress(KEY_RIGHT);
-  }
-  ev = back_btn.check();
-  if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
-    c = handleTripleClick(KEY_SELECT);
-  }
-#elif defined(PIN_USER_BTN)
-  int ev = user_btn.check();
-  if (ev == BUTTON_EVENT_CLICK) {
-    c = checkDisplayOn(KEY_NEXT);
-  } else if (ev == BUTTON_EVENT_LONG_PRESS) {
-    c = handleLongPress(KEY_ENTER);
-  } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
-    c = handleDoubleClick(KEY_PREV);
-  } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
-    c = handleTripleClick(KEY_SELECT);
-  } else if (ev == BUTTON_EVENT_QUAD_CLICK) {
-    c = handleQuadClick(KEY_QUAD);
-  }
-#endif
 #if defined(UI_HAS_ROTARY_INPUT)
   RotaryInputEvent rotaryEv = rotary_input.poll();
   if (c == 0 && _display != NULL && _display->isOn()) {
@@ -1983,23 +2219,6 @@ void UITask::loop() {
     } else if (rotaryEv == RotaryInputEvent::Prev) {
       c = KEY_PREV;
     }
-  }
-#endif
-#if defined(PIN_USER_BTN_ANA)
-  if (abs(millis() - _analogue_pin_read_millis) > 10) {
-    int ev = analog_btn.check();
-    if (ev == BUTTON_EVENT_CLICK) {
-      c = checkDisplayOn(KEY_NEXT);
-    } else if (ev == BUTTON_EVENT_LONG_PRESS) {
-      c = handleLongPress(KEY_ENTER);
-    } else if (ev == BUTTON_EVENT_DOUBLE_CLICK) {
-      c = handleDoubleClick(KEY_PREV);
-    } else if (ev == BUTTON_EVENT_TRIPLE_CLICK) {
-      c = handleTripleClick(KEY_SELECT);
-    } else if (ev == BUTTON_EVENT_QUAD_CLICK) {
-      c = handleQuadClick(KEY_QUAD);
-    }
-    _analogue_pin_read_millis = millis();
   }
 #endif
 #if defined(BACKLIGHT_BTN)
@@ -2015,10 +2234,13 @@ void UITask::loop() {
 #endif
 
   if (c != 0 && curr) {
-    curr->handleInput(c);
-    _idle_since = millis();
-    _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
-    _next_refresh = 100;  // trigger refresh
+    bool acted = curr->handleInput(c);
+    // The saver ignores taps. Refreshing here would wave the panel mid-hold.
+    if (acted || curr != clock) {
+      _idle_since = millis();
+      _auto_off = millis() + AUTO_OFF_MILLIS;   // extend auto-off timer
+      _next_refresh = 100;  // trigger refresh
+    }
   }
 
   userLedHandler();
@@ -2030,10 +2252,14 @@ void UITask::loop() {
   if (curr) curr->poll();
 
   if (_display != NULL && _display->isOn()) {
-    if (millis() >= _next_refresh && curr) {
+    // A press still inside the multi-click window must finish before the next
+    // e-ink wave. The BUSY wait itself samples the button and keeps the click.
+    bool defer_eink = _display->isEink() && einkGestureOpen();
+    if (!defer_eink && millis() >= _next_refresh && curr) {
       _display->startFrame();
       int delay_millis = curr->render(*_display);
-      if (millis() < _alert_expiry) {  // render alert popup
+      bool alert = millis() < _alert_expiry;
+      if (alert) {  // render alert popup
         _display->setTextSize(1);
         int y = _display->height() / 3;
         int p = _display->height() / 32;
@@ -2042,11 +2268,15 @@ void UITask::loop() {
         _display->setColor(UIColor::popup_txt);  // draw box border
         _display->drawRect(p, y, _display->width() - p*2, y);
         _display->drawTextCentered(_display->width() / 2, y + p*3, _alert);
-        _next_refresh = _alert_expiry;   // will need refresh when alert is dismissed
-      } else {
-        _next_refresh = millis() + delay_millis;
       }
-      _display->endFrame();
+      if (_display->isEink()) {
+        _display->endFrame();
+        // The pause starts when the glass is done, so a click can land between frames.
+        _next_refresh = alert ? _alert_expiry : millis() + delay_millis;
+      } else {
+        _next_refresh = alert ? _alert_expiry : millis() + delay_millis;
+        _display->endFrame();
+      }
     }
 #if AUTO_OFF_MILLIS > 0
 #ifdef KEEP_DISPLAY_ON_USB

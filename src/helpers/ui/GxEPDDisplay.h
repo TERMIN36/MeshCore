@@ -71,9 +71,11 @@ public:
 #endif
 
   bool begin();
+  void setBusyPoll(void (*fn)()) override;
 
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }
+  bool hasRefreshChoice() const override { return true; }
   void clean() override;
   void markFull() override { _force_full = true; }
   void setRefreshMode(uint8_t mode) override { _refresh_mode = mode > 2 ? 0 : mode; }
@@ -93,6 +95,7 @@ public:
   int frameWidth() override;
   int frameHeight() override;
   void blit1(int x, int y, int w, int h, const uint8_t* bits) override;
+  void fillFrameRect(int x, int y, int w, int h) override;
   uint16_t getTextWidth(const char* str) override;
   void endFrame() override;
 };

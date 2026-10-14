@@ -31,4 +31,6 @@ public:
   void cancelClick();  // suppress next BUTTON_EVENT_CLICK (if already in DOWN state)
   uint8_t getPin() { return _pin; }
   bool isPressed() const;
+  // Held, or the multi-click window is still open and the click is not delivered yet.
+  bool gestureOpen() const;
 };

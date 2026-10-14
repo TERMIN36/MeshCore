@@ -66,6 +66,20 @@ ColorVal UIColor::popup_txt = GxEPD_BLACK;
 ColorVal UIColor::corp_blue = GxEPD_BLACK;
 
 
+static void (*s_busy_poll)() = nullptr;
+
+// GxEPD2 calls this instead of delay(1) for the whole BUSY wait. The delay
+// stays here so the CPU does not spin and the radio stack still runs.
+static void einkBusyThunk(const void*) {
+  if (s_busy_poll) s_busy_poll();
+  delay(1);
+}
+
+void GxEPDDisplay::setBusyPoll(void (*fn)()) {
+  s_busy_poll = fn;
+  if (_init) display.epd2.setBusyCallback(einkBusyThunk, nullptr);
+}
+
 bool GxEPDDisplay::begin() {
   display.epd2.selectSPI(SPI1, SPISettings(4000000, MSBFIRST, SPI_MODE0));
 #ifdef ESP32
@@ -74,6 +88,7 @@ bool GxEPDDisplay::begin() {
   SPI1.begin();
 #endif
   display.init(115200, true, 2, false);
+  display.epd2.setBusyCallback(einkBusyThunk, nullptr);
   display.setRotation(DISPLAY_ROTATION);
   setTextSize(1);  // Default to size 1
   display.setPartialWindow(0, 0, display.width(), display.height());
@@ -387,6 +402,15 @@ void GxEPDDisplay::drawXbm(int x, int y, const uint8_t* bits, int w, int h) {
       }
     }
   }
+}
+
+void GxEPDDisplay::fillFrameRect(int x, int y, int w, int h) {
+  if (w <= 0 || h <= 0) return;
+  display_crc.update<int>(x);
+  display_crc.update<int>(y);
+  display_crc.update<int>(w);
+  display_crc.update<int>(h);
+  display.fillRect(x, y, w, h, _curr_color);
 }
 
 int GxEPDDisplay::frameWidth() { return display.width(); }

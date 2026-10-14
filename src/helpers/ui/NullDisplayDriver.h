@@ -8,6 +8,7 @@ public:
   bool begin() { return false; }   // not present
 
   bool isOn() override { return false; }
+  bool isPresent() const override { return false; }
   void turnOn() override { }
   void turnOff() override { }
   void clear() override { }

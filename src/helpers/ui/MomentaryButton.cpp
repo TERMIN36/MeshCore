@@ -43,6 +43,10 @@ bool  MomentaryButton::isPressed() const {
   return isPressed(btn);
 }
 
+bool MomentaryButton::gestureOpen() const {
+  return down_at > 0 || _pending_click;
+}
+
 void MomentaryButton::cancelClick() {
   cancel = 1;
   down_at = 0;
