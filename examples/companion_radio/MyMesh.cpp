@@ -8,18 +8,50 @@
 static const uint8_t CONSOLE_PUB_KEY[PUB_KEY_SIZE] = { 'M','C','-','C','L','I' };
 
 class ConsoleReplyPrint : public Print {
-  char* _buf;
-  size_t _cap;
+  MyMesh* _mesh;
+  char _buf[MAX_TEXT_LEN + 1];
   size_t _len;
-public:
-  ConsoleReplyPrint(char* buf, size_t cap) : _buf(buf), _cap(cap), _len(0) {
-    if (cap > 0) _buf[0] = 0;
+  bool _queue_full;
+  bool _sent_any;
+
+  void noteQueueFull() {
+    if (_queue_full) return;
+    _queue_full = true;
+    static const char trunc[] = "  (output truncated)\n";
+    _mesh->enqueueConsoleReplyPart(trunc, strlen(trunc));
   }
-  size_t write(uint8_t c) override {
-    if (_cap > 0 && _len + 1 < _cap) {
-      _buf[_len++] = (char)c;
-      _buf[_len] = 0;
+
+public:
+  ConsoleReplyPrint(MyMesh* mesh) : _mesh(mesh), _len(0), _queue_full(false), _sent_any(false) {
+    _buf[0] = 0;
+  }
+
+  void flush() {
+    if (!_queue_full && _len > 0) {
+      if (_mesh->enqueueConsoleReplyPart(_buf, _len)) _sent_any = true;
+      else noteQueueFull();
     }
+    _len = 0;
+    _buf[0] = 0;
+    if (!_sent_any && !_queue_full) {
+      static const char none[] = "(no output)";
+      if (_mesh->enqueueConsoleReplyPart(none, strlen(none))) _sent_any = true;
+    }
+  }
+
+  size_t write(uint8_t c) override {
+    if (_queue_full) return 1;
+    size_t max = _mesh->consoleReplyTextMax();
+    if (_len >= max) {
+      if (!_mesh->enqueueConsoleReplyPart(_buf, _len)) {
+        noteQueueFull();
+        return 1;
+      }
+      _sent_any = true;
+      _len = 0;
+    }
+    _buf[_len++] = (char)c;
+    _buf[_len] = 0;
     return 1;
   }
 };
@@ -1332,10 +1364,9 @@ void MyMesh::handleCmdFrame(size_t len) {
         strncpy(last_text, text, sizeof(last_text) - 1);
         last_text[sizeof(last_text) - 1] = 0;
         last_text_ms = millis();
-        char reply[MAX_FRAME_SIZE];
-        ConsoleReplyPrint printer(reply, sizeof(reply));
+        ConsoleReplyPrint printer(this);
         runCLICommand(text, printer);
-        queueConsoleReply(reply);
+        printer.flush();
       }
       uint32_t est_timeout = 8000;
       out_frame[0] = RESP_CODE_SENT;
@@ -2341,8 +2372,18 @@ void MyMesh::fillConsoleContact(ContactInfo& contact) const {
   contact.lastmod = 1;
 }
 
-void MyMesh::queueConsoleReply(const char* text) {
-  if (text == NULL || text[0] == 0) text = "(no output)";
+size_t MyMesh::consoleReplyTextMax() const {
+  size_t hdr = (app_target_ver >= 3) ? 16 : 13;
+  size_t max = MAX_FRAME_SIZE - hdr;
+  if (max > MAX_TEXT_LEN) max = MAX_TEXT_LEN;
+  return max;
+}
+
+bool MyMesh::enqueueConsoleReplyPart(const char* text, size_t len) {
+  if (text == NULL || len == 0) return true;
+  size_t max = consoleReplyTextMax();
+  if (len > max) len = max;
+
   int i = 0;
   if (app_target_ver >= 3) {
     out_frame[i++] = RESP_CODE_CONTACT_MSG_RECV_V3;
@@ -2359,11 +2400,27 @@ void MyMesh::queueConsoleReply(const char* text) {
   uint32_t timestamp = getRTCClock()->getCurrentTimeUnique();
   memcpy(&out_frame[i], &timestamp, 4);
   i += 4;
-  int tlen = strlen(text);
-  if (i + tlen > MAX_FRAME_SIZE) tlen = MAX_FRAME_SIZE - i;
-  memcpy(&out_frame[i], text, tlen);
-  i += tlen;
-  addToOfflineQueue(out_frame, i, false);
+  memcpy(&out_frame[i], text, len);
+  i += (int)len;
+  return addToOfflineQueue(out_frame, i, false) != 0;
+}
+
+void MyMesh::queueConsoleReply(const char* text) {
+  if (text == NULL || text[0] == 0) text = "(no output)";
+  size_t max = consoleReplyTextMax();
+  size_t remain = strlen(text);
+  const char* p = text;
+  while (remain > 0) {
+    size_t n = remain;
+    if (n > max) n = max;
+    if (!enqueueConsoleReplyPart(p, n)) {
+      static const char trunc[] = "  (output truncated)\n";
+      enqueueConsoleReplyPart(trunc, strlen(trunc));
+      break;
+    }
+    p += n;
+    remain -= n;
+  }
 }
 
 void MyMesh::serviceConsoleAck() {
@@ -3143,7 +3200,7 @@ void MyMesh::loop() {
   }
 
 #ifdef DISPLAY_CLASS
-  if (_ui) _ui->setHasConnection(_serial->isConnected());
+  if (_ui) _ui->setHasConnection(companionPhoneConnected());
 #endif
 
 #if ENV_INCLUDE_GPS == 1

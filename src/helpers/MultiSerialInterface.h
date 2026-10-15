@@ -120,9 +120,9 @@ public:
       return false;
     }
     
-    // check if any interface is connected
+    // A disabled link (USB while BLE is the active mode) is not connected.
     for(auto iface : _interfaces){
-      if(iface.instance && iface.instance->isConnected()) {
+      if(iface.instance && iface.instance->isEnabled() && iface.instance->isConnected()) {
         return true;
       }
     }

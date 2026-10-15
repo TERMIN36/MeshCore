@@ -71,6 +71,8 @@
 
 /* -------------------------------------------------------------------------------------- */
 
+class ConsoleReplyPrint;
+
 #define REQ_TYPE_GET_STATUS             0x01 // same as _GET_STATS
 #define REQ_TYPE_KEEP_ALIVE             0x02
 #define REQ_TYPE_GET_TELEMETRY_DATA     0x03
@@ -229,6 +231,9 @@ private:
   void serviceConsoleAck();
   void fillConsoleContact(ContactInfo& contact) const;
   static bool isConsoleKey(const uint8_t* key, int len);
+  friend class ConsoleReplyPrint;
+  size_t consoleReplyTextMax() const;
+  bool enqueueConsoleReplyPart(const char* text, size_t len);
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
 

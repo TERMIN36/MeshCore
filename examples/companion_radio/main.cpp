@@ -309,6 +309,19 @@ static void companionWifiStart(const char* ssid, const char* pass) {
 }
 #endif
 
+bool companionPhoneConnected() {
+  NodePrefs* prefs = the_mesh.getNodePrefs();
+  uint8_t mode = companionEffectiveLinkMode(prefs ? prefs->link_mode : LINK_MODE_BLE);
+#if defined(BLE_PIN_CODE)
+  if (mode == LINK_MODE_BLE) return bluetooth_interface.isEnabled() && bluetooth_interface.isConnected();
+#endif
+#if defined(ESP32) && defined(BLE_PIN_CODE)
+  if (mode == LINK_MODE_WIFI) return wifi_interface.isEnabled() && wifi_interface.isConnected();
+#endif
+  if (mode == LINK_MODE_USB) return usb_serial_interface.isEnabled() && usb_serial_interface.isConnected();
+  return false;
+}
+
 void companionApplyLink() {
   NodePrefs* prefs = the_mesh.getNodePrefs();
   uint8_t mode = companionEffectiveLinkMode(prefs ? prefs->link_mode : LINK_MODE_BLE);

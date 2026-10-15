@@ -37,6 +37,8 @@ inline uint8_t companionNextLinkMode(uint8_t mode) {
 
 // Bring up the saved phone link. Only one of Bluetooth, Wi-Fi, and USB stays up.
 void companionApplyLink();
+// True when the active phone link has a live session. USB and Wi-Fi do not count while BLE is selected.
+bool companionPhoneConnected();
 // True while a Wi-Fi station is up and the CPU must stay awake.
 bool companionLinkHoldsCpu();
 bool companionWifiAddress(char* dest, size_t cap);

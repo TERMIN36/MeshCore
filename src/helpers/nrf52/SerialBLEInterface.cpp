@@ -46,32 +46,39 @@ void SerialBLEInterface::onDisconnect(uint16_t connection_handle, uint8_t reason
 
 void SerialBLEInterface::onSecured(uint16_t connection_handle) {
   BLE_DEBUG_PRINTLN("SerialBLEInterface: onSecured handle=0x%04X", connection_handle);
-  if (instance) {
-    if (instance->isValidConnection(connection_handle, true)) {
-      instance->_isDeviceConnected = true;
-      
-      // Connection interval units: 1.25ms, supervision timeout units: 10ms
-      // Apple: "The product will not read or use the parameters in the Peripheral Preferred Connection Parameters characteristic."
-      // So we explicitly set it here to make Android & Apple match
-      ble_gap_conn_params_t conn_params;
-      conn_params.min_conn_interval = BLE_MIN_CONN_INTERVAL;
-      conn_params.max_conn_interval = BLE_MAX_CONN_INTERVAL;
-      conn_params.slave_latency = BLE_SLAVE_LATENCY;
-      conn_params.conn_sup_timeout = BLE_CONN_SUP_TIMEOUT;
-      
-      uint32_t err_code = sd_ble_gap_conn_param_update(connection_handle, &conn_params);
-      if (err_code == NRF_SUCCESS) {
-        BLE_DEBUG_PRINTLN("Connection parameter update requested: %u-%ums interval, latency=%u, %ums timeout",
-                         conn_params.min_conn_interval * 5 / 4,  // convert to ms (1.25ms units)
-                         conn_params.max_conn_interval * 5 / 4,
-                         conn_params.slave_latency,
-                         conn_params.conn_sup_timeout * 10);  // convert to ms (10ms units)
-      } else {
-        BLE_DEBUG_PRINTLN("Failed to request connection parameter update: %lu", err_code);
-      }
-    } else {
-      BLE_DEBUG_PRINTLN("onSecured: ignoring stale/duplicate callback");
-    }
+  if (!instance || !instance->isValidConnection(connection_handle, true)) {
+    BLE_DEBUG_PRINTLN("onSecured: ignoring stale/duplicate callback");
+    return;
+  }
+
+  // Bluefruit runs this callback on every CONN_SEC_UPDATE, including the
+  // still-open link that exists before the passkey exchange. Treating that
+  // as connected hides the PIN as soon as a phone touches the radio.
+  BLEConnection* conn = Bluefruit.Connection(connection_handle);
+  if (!conn || !conn->connected() || !conn->secured()) {
+    BLE_DEBUG_PRINTLN("onSecured: link not encrypted yet");
+    return;
+  }
+  instance->_isDeviceConnected = true;
+
+  // Connection interval units: 1.25ms, supervision timeout units: 10ms
+  // Apple: "The product will not read or use the parameters in the Peripheral Preferred Connection Parameters characteristic."
+  // So we explicitly set it here to make Android & Apple match
+  ble_gap_conn_params_t conn_params;
+  conn_params.min_conn_interval = BLE_MIN_CONN_INTERVAL;
+  conn_params.max_conn_interval = BLE_MAX_CONN_INTERVAL;
+  conn_params.slave_latency = BLE_SLAVE_LATENCY;
+  conn_params.conn_sup_timeout = BLE_CONN_SUP_TIMEOUT;
+
+  uint32_t err_code = sd_ble_gap_conn_param_update(connection_handle, &conn_params);
+  if (err_code == NRF_SUCCESS) {
+    BLE_DEBUG_PRINTLN("Connection parameter update requested: %u-%ums interval, latency=%u, %ums timeout",
+                     conn_params.min_conn_interval * 5 / 4,  // convert to ms (1.25ms units)
+                     conn_params.max_conn_interval * 5 / 4,
+                     conn_params.slave_latency,
+                     conn_params.conn_sup_timeout * 10);  // convert to ms (10ms units)
+  } else {
+    BLE_DEBUG_PRINTLN("Failed to request connection parameter update: %lu", err_code);
   }
 }
 
@@ -398,7 +405,9 @@ void SerialBLEInterface::onBleUartRX(uint16_t conn_handle) {
 }
 
 bool SerialBLEInterface::isConnected() const {
-  return _isDeviceConnected && Bluefruit.connected() > 0;
+  if (!_isDeviceConnected || _conn_handle == BLE_CONN_HANDLE_INVALID) return false;
+  BLEConnection* conn = Bluefruit.Connection(_conn_handle);
+  return conn && conn->connected() && conn->secured();
 }
 
 bool SerialBLEInterface::isWriteBusy() const {

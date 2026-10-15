@@ -49,8 +49,8 @@ jobs:
       publish: false
       batch_size: 6
       embed_git_tag_version: false
-      # Device-facing string; repo tag stays v0.2.0-rc8 without the termin36 prefix.
-      firmware_version: ${{ startsWith(github.ref, 'refs/tags/v') && 'termin36-v0.2.0-rc8' || '' }}
+      # Device-facing string; repo tag stays v0.2.0-rc9 without the termin36 prefix.
+      firmware_version: ${{ startsWith(github.ref, 'refs/tags/v') && 'termin36-v0.2.0-rc9' || '' }}
 
   repeater:
     needs: check-version
@@ -61,7 +61,7 @@ jobs:
       publish: false
       batch_size: 6
       embed_git_tag_version: false
-      firmware_version: ${{ startsWith(github.ref, 'refs/tags/v') && 'termin36-v0.2.0-rc8' || '' }}
+      firmware_version: ${{ startsWith(github.ref, 'refs/tags/v') && 'termin36-v0.2.0-rc9' || '' }}
 
   room-server:
     needs: check-version
@@ -72,7 +72,7 @@ jobs:
       publish: false
       batch_size: 6
       embed_git_tag_version: false
-      firmware_version: ${{ startsWith(github.ref, 'refs/tags/v') && 'termin36-v0.2.0-rc8' || '' }}
+      firmware_version: ${{ startsWith(github.ref, 'refs/tags/v') && 'termin36-v0.2.0-rc9' || '' }}
 
   create-release:
     needs: [check-version, companion, repeater, room-server]

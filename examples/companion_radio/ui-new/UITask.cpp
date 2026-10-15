@@ -906,14 +906,18 @@ public:
         icon = wifi_on;
         name = "WiFi";
       } else if (link_mode == LINK_MODE_USB) {
-        icon = bluetooth_off;
+        icon = usb_on;
         name = "USB";
       } else if (link_mode == LINK_MODE_OFF) {
         icon = bluetooth_off;
         name = "off";
       }
       display.setColor(UIColor::corp_blue);
-      display.drawXbm((display.width() - 32) / 2, 18, icon, 32, 32);
+      if (link_mode == LINK_MODE_USB) {
+        display.drawXbm((display.width() - 68) / 2, 20, usb_on, 68, 28);
+      } else {
+        display.drawXbm((display.width() - 32) / 2, 18, icon, 32, 32);
+      }
       display.setColor(UIColor::secondary_txt);
       display.setTextSize(1);
       char ip[16];
@@ -923,8 +927,10 @@ public:
       } else if (link_mode == LINK_MODE_WIFI && _node_prefs && !_node_prefs->wifi_ssid[0]) {
         display.drawTextLeftAlign(0, 64 - 11, "set ssid");
         display.drawTextRightAlign(display.width() - 1, 64 - 11, PRESS_LABEL);
-      } else {
+      } else if (link_mode != LINK_MODE_USB) {
         display.drawTextLeftAlign(0, 64 - 11, name);
+        display.drawTextRightAlign(display.width() - 1, 64 - 11, PRESS_LABEL);
+      } else {
         display.drawTextRightAlign(display.width() - 1, 64 - 11, PRESS_LABEL);
       }
 #if ENV_INCLUDE_GPS == 1
