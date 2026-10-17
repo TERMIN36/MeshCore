@@ -17,7 +17,9 @@ protected:
 #endif
 
 public:
-  XiaoNrf52Board() : NRF52Board("XIAO_NRF52_OTA") {}
+  XiaoNrf52Board() : NRF52Board("XIAO_NRF52_OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
 #if defined(P_LORA_TX_LED)

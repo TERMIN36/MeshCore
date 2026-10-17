@@ -19,7 +19,7 @@ public:
     }
     raw = raw / 8;
 
-    return (2 * raw);
+    return (adcMultiplier() * raw);
   }
 
   uint32_t getIRQGpio() override {

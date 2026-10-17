@@ -10,6 +10,9 @@ extern PCA9557 expander;
 class ThinknodeM5Board : public ESP32Board {
 
 public:
+  ThinknodeM5Board() {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
 
   void begin();
   uint16_t getBattMilliVolts() override;

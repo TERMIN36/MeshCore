@@ -11,12 +11,11 @@
 
 class MeshnologyW12Board : public ESP32Board {
 
-protected:
-  float adc_mult = ADC_MULTIPLIER;
-
 public:
   RefCountedDigitalPin periph_power;
-  MeshnologyW12Board() : periph_power(PIN_VEXT_EN, PIN_VEXT_EN_ACTIVE) { }
+  MeshnologyW12Board() : periph_power(PIN_VEXT_EN, PIN_VEXT_EN_ACTIVE) {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
 
   void begin();
   void onBeforeTransmit(void) override;
@@ -24,14 +23,5 @@ public:
   void enterDeepSleep(uint32_t secs, int pin_wake_btn = -1);
   void powerOff() override;
   uint16_t getBattMilliVolts() override;
-  bool setAdcMultiplier(float multiplier) override {
-    if (multiplier == 0.0f) {
-      adc_mult = ADC_MULTIPLIER;
-    } else {
-      adc_mult = multiplier;
-    }
-    return true;
-  }
-  float getAdcMultiplier() const override { return adc_mult; }
   const char* getManufacturerName() const override;
 };

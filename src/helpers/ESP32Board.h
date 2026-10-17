@@ -55,9 +55,11 @@ protected:
   static void releaseRtcPad(int pin) {
     if (pin < 0 || pin >= GPIO_NUM_MAX) return;
     gpio_num_t gpio = (gpio_num_t)pin;
-    gpio_sleep_sel_dis(gpio);
     gpio_hold_dis(gpio);
     gpio_wakeup_disable(gpio);
+    // C3's gpio_wakeup_disable turns the sleep mux back on. A sleep pull then
+    // reads high, and the next high-level wake is rejected at once.
+    gpio_sleep_sel_dis(gpio);
 #if SOC_RTCIO_INPUT_OUTPUT_SUPPORTED
     if (!rtc_gpio_is_valid_gpio(gpio)) return;
     rtc_gpio_hold_dis(gpio);
@@ -120,6 +122,12 @@ protected:
   }
 
 public:
+  ESP32Board() {
+#ifdef PIN_VBAT_READ
+    initAdcMultiplier(2.0f);
+#endif
+  }
+
   void begin() {
     // for future use, sub-classes SHOULD call this from their begin()
     startup_reason = BD_STARTUP_NORMAL;
@@ -227,6 +235,9 @@ public:
   // held line cannot storm, then the edge handler is restored.
   bool armRadioLightWake();
   void disarmRadioLightWake();
+  // Light sleep, with the C3 reject path: one retry after the USB-Serial/JTAG
+  // mask, then the rest of the timeout on the timer alone.
+  int64_t runLightSleep(uint32_t timeout_ms, gpio_num_t dio);
 
   void idleSleep(uint32_t timeout_ms) override {
     if (inhibit_sleep) {
@@ -286,9 +297,7 @@ public:
       return;
     }
 
-    int64_t t0 = esp_timer_get_time();
-    esp_light_sleep_start();
-    int64_t asleep = esp_timer_get_time() - t0;
+    int64_t asleep = runLightSleep(timeout_ms, wakeupPin);
     bool dio_high = gpio_get_level(wakeupPin) == HIGH;
 #if defined(PIN_USER_BTN)
     bool btn_down = PIN_USER_BTN >= 0 && gpio_get_level(button) == pressed;
@@ -342,7 +351,7 @@ public:
     }
     raw = raw / 4;
 
-    return (2 * raw);
+    return (adcMultiplier() * raw);
   #else
     return 0;  // not supported
   #endif

@@ -32,6 +32,9 @@ private:
   bool radio_powered = false;
 
 public:
+  TBeam1WBoard() {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
   void onBeforeTransmit() override;
   void onAfterTransmit() override;

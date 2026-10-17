@@ -11,7 +11,9 @@ public:
   RefCountedDigitalPin periph_power;
   LoRaFEMControl loRaFEMControl;
 
-  HeltecTrackerV2Board() : periph_power(PIN_VEXT_EN,PIN_VEXT_EN_ACTIVE) { }
+  HeltecTrackerV2Board() : periph_power(PIN_VEXT_EN,PIN_VEXT_EN_ACTIVE) {
+    initAdcMultiplier(5.42f);
+  }
 
   void begin();
   void onBeforeTransmit(void) override;

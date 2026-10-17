@@ -9,7 +9,9 @@ protected:
   uint8_t btn_prev_state;
 
 public:
-  MeshTrackerX1Board() : NRF52Board("X1_OTA") {}
+  MeshTrackerX1Board() : NRF52Board("X1_OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
   uint16_t getBattMilliVolts() override {
@@ -20,7 +22,7 @@ public:
     analogReference(AR_INTERNAL_3_0);
     analogReadResolution(12);
     delay(10);
-    float volts = (analogRead(BATTERY_PIN) * ADC_MULTIPLIER * AREF_VOLTAGE) / 4096;
+    float volts = (analogRead(BATTERY_PIN) * adcMultiplier() * AREF_VOLTAGE) / 4096;
 
     analogReference(AR_DEFAULT);  // put back to default
     analogReadResolution(10);

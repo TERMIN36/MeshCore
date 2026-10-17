@@ -81,7 +81,7 @@ uint16_t HeltecTowerV2Board::getBattMilliVolts() {
   int adcvalue = analogRead(PIN_VBAT_READ);
   digitalWrite(PIN_BAT_CTL, LOW);
 
-  return (uint16_t)((float)adcvalue * MV_LSB * ADC_MULTIPLIER);
+  return (uint16_t)((float)adcvalue * MV_LSB * adcMultiplier());
 }
 
 const char* HeltecTowerV2Board::getManufacturerName() const {

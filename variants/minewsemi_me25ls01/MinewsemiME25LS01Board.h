@@ -25,7 +25,9 @@ protected:
   uint8_t btn_prev_state;
 
 public:
-  MinewsemiME25LS01Board() : NRF52Board("Minewsemi_OTA") {}
+  MinewsemiME25LS01Board() : NRF52Board("Minewsemi_OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
 #define BATTERY_SAMPLES 8
@@ -38,7 +40,7 @@ public:
       raw += analogRead(PIN_VBAT_READ);
     }
     raw = raw / BATTERY_SAMPLES;
-    return (ADC_MULTIPLIER * raw);
+    return (adcMultiplier() * raw);
   }
 
   const char* getManufacturerName() const override {

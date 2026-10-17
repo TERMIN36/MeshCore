@@ -55,7 +55,7 @@ void HeltecTrackerV2Board::begin() {
 
     digitalWrite(PIN_ADC_CTRL, LOW);
 
-    return (5.42 * (3.3 / 1024.0) * raw) * 1000;
+    return (adcMultiplier() * (3.3 / 1024.0) * raw) * 1000;
   }
 
   const char* HeltecTrackerV2Board::getManufacturerName() const {

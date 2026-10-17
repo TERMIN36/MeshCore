@@ -68,7 +68,7 @@ uint16_t XiaoNrf52Board::getBattMilliVolts() {
   // VBAT_ENABLE must be LOW to read battery voltage
   digitalWrite(VBAT_ENABLE, LOW);
   int adcvalue = analogRead(PIN_VBAT);
-  return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
+  return (adcvalue * adcMultiplier() * AREF_VOLTAGE) / 4.096;
 }
 
 #endif

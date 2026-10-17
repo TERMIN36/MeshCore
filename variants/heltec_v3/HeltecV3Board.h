@@ -24,7 +24,9 @@ private:
 public:
   RefCountedDigitalPin periph_power;
 
-  HeltecV3Board() : periph_power(PIN_VEXT_EN) { }
+  HeltecV3Board() : periph_power(PIN_VEXT_EN) {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
 
   void begin() {
     ESP32Board::begin();
@@ -63,7 +65,7 @@ public:
 
     digitalWrite(PIN_ADC_CTRL, !adc_active_state);
 
-    return (ADC_MULTIPLIER * (3.3 / 1024.0) * raw) * 1000;
+    return (adcMultiplier() * (3.3 / 1024.0) * raw) * 1000;
   }
 
   const char* getManufacturerName() const override {

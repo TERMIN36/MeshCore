@@ -11,6 +11,10 @@ class Heltec_CT62_Board : public ESP32Board {
   uint32_t gpio_state = 0;
 
 public:
+  Heltec_CT62_Board() {
+    initAdcMultiplier(6.52f);
+  }
+
   void begin() {
     ESP32Board::begin();
 #if defined(PIN_BOARD_RELAY_CH1) && defined(PIN_BOARD_RELAY_CH2) 
@@ -45,7 +49,7 @@ public:
     }
     raw = raw / 8;
 
-    return ((6.52 * raw) / 1024.0) * 1000;
+    return ((adcMultiplier() * raw) / 1024.0) * 1000;
   #else
     return 0;  // not supported
   #endif

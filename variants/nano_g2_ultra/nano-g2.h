@@ -37,7 +37,9 @@
 
 class NanoG2Ultra : public NRF52Board {
 public:
-  NanoG2Ultra() : NRF52Board("NANO_G2_OTA") {}
+  NanoG2Ultra() : NRF52Board("NANO_G2_OTA") {
+    initAdcMultiplier(VBAT_DIVIDER_COMP);
+  }
   void begin();
   uint16_t getBattMilliVolts() override;
 

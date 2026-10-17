@@ -41,7 +41,7 @@ uint16_t TBeam1WBoard::getBattMilliVolts() {
   raw = raw / 8;
   // Assuming voltage divider ratio from ADC_MULTIPLIER
   // 3.3V reference, 12-bit ADC (4095 max)
-  return static_cast<uint16_t>((raw * 3300 * ADC_MULTIPLIER) / 4095);
+  return static_cast<uint16_t>((raw * 3300 * adcMultiplier()) / 4095);
 }
 
 const char* TBeam1WBoard::getManufacturerName() const {

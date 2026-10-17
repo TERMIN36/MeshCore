@@ -74,7 +74,7 @@ uint16_t HeltecV4R8Board::getBattMilliVolts() {
   }
   raw = raw / 8;
 
-  return (adc_mult * raw);
+  return (adcMultiplier() * raw);
 }
 
 const char* HeltecV4R8Board::getManufacturerName() const {

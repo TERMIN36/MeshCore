@@ -9,7 +9,9 @@ protected:
   uint8_t btn_prev_state;
 
 public:
-  KeepteenLT1Board() : NRF52Board("KeepteenLT1_OTA") {}
+  KeepteenLT1Board() : NRF52Board("KeepteenLT1_OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
   #define BATTERY_SAMPLES 8
@@ -22,7 +24,7 @@ public:
       raw += analogRead(PIN_VBAT_READ);
     }
     raw = raw / BATTERY_SAMPLES;
-    return (ADC_MULTIPLIER * raw);
+    return (adcMultiplier() * raw);
   }
 
   const char* getManufacturerName() const override {

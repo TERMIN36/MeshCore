@@ -47,6 +47,19 @@ class MainBoard {
     static bool enabled = true;
     return enabled;
   }
+
+  float _adc_mult = 0;
+  float _adc_mult_default = 0;
+  bool _has_adc_mult = false;
+
+protected:
+  void initAdcMultiplier(float def) {
+    _has_adc_mult = true;
+    _adc_mult_default = def;
+    _adc_mult = def;
+  }
+  float adcMultiplier() const { return _adc_mult; }
+
 public:
   // Transmit indicator. Boards still run onBeforeTransmit for the radio path;
   // the LED itself stays dark while this is off.
@@ -55,8 +68,12 @@ public:
 
   virtual uint16_t getBattMilliVolts() = 0;
   virtual float getMCUTemperature() { return NAN; }
-  virtual bool setAdcMultiplier(float multiplier) { return false; };
-  virtual float getAdcMultiplier() const { return 0.0f; }
+  virtual bool setAdcMultiplier(float multiplier) {
+    if (!_has_adc_mult) return false;
+    _adc_mult = (multiplier == 0.0f) ? _adc_mult_default : multiplier;
+    return true;
+  }
+  virtual float getAdcMultiplier() const { return _has_adc_mult ? _adc_mult : 0.0f; }
   virtual const char* getManufacturerName() const = 0;
   virtual void onBeforeTransmit() { }
   virtual void onAfterTransmit() { }

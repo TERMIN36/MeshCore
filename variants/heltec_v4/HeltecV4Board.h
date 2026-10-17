@@ -11,13 +11,12 @@
 
 class HeltecV4Board : public ESP32Board {
 
-protected:
-  float adc_mult = ADC_MULTIPLIER;
-
 public:
   RefCountedDigitalPin periph_power;
   LoRaFEMControl loRaFEMControl;
-  HeltecV4Board() : periph_power(PIN_VEXT_EN,PIN_VEXT_EN_ACTIVE) { }
+  HeltecV4Board() : periph_power(PIN_VEXT_EN,PIN_VEXT_EN_ACTIVE) {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
 
   void begin();
   void onBeforeTransmit(void) override;
@@ -27,14 +26,5 @@ public:
   bool canControlLoRaFemLna() const override;
   bool isLoRaFemLnaEnabled() const override;
   uint16_t getBattMilliVolts() override;
-  bool setAdcMultiplier(float multiplier) override {
-    if (multiplier == 0.0f) {
-      adc_mult = ADC_MULTIPLIER;
-    } else {
-      adc_mult = multiplier;
-    }
-    return true;
-  }
-  float getAdcMultiplier() const override { return adc_mult; }
   const char* getManufacturerName() const override;
 };

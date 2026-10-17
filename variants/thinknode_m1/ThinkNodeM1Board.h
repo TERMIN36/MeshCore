@@ -15,7 +15,9 @@
 
 class ThinkNodeM1Board : public NRF52Board {
 public:
-  ThinkNodeM1Board() : NRF52Board("THINKNODE_M1_OTA") {}
+  ThinkNodeM1Board() : NRF52Board("THINKNODE_M1_OTA") {
+    initAdcMultiplier(VBAT_DIVIDER_COMP);
+  }
   void begin();
   uint16_t getBattMilliVolts() override;
 

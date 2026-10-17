@@ -9,7 +9,9 @@ class HeltecE290Board : public ESP32Board {
 public:
   RefCountedDigitalPin periph_power;
 
-  HeltecE290Board() : periph_power(PIN_VEXT_EN, PIN_VEXT_EN_ACTIVE) { }
+  HeltecE290Board() : periph_power(PIN_VEXT_EN, PIN_VEXT_EN_ACTIVE) {
+    initAdcMultiplier(5.42f);
+  }
 
   void begin();
   uint16_t getBattMilliVolts() override;

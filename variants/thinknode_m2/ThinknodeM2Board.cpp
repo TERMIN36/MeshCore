@@ -22,7 +22,7 @@ uint16_t ThinknodeM2Board::getBattMilliVolts() {
   mv /= 8;
 
   analogReadResolution(10);
-  return static_cast<uint16_t>(mv * ADC_MULTIPLIER);
+  return static_cast<uint16_t>(mv * adcMultiplier());
 }
 
 const char *ThinknodeM2Board::getManufacturerName() const {

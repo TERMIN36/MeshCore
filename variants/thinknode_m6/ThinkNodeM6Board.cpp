@@ -31,6 +31,6 @@ uint16_t ThinkNodeM6Board::getBattMilliVolts() {
   digitalWrite(PIN_ADC_CTRL, LOW);
   // Convert the raw value to compensated mv, taking the resistor-
   // divider into account (providing the actual LIPO voltage)
-  return (uint16_t)((float)adcvalue * REAL_VBAT_MV_PER_LSB);
+  return (uint16_t)((float)adcvalue * adcMultiplier() * VBAT_MV_PER_LSB);
 }
 #endif

@@ -13,7 +13,9 @@
 
 class WioWM1110Board : public NRF52BoardDCDC {
 public:
-  WioWM1110Board() : NRF52Board("WM1110_OTA") {}
+  WioWM1110Board() : NRF52Board("WM1110_OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
 #if defined(LED_GREEN)
@@ -31,7 +33,7 @@ public:
     analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(BATTERY_PIN);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE * 1000.0) / 4096.0;
+    return (adcvalue * adcMultiplier() * AREF_VOLTAGE * 1000.0) / 4096.0;
   }
 
   const char* getManufacturerName() const override {

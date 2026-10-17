@@ -76,7 +76,7 @@ void MeshnologyW12Board::begin() {
 
     digitalWrite(PIN_ADC_CTRL, LOW);
 
-    return (adc_mult * (3.3 / 4096.0) * raw) * 1000;
+    return (adcMultiplier() * (3.3 / 4096.0) * raw) * 1000;
   }
 
   const char* MeshnologyW12Board::getManufacturerName() const {

@@ -7,6 +7,10 @@
 
 class XiaoC3Board : public ESP32Board {
 public:
+  XiaoC3Board() {
+    initAdcMultiplier(5.78f);
+  }
+
   void begin() {
     ESP32Board::begin();
 
@@ -68,7 +72,7 @@ public:
     }
     raw = raw / 8;
 
-    return ((5.78 * raw) / 1024.0) * 1000;
+    return ((adcMultiplier() * raw) / 1024.0) * 1000;
   #else
     return 0;  // not supported
   #endif

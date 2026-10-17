@@ -5,6 +5,12 @@
 #include <esp_pm.h>
 #include <esp_sleep.h>
 #include <driver/gpio.h>
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+#include "hal/usb_serial_jtag_ll.h"
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT && defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE
+#include <HWCDC.h>
+#endif
+#endif
 
 static volatile TaskHandle_t s_wait_task = nullptr;
 static gpio_num_t s_radio_pin = GPIO_NUM_NC;
@@ -15,6 +21,37 @@ static volatile bool s_level_arm = false;
 static bool idlePinOk(gpio_num_t pin) {
   return (int)pin >= 0 && (int)pin < GPIO_NUM_MAX;
 }
+
+// C3 keeps a USB-Serial/JTAG interrupt armed (secondary console, and HWCDC on
+// Xiao). A pending bit rejects light sleep at once. Mask it only while no
+// host is on the bus; a host must keep the COM port.
+struct C3UsbIdleMask {
+  uint32_t ena;
+  bool held;
+  C3UsbIdleMask() : ena(0), held(false) {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT && defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE
+    if (HWCDC::isPlugged()) return;
+#endif
+    ena = usb_serial_jtag_ll_get_intr_ena_status();
+    usb_serial_jtag_ll_disable_intr_mask(USB_SERIAL_JTAG_LL_INTR_MASK);
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_LL_INTR_MASK);
+    held = true;
+#endif
+  }
+  ~C3UsbIdleMask() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    if (!held) return;
+    usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_LL_INTR_MASK);
+    if (ena) usb_serial_jtag_ll_ena_intr_mask(ena);
+#endif
+  }
+  void clear() {
+#if defined(CONFIG_IDF_TARGET_ESP32C3)
+    if (held) usb_serial_jtag_ll_clr_intsts_mask(USB_SERIAL_JTAG_LL_INTR_MASK);
+#endif
+  }
+};
 
 void IRAM_ATTR ESP32Board::noteRadioIrqFromIsr() {
   TaskHandle_t task = s_wait_task;
@@ -75,6 +112,9 @@ void ESP32Board::disarmRadioLightWake() {
   gpio_num_t dio = s_radio_pin;
   if (idlePinOk(dio)) {
     gpio_wakeup_disable(dio);
+    // gpio_wakeup_disable on C3 enables the sleep mux. Leave the pad on its
+    // active input or the sleep pull reads high and the next wake is rejected.
+    gpio_sleep_sel_dis(dio);
     if (radio_isr_safe) {
       gpio_set_intr_type(dio, GPIO_INTR_POSEDGE);
       gpio_intr_enable(dio);
@@ -83,6 +123,31 @@ void ESP32Board::disarmRadioLightWake() {
     }
   }
   portEXIT_CRITICAL(&sleepMux);
+}
+
+int64_t ESP32Board::runLightSleep(uint32_t timeout_ms, gpio_num_t dio) {
+  int64_t t0 = esp_timer_get_time();
+  C3UsbIdleMask usb;
+  esp_err_t err = esp_light_sleep_start();
+  // A reject with DIO still low is a false wake (USB bit or the C3 sleep
+  // pull). One more try after the mask; then drop GPIO wake and finish on
+  // the timer so the main loop does not spin at run current.
+  if (err == ESP_ERR_SLEEP_REJECT && gpio_get_level(dio) != HIGH) {
+    usb.clear();
+    err = esp_light_sleep_start();
+  }
+  if (err == ESP_ERR_SLEEP_REJECT && gpio_get_level(dio) != HIGH && timeout_ms > 0) {
+    int64_t used = esp_timer_get_time() - t0;
+    uint64_t budget = (uint64_t)timeout_ms * 1000ULL;
+    if (used >= 0 && (uint64_t)used < budget) {
+      esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_GPIO);
+      gpio_wakeup_disable(dio);
+      gpio_sleep_sel_dis(dio);
+      esp_sleep_enable_timer_wakeup(budget - (uint64_t)used);
+      esp_light_sleep_start();
+    }
+  }
+  return esp_timer_get_time() - t0;
 }
 
 bool ESP32Board::setAutoLightSleep(bool enable) {
@@ -160,6 +225,12 @@ int ESP32Board::waitAutoLightSleep(uint32_t timeout_ms) {
 #endif
     return -1;
   }
+
+  // Tickless idle sleeps inside the wait. Same pad and USB rules as manual
+  // sleep, or C3 rejects every few milliseconds and the CPU never stays down.
+  gpio_sleep_sel_dis(dio);
+  C3UsbIdleMask usb;
+  (void)usb;
 
   int rc = 0;
   s_wait_task = xTaskGetCurrentTaskHandle();

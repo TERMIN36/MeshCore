@@ -11,7 +11,9 @@
 
 class HeltecMeshPocket : public NRF52BoardDCDC {
 public:
-  HeltecMeshPocket() : NRF52Board("MESH_POCKET_OTA") {}
+  HeltecMeshPocket() : NRF52Board("MESH_POCKET_OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
   uint16_t getBattMilliVolts() override {
@@ -26,7 +28,7 @@ public:
     adcvalue = analogRead(PIN_VBAT_READ);
     digitalWrite(PIN_BAT_CTL, LOW);
 
-    return (uint16_t)((float)adcvalue * MV_LSB * 4.9);
+    return (uint16_t)((float)adcvalue * MV_LSB * adcMultiplier());
   }
 
   const char* getManufacturerName() const override {

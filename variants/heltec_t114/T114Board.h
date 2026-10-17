@@ -16,7 +16,9 @@ protected:
 #endif
 
 public:
-  T114Board() : NRF52Board("T114_OTA") {}
+  T114Board() : NRF52Board("T114_OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
 #if defined(P_LORA_TX_LED)
@@ -39,7 +41,7 @@ public:
     adcvalue = analogRead(PIN_VBAT_READ);
     digitalWrite(6, 0);
 
-    return (uint16_t)((float)adcvalue * MV_LSB * 4.9);
+    return (uint16_t)((float)adcvalue * MV_LSB * adcMultiplier());
   }
 
   const char* getManufacturerName() const override {

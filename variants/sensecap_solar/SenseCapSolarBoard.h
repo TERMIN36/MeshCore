@@ -11,7 +11,9 @@ protected:
 #endif
 
 public:
-  SenseCapSolarBoard() : NRF52Board("SENSECAP_SOLAR_OTA") {}
+  SenseCapSolarBoard() : NRF52Board("SENSECAP_SOLAR_OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
 #if defined(P_LORA_TX_LED)
@@ -30,7 +32,7 @@ public:
     analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(BATTERY_PIN);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
+    return (adcvalue * adcMultiplier() * AREF_VOLTAGE) / 4.096;
   }
 
   const char* getManufacturerName() const override {

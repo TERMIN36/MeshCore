@@ -9,7 +9,9 @@ protected:
   uint8_t btn_prev_state;
 
 public:
-  MeshtinyBoard() : NRF52Board("Meshtiny OTA") {}
+  MeshtinyBoard() : NRF52Board("Meshtiny OTA") {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
   void begin();
 
 #if defined(P_LORA_TX_LED)
@@ -27,7 +29,7 @@ public:
     analogReference(AR_INTERNAL_3_0);
     delay(10);
     adcvalue = analogRead(PIN_VBAT_READ);
-    return (adcvalue * ADC_MULTIPLIER * AREF_VOLTAGE) / 4.096;
+    return (adcvalue * adcMultiplier() * AREF_VOLTAGE) / 4.096;
   }
 
   const char *getManufacturerName() const override { return "Meshtiny"; }

@@ -47,7 +47,7 @@ uint16_t TechoBoard::getBattMilliVolts() {
 
   // LilyGo's exact formula: adc * (3000.0 / 4096.0) * 2.0
   // = adc * 0.73242188 * 2.0 = adc * 1.46484375
-  uint16_t millivolts = (uint16_t)((float)adc * (3000.0f / 4096.0f) * 2.0f);
+  uint16_t millivolts = (uint16_t)((float)adc * (3000.0f / 4096.0f) * adcMultiplier());
 
   return millivolts;
 }

@@ -76,7 +76,7 @@ uint16_t T096Board::getBattMilliVolts() {
     adcvalue = analogRead(PIN_VBAT_READ);
     digitalWrite(PIN_BAT_CTL, 0);
 
-    return (uint16_t)((float)adcvalue * MV_LSB * 4.9);
+    return (uint16_t)((float)adcvalue * MV_LSB * adcMultiplier());
 }
 void T096Board::variant_shutdown() {
  nrf_gpio_cfg_default(PIN_VEXT_EN);

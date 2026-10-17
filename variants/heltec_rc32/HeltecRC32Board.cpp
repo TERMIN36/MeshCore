@@ -55,12 +55,7 @@ uint16_t HeltecRC32Board::getBattMilliVolts() {
   raw = raw / 8;
   digitalWrite(PIN_ADC_CTRL, !ADC_CTRL_ENABLED);
 
-  return (adc_mult * raw);
-}
-
-bool HeltecRC32Board::setAdcMultiplier(float multiplier) {
-  adc_mult = multiplier == 0.0f ? ADC_MULTIPLIER : multiplier;
-  return true;
+  return (adcMultiplier() * raw);
 }
 
 const char* HeltecRC32Board::getManufacturerName() const {

@@ -17,7 +17,9 @@
 class TechoCardBoard : public NRF52BoardDCDC {
   bool _torchStatus = false;
 public:
-  TechoCardBoard() : NRF52Board("TECHO_OTA") {}
+  TechoCardBoard() : NRF52Board("TECHO_OTA") {
+    initAdcMultiplier(VBAT_DIVIDER_COMP);
+  }
   void begin();
   uint16_t getBattMilliVolts() override;
   void onBeforeTransmit(void) override;

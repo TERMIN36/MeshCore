@@ -77,7 +77,7 @@ uint16_t T1Board::getBattMilliVolts() {
   int adcvalue = analogRead(PIN_VBAT_READ);
   digitalWrite(PIN_BAT_CTL, !ADC_CTRL_ENABLED);
 
-  return (uint16_t)((float)adcvalue * MV_LSB * ADC_MULTIPLIER);
+  return (uint16_t)((float)adcvalue * MV_LSB * adcMultiplier());
 }
 
 void T1Board::variant_shutdown() {

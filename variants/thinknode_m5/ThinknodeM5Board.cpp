@@ -31,7 +31,7 @@ void ThinknodeM5Board::begin() {
     mv /= 8;
 
     analogReadResolution(10);  
-    return static_cast<uint16_t>(mv * ADC_MULTIPLIER );
+    return static_cast<uint16_t>(mv * adcMultiplier() );
 }
 
   const char* ThinknodeM5Board::getManufacturerName() const {

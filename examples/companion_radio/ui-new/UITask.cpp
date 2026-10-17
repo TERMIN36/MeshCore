@@ -2111,7 +2111,9 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
     _next_refresh = 100;
   }
 
-  if (_display != NULL) {
+  // Messages = don't show leaves a dark screen dark. An already-on clock
+  // still refreshes its unread footer above, without resetting the backlight.
+  if (_display != NULL && show_now) {
     if (!_display->isOn() && !hasConnection()) {
       _display->turnOn();
       s_fresh_batt = true;

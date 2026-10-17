@@ -24,5 +24,5 @@ uint16_t ThinkNodeM3Board::getBattMilliVolts() {
   adcvalue = analogRead(PIN_VBAT_READ);
   // Convert the raw value to compensated mv, taking the resistor-
   // divider into account (providing the actual LIPO voltage)
-  return (uint16_t)((float)adcvalue * ADC_FACTOR);
+  return (uint16_t)((float)adcvalue * ((1000.0 * adcMultiplier() * AREF_VOLTAGE) / ADC_MAX));
 }

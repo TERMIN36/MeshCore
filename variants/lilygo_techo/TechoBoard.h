@@ -15,7 +15,9 @@
 
 class TechoBoard : public NRF52BoardDCDC {
 public:
-  TechoBoard() : NRF52Board("TECHO_OTA") {}
+  TechoBoard() : NRF52Board("TECHO_OTA") {
+    initAdcMultiplier(VBAT_DIVIDER_COMP);
+  }
   void begin();
   uint16_t getBattMilliVolts() override;
 

@@ -12,12 +12,19 @@
 #define  P_LORA_MOSI    27
 
 #define  PIN_VBAT_READ    35
+#ifndef ADC_MULTIPLIER
+#define ADC_MULTIPLIER 2.0f
+#endif
 
 #include "ESP32Board.h"
 
 class MeshadventurerBoard : public ESP32Board {
 
 public:
+  MeshadventurerBoard() {
+    initAdcMultiplier(ADC_MULTIPLIER);
+  }
+
   void begin() {
     ESP32Board::begin();
 
@@ -42,7 +49,7 @@ public:
     }
     raw = raw / 4;
 
-    return (2 * raw);
+    return (adcMultiplier() * raw);
   }
 
   const char* getManufacturerName() const override {

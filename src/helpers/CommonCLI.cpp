@@ -943,7 +943,7 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
     strcpy(reply, "OK");
 #endif
   } else if (memcmp(config, "adc.multiplier ", 15) == 0) {
-    _prefs->adc_multiplier = atof(&config[15]);
+    _prefs->adc_multiplier = constrain(atof(&config[15]), 0.0f, 10.0f);
     if (_board->setAdcMultiplier(_prefs->adc_multiplier)) {
       savePrefs();
       if (_prefs->adc_multiplier == 0.0f) {
