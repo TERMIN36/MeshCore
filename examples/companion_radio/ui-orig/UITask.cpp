@@ -604,3 +604,17 @@ void UITask::handleButtonLongPress() {
     shutdown();
   }
 }
+
+bool UITask::isButtonPressed() const {
+#ifdef PIN_USER_BTN
+  if (_userButton && _userButton->isPressed()) return true;
+#endif
+#ifdef PIN_USER_BTN_ANA
+  if (_userButtonAnalog && _userButtonAnalog->isPressed()) return true;
+#endif
+  return false;
+}
+
+bool UITask::buttonsBusy() const {
+  return isButtonPressed();
+}

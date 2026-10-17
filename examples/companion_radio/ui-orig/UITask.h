@@ -68,6 +68,8 @@ public:
   void begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* node_prefs);
 
   bool hasDisplay() const { return _display != NULL; }
+  bool isButtonPressed() const;
+  bool buttonsBusy() const;
   void clearMsgPreview();
 
   // from AbstractUITask
