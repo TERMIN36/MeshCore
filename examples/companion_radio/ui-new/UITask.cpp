@@ -1180,6 +1180,13 @@ public:
       return false;
 #endif
     }
+    if (c == KEY_CANCEL) {
+      if (_page == HomePage::SETUP && _setup_edit) {
+        _setup_edit = false;
+        return true;
+      }
+      return false;
+    }
     if (c == KEY_SELECT) {
       if (_page == HomePage::RADIO) {
         _task->cycleRadioProfile();
@@ -1979,6 +1986,17 @@ char UITask::readInput() {
     _analogue_pin_read_millis = millis();
   }
 #endif
+#if defined(PIN_BACK_BTN) && !UI_HAS_JOYSTICK
+  {
+    // Dedicated Back key. Short press steps back; a hold leaves Setup edit.
+    int ev = back_btn.check();
+    if (ev == BUTTON_EVENT_CLICK) {
+      c = checkDisplayOn(KEY_PREV);
+    } else if (ev == BUTTON_EVENT_LONG_PRESS) {
+      c = checkDisplayOn(KEY_CANCEL);
+    }
+  }
+#endif
   return c;
 }
 
@@ -1999,6 +2017,9 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
 #endif
 #if defined(PIN_USER_BTN_ANA)
   analog_btn.begin();
+#endif
+#if defined(PIN_BACK_BTN) && !UI_HAS_JOYSTICK
+  back_btn.begin();
 #endif
 
   _node_prefs = node_prefs;
@@ -2188,11 +2209,14 @@ void UITask::shutdown(bool restart){
 }
 
 bool UITask::isButtonPressed() const {
+  bool down = false;
 #ifdef PIN_USER_BTN
-  return user_btn.isPressed();
-#else
-  return false;
+  down = user_btn.isPressed();
 #endif
+#if defined(PIN_BACK_BTN) && !UI_HAS_JOYSTICK
+  down = down || back_btn.isPressed();
+#endif
+  return down;
 }
 
 static bool einkGestureOpen() {
@@ -2201,10 +2225,17 @@ static bool einkGestureOpen() {
 #elif defined(PIN_USER_BTN)
   if (user_btn.gestureOpen()) return true;
 #endif
+#if defined(PIN_BACK_BTN) && !UI_HAS_JOYSTICK
+  if (back_btn.gestureOpen()) return true;
+#endif
 #if defined(PIN_USER_BTN_ANA)
   if (analog_btn.gestureOpen()) return true;
 #endif
   return false;
+}
+
+bool UITask::buttonsBusy() const {
+  return einkGestureOpen();
 }
 
 void UITask::loop() {

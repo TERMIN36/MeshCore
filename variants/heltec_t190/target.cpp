@@ -20,6 +20,8 @@ SensorManager sensors;
 #ifdef DISPLAY_CLASS
 DISPLAY_CLASS display;
 MomentaryButton user_btn(PIN_USER_BTN, 1000, true);
+// GPIO21 is the third key (active low). One click is Back, so no multi-click window.
+MomentaryButton back_btn(PIN_BACK_BTN, 1000, true, true, false);
 #endif
 
 bool radio_init() {

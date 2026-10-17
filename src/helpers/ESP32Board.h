@@ -84,6 +84,19 @@ protected:
 #endif
   }
 
+  // Second key on Vision Master (GPIO21). Active low, same pad rules as BOOT.
+  static void restoreBackButton() {
+#if defined(PIN_BACK_BTN)
+    if (PIN_BACK_BTN < 0) return;
+    gpio_num_t button = (gpio_num_t)PIN_BACK_BTN;
+    releaseRtcPad(PIN_BACK_BTN);
+    gpio_reset_pin(button);
+    gpio_set_direction(button, GPIO_MODE_INPUT);
+    gpio_set_pull_mode(button, GPIO_PULLUP_ONLY);
+    gpio_sleep_sel_dis(button);
+#endif
+  }
+
   // The Arduino GPIO trampoline is in flash. A packet edge during light sleep
   // used to run it before the cache was back and reboot the chip, so the
   // interrupt was masked and the CPU only woke for the noise-floor timer
@@ -288,9 +301,22 @@ public:
     int pressed = 0;
 #endif
 
+    bool back_wake = false;
+#if defined(PIN_BACK_BTN)
+    gpio_num_t back = (gpio_num_t)PIN_BACK_BTN;
+    if (allowBtnWake && PIN_BACK_BTN >= 0 && (int)back != (int)wakeupPin &&
+        (int)back != (int)button && gpio_get_level(back) != 0 &&
+        gpio_wakeup_enable(back, GPIO_INTR_LOW_LEVEL) == ESP_OK) {
+      back_wake = true;
+      gpio_sleep_sel_dis(back);
+      clearGpioInt(back);
+    }
+#endif
+
     // A packet that arrived while wakeup was being armed must not be slept through.
     if (gpio_get_level(wakeupPin) == HIGH) {
       if (btn_wake) restoreUserButton();
+      if (back_wake) restoreBackButton();
       disarmRadioLightWake();
       restoreRadioIrq();
       delay(1);
@@ -304,12 +330,18 @@ public:
 #else
     bool btn_down = false;
 #endif
+#if defined(PIN_BACK_BTN)
+    bool back_down = PIN_BACK_BTN >= 0 && gpio_get_level((gpio_num_t)PIN_BACK_BTN) == 0;
+#else
+    bool back_down = false;
+#endif
 
     disarmRadioLightWake();
     if (btn_wake) restoreUserButton();
+    if (back_wake) restoreBackButton();
     restoreRadioIrq();
 
-    if (btn_wake && !dio_high && !btn_down && asleep < 2000 &&
+    if (btn_wake && !dio_high && !btn_down && !back_down && asleep < 2000 &&
         esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_GPIO) {
       allowBtnWake = false;
     }

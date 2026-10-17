@@ -1,4 +1,5 @@
 #include "E290Display.h"
+#include "EinkYieldPoll.h"
 
 #include "../../MeshCore.h"
 
@@ -202,10 +203,16 @@ uint16_t E290Display::getTextWidth(const char *str) {
   return w;
 }
 
+void E290Display::setBusyPoll(void (*fn)()) {
+  einkYieldPollSet(fn);
+}
+
 void E290Display::endFrame() {
   uint32_t crc = display_crc.finalize();
   if (crc != last_display_crc_value) {
+    einkYieldPollEnter();
     display.update();
+    einkYieldPollLeave();
     last_display_crc_value = crc;
   }
 }

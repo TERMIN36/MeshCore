@@ -218,11 +218,26 @@ int ESP32Board::waitAutoLightSleep(uint32_t timeout_ms) {
     }
   }
 #endif
+  bool back_wake = false;
+#if defined(PIN_BACK_BTN)
+  gpio_num_t back = (gpio_num_t)PIN_BACK_BTN;
+  if (idlePinOk(back) && back != dio
+#if defined(PIN_USER_BTN)
+      && back != (gpio_num_t)PIN_USER_BTN
+#endif
+      && allowBtnWake && gpio_get_level(back) != 0 &&
+      gpio_wakeup_enable(back, GPIO_INTR_LOW_LEVEL) == ESP_OK) {
+    back_wake = true;
+    gpio_sleep_sel_dis(back);
+    clearGpioInt(back);
+  }
+#endif
   if (esp_sleep_enable_gpio_wakeup() != ESP_OK) {
     disarmRadioLightWake();
 #if defined(PIN_USER_BTN)
     if (btn_wake) restoreUserButton();
 #endif
+    if (back_wake) restoreBackButton();
     return -1;
   }
 
@@ -245,6 +260,9 @@ int ESP32Board::waitAutoLightSleep(uint32_t timeout_ms) {
 #if defined(PIN_USER_BTN)
       if (watch_btn && digitalRead((uint8_t)button) == USER_BTN_PRESSED) break;
 #endif
+#if defined(PIN_BACK_BTN)
+      if (PIN_BACK_BTN >= 0 && digitalRead(PIN_BACK_BTN) == LOW) break;
+#endif
       uint32_t left = timeout_ms - (uint32_t)(millis() - start);
       if (left > 50) left = 50;
       if (left == 0) break;
@@ -257,6 +275,7 @@ int ESP32Board::waitAutoLightSleep(uint32_t timeout_ms) {
 #if defined(PIN_USER_BTN)
   if (btn_wake) restoreUserButton();
 #endif
+  if (back_wake) restoreBackButton();
   restoreRadioIrq();
   return rc;
 }

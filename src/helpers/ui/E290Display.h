@@ -25,6 +25,7 @@ public:
   bool begin();
   bool isOn() override { return _isOn; }
   bool isEink() override { return true; }
+  void setBusyPoll(void (*fn)()) override;
   void clean() override;
   void turnOn() override;
   void turnOff() override;

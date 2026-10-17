@@ -162,14 +162,6 @@ static bool companion_ble_down = false;
 // advertising. Turning BLE on and off drops the refcount and lands at 7 mA.
 static bool companion_modem_released = false;
 
-extern "C" {
-void phy_get_romfunc_addr(void);
-void phy_close_rf(void);
-#if !defined(CONFIG_IDF_TARGET_ESP32)
-void phy_xpd_tsens(void);
-#endif
-}
-
 #if MESHCORE_HAS_WIFI_CLK_REG
 static inline void companionWifiClkSet(uint32_t mask) {
 #if defined(CONFIG_IDF_TARGET_ESP32)
@@ -198,19 +190,45 @@ static inline void companionCpuPerConfClr(uint32_t mask) {
 }
 #endif
 
-// phy_close_rf has to run while the modem clocks are still on. Cutting the
-// power domain first latches the analog front-end in the last bias.
-static void companionCloseRadioFrontEnd() {
-#if MESHCORE_HAS_RTC_CNTL_REG && MESHCORE_HAS_WIFI_CLK_REG
-  REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
-  delay(10);
-  companionWifiClkSet(SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
-  REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
+// Set only while XTL/BBPLL FORCE_PU is held for a controller init. Cleared
+// again once BLE or Wi-Fi owns the PHY, so light sleep can drop the PLL.
+static bool companion_pll_forced = false;
+
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
+static esp_pm_lock_handle_t companion_cpu_max = nullptr;
 #endif
-  phy_get_romfunc_addr();
-  phy_close_rf();
-#if !defined(CONFIG_IDF_TARGET_ESP32)
-  phy_xpd_tsens();
+
+// Held only across BLE/Wi-Fi init. A pending frequency switch on the other
+// core stalls forever and the watchdog reboots. Leaving the lock held would
+// keep esp_pm from light-sleeping after the screen goes off.
+static bool companionCpuMaxHold() {
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
+  if (!companion_cpu_max) {
+    if (esp_pm_lock_create(ESP_PM_CPU_FREQ_MAX, 0, "link", &companion_cpu_max) != ESP_OK) {
+      companion_cpu_max = nullptr;
+      return false;
+    }
+  }
+  return esp_pm_lock_acquire(companion_cpu_max) == ESP_OK;
+#else
+  return false;
+#endif
+}
+
+static void companionCpuMaxDrop(bool held) {
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
+  if (held && companion_cpu_max) esp_pm_lock_release(companion_cpu_max);
+#else
+  (void)held;
+#endif
+}
+
+static void companionDropPllForce() {
+#if MESHCORE_HAS_RTC_CNTL_REG && MESHCORE_HAS_WIFI_CLK_REG
+  if (!companion_pll_forced) return;
+  REG_CLR_BIT(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_XTL_FORCE_PU | RTC_CNTL_BBPLL_FORCE_PU |
+                                     RTC_CNTL_BBPLL_I2C_FORCE_PU | RTC_CNTL_BB_I2C_FORCE_PU);
+  companion_pll_forced = false;
 #endif
 }
 
@@ -218,7 +236,9 @@ static void companionReleaseModem() {
   if (companion_modem_released) return;
   if (!companion_ble_down || bluetooth_interface.isEnabled()) return;
   if ((WiFi.getMode() & WIFI_MODE_STA) != 0) return;
-  companionCloseRadioFrontEnd();
+  // deinit and WiFi.mode(OFF) already closed the PHY. A second phy_close_rf
+  // leaves the ROM where the next btStart() never leaves IDLE, and the
+  // watchdog reboots. The force-PD and clock gate are what hold the off current.
 #if MESHCORE_HAS_RTC_CNTL_REG && MESHCORE_HAS_WIFI_CLK_REG
   REG_SET_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
   REG_SET_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
@@ -227,7 +247,9 @@ static void companionReleaseModem() {
   companionWifiClkClr(SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
   REG_CLR_BIT(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_XTL_FORCE_PU | RTC_CNTL_BBPLL_FORCE_PU |
                                      RTC_CNTL_BBPLL_I2C_FORCE_PU | RTC_CNTL_BB_I2C_FORCE_PU);
+  companion_pll_forced = false;
 #ifdef SYSTEM_CPU_WAIT_MODE_FORCE_ON
+  // Leave this clear. Setting it again stops the CPU from entering wait.
   companionCpuPerConfClr(SYSTEM_CPU_WAIT_MODE_FORCE_ON);
 #endif
 #endif
@@ -236,9 +258,24 @@ static void companionReleaseModem() {
 
 static void companionAllowModem() {
   if (!companion_modem_released) return;
-#if MESHCORE_HAS_RTC_CNTL_REG
+#if MESHCORE_HAS_RTC_CNTL_REG && MESHCORE_HAS_WIFI_CLK_REG
+  // Same order as the IDF power-domain on: power, then un-isolate, then clocks.
+  // CPU_WAIT_MODE_FORCE_ON stays clear so light sleep can still wait.
   REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
+  REG_SET_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PU | RTC_CNTL_BT_FORCE_PU);
+  delay(10);
   REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
+  REG_SET_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_NOISO | RTC_CNTL_BT_FORCE_NOISO);
+  companionWifiClkSet(SYSTEM_WIFI_CLK_WIFI_BT_COMMON_M | SYSTEM_BT_BASEBAND_EN | SYSTEM_BT_LC_EN);
+  REG_SET_BIT(RTC_CNTL_OPTIONS0_REG, RTC_CNTL_XTL_FORCE_PU | RTC_CNTL_BBPLL_FORCE_PU |
+                                     RTC_CNTL_BBPLL_I2C_FORCE_PU | RTC_CNTL_BB_I2C_FORCE_PU);
+  companion_pll_forced = true;
+#elif MESHCORE_HAS_RTC_CNTL_REG
+  REG_CLR_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PD | RTC_CNTL_BT_FORCE_PD);
+  REG_SET_BIT(RTC_CNTL_DIG_PWC_REG, RTC_CNTL_WIFI_FORCE_PU | RTC_CNTL_BT_FORCE_PU);
+  delay(10);
+  REG_CLR_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_ISO | RTC_CNTL_BT_FORCE_ISO);
+  REG_SET_BIT(RTC_CNTL_DIG_ISO_REG, RTC_CNTL_WIFI_FORCE_NOISO | RTC_CNTL_BT_FORCE_NOISO);
 #endif
   companion_modem_released = false;
 }
@@ -274,12 +311,16 @@ static void companionBleStop() {
 }
 
 static void companionBleStart() {
+  bool held = companionCpuMaxHold();
   companionAllowModem();
   if (companion_ble_down) {
     bluetooth_interface.begin(BLE_NAME_PREFIX, the_mesh.getNodePrefs()->node_name, the_mesh.getBLEPin());
     companion_ble_down = false;
   }
   if (!bluetooth_interface.isEnabled()) bluetooth_interface.enable();
+  // Domain FORCE_PU stays: the controller refcount owns it, same as a cold BLE boot.
+  companionDropPllForce();
+  companionCpuMaxDrop(held);
   companionBleModemOn();
 }
 
@@ -295,6 +336,7 @@ static void companionWifiStop() {
 
 static void companionWifiStart(const char* ssid, const char* pass) {
   companionBleStop();
+  bool held = companionCpuMaxHold();
   companionAllowModem();
   companionWifiCpu(true);
   // MAX modem sleep lets the CPU light-sleep between beacons. MIN keeps
@@ -304,6 +346,8 @@ static void companionWifiStart(const char* ssid, const char* pass) {
   WiFi.setAutoReconnect(true);
   if (pass && pass[0]) WiFi.begin(ssid, pass);
   else WiFi.begin(ssid);
+  companionDropPllForce();
+  companionCpuMaxDrop(held);
   wifi_interface.begin(TCP_PORT);
   wifi_interface.enable();
 }
@@ -559,6 +603,16 @@ static void companionBleLightStop() {
 // mesh and a notify run; a manual esp_light_sleep_start() would stop Bluedroid.
 static void companionBleLightSleep(uint32_t sleep_ms) {
   if (sleep_ms == 0) return;
+#ifdef DISPLAY_CLASS
+  // A click still inside its multi-click window, or a key still down.
+  // waitAutoLightSleep only wakes on a press level, so the release is lost
+  // and a triple click arrives as one.
+  if (ui_task.buttonsBusy()) {
+    companionBleCpuAwake();
+    delay(5);
+    return;
+  }
+#endif
 #if !defined(COMPANION_BLE_MODEM_SLEEP)
   delay(sleep_ms > 20 ? 20 : sleep_ms);
   return;
@@ -590,7 +644,9 @@ static void companionBleLightSleep(uint32_t sleep_ms) {
   if (slept < 0) {
     uint32_t start = millis();
     while ((uint32_t)(millis() - start) < sleep_ms) {
-#if defined(PIN_USER_BTN)
+#if defined(DISPLAY_CLASS)
+      if (ui_task.isButtonPressed()) break;
+#elif defined(PIN_USER_BTN)
       if (digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED) break;
 #endif
       uint32_t left = sleep_ms - (uint32_t)(millis() - start);
@@ -599,12 +655,12 @@ static void companionBleLightSleep(uint32_t sleep_ms) {
       delay(left);
     }
   }
-#if defined(DISPLAY_CLASS) && defined(PIN_USER_BTN)
+#if defined(DISPLAY_CLASS)
   // The UI samples the pin once per loop. If we sleep again before it sees
   // the release, the click is lost and the screen stays dark.
-  if (digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED) {
+  if (ui_task.isButtonPressed()) {
     uint32_t held = millis();
-    while (digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED && (uint32_t)(millis() - held) < 1500) {
+    while (ui_task.isButtonPressed() && (uint32_t)(millis() - held) < 1500) {
       ui_task.loop();
       delay(10);
     }
@@ -628,6 +684,13 @@ static void companionWifiCpuAwake() {
 // beacons. Automatic light sleep lets the Wi-Fi driver wake for DTIM.
 static void companionWifiLightSleep(uint32_t sleep_ms) {
   if (sleep_ms == 0) return;
+#ifdef DISPLAY_CLASS
+  if (ui_task.buttonsBusy()) {
+    companionWifiCpuAwake();
+    delay(5);
+    return;
+  }
+#endif
   if (!wifi_cpu_light) {
     if (!board.setAutoLightSleep(true)) {
       delay(sleep_ms > 20 ? 20 : sleep_ms);
@@ -642,7 +705,9 @@ static void companionWifiLightSleep(uint32_t sleep_ms) {
   if (slept < 0) {
     uint32_t start = millis();
     while ((uint32_t)(millis() - start) < sleep_ms) {
-#if defined(PIN_USER_BTN)
+#if defined(DISPLAY_CLASS)
+      if (ui_task.isButtonPressed()) break;
+#elif defined(PIN_USER_BTN)
       if (digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED) break;
 #endif
       uint32_t left = sleep_ms - (uint32_t)(millis() - start);
@@ -651,10 +716,10 @@ static void companionWifiLightSleep(uint32_t sleep_ms) {
       delay(left);
     }
   }
-#if defined(DISPLAY_CLASS) && defined(PIN_USER_BTN)
-  if (digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED) {
+#if defined(DISPLAY_CLASS)
+  if (ui_task.isButtonPressed()) {
     uint32_t held = millis();
-    while (digitalRead(PIN_USER_BTN) == USER_BTN_PRESSED && (uint32_t)(millis() - held) < 1500) {
+    while (ui_task.isButtonPressed() && (uint32_t)(millis() - held) < 1500) {
       ui_task.loop();
       delay(10);
     }
@@ -769,10 +834,21 @@ void loop() {
         // BLE and Wi-Fi are both off. Wake at least every 350 ms so the
         // button is polled even if the GPIO wake is missed. A packet on DIO
         // still wakes immediately.
-        if (sleep_ms > 350) sleep_ms = 350;
-        if (sleep_ms > 0) board.idleSleep(sleep_ms);
+#ifdef DISPLAY_CLASS
+        if (ui_task.buttonsBusy()) {
+          delay(5);
+        } else
+#endif
+        {
+          if (sleep_ms > 350) sleep_ms = 350;
+          if (sleep_ms > 0) board.idleSleep(sleep_ms);
+        }
       }
 #else
+#ifdef DISPLAY_CLASS
+      if (ui_task.buttonsBusy()) delay(5);
+      else
+#endif
       if (sleep_ms > 0) board.idleSleep(sleep_ms);
 #endif
     } else {

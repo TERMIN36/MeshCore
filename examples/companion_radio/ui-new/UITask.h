@@ -101,6 +101,9 @@ public:
     if (_display && _node_prefs) _display->setRefreshMode(_node_prefs->eink_refresh);
   }
   bool isButtonPressed() const;
+  // Held, or a multi-click still waiting out its window. The CPU must not
+  // light-sleep through that, or the release edge never reaches check().
+  bool buttonsBusy() const;
 
   bool isBuzzerQuiet() { 
 #ifdef PIN_BUZZER
