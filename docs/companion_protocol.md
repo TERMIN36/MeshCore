@@ -37,6 +37,7 @@ All secrets, hashes, and cryptographic values shown in this guide are example va
 7. [Example Implementation Flow](#example-implementation-flow)
 8. [Best Practices](#best-practices)
 9. [Troubleshooting](#troubleshooting)
+10. [Console](#console)
 
 ---
 
@@ -638,6 +639,7 @@ Byte values are authoritative; names are aliases. When reading firmware source, 
 | 0x11  | PACKET_CHANNEL_MSG_RECV_V3 | Channel message (V3 with SNR) |
 | 0x12  | PACKET_CHANNEL_INFO        | Channel information           |
 | 0x1B  | PACKET_CHANNEL_DATA_RECV   | Channel data datagram         |
+| 0x1D  | PACKET_CONSOLE             | Console command output        |
 | 0x80  | PACKET_ADVERTISEMENT       | Advertisement packet          |
 | 0x82  | PACKET_ACK                 | Acknowledgment                |
 | 0x83  | PACKET_MESSAGES_WAITING    | Messages waiting notification |
@@ -988,3 +990,49 @@ def on_notification_received(data):
 - **Messages not received**: Poll `GET_MESSAGE` command periodically
 - **Duplicate messages**: Implement message deduplication using timestamp/content as a unique id
 - **Message truncation**: Send long messages as separate shorter messages
+
+---
+
+## Console
+
+`CMD_CONSOLE` (0x42) runs a line on the companion's local CLI and returns the text in `PACKET_CONSOLE` (0x1D). This is a host link to the device itself. It does not send a mesh packet, and it is not the `Console` contact.
+
+The Termin36 mobile app (MeshCoreTel build) exposes this as a **Console** screen over the active Link (BLE, Wi‑Fi, or USB). User-facing notes: [companion_console_prompt.md](companion_console_prompt.md) (Russian).
+
+The output buffer is 2048 bytes and is not the offline message queue. A new execute clears anything not yet read.
+
+**Command**:
+
+```
+Byte 0: 0x42
+Byte 1: 0x01 execute, or 0x02 read the next chunk
+Bytes 2+: UTF-8 command line for execute. No trailing NUL. 160 bytes maximum. Trailing CR/LF are stripped.
+```
+
+Execute example, `ver`:
+
+```
+42 01 76 65 72
+```
+
+Read example:
+
+```
+42 02
+```
+
+A command longer than 160 bytes is not run. The response text is `  Error: command too long`. Any other bad form (missing op, unknown op) is `PACKET_ERROR` (0x01).
+
+**Response** `PACKET_CONSOLE` (0x1D):
+
+```
+Byte 0: 0x1D
+Byte 1: flags
+  bit 0 (0x01): more text remains; send op 0x02
+  bit 1 (0x02): the 2048-byte buffer filled and the tail was dropped
+Bytes 2+: UTF-8 text. The frame length is the end. There is no trailing NUL. The chunk may be empty.
+```
+
+One frame is at most 176 bytes, so a chunk holds at most 174 bytes of text. Keep sending op 0x02 until bit 0 is clear. A read when nothing is left is a 2-byte frame with flags 0.
+
+`reboot` answers `  > rebooting` and then the device restarts. `set link` to a different transport can drop the current link before that reply arrives; the setting is already stored.

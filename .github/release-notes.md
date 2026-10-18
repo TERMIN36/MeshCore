@@ -1,10 +1,18 @@
-Как пользоваться устройством: [README](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc10/README.md).
+Как пользоваться устройством: [README](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc11/README.md).
 
-Что изменилось в этой и прошлых версиях, с картинками экранов: [CHANGELOG](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc10/CHANGELOG.md).
+Что изменилось в этой и прошлых версиях, с картинками экранов: [CHANGELOG](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc11/CHANGELOG.md).
 
-## Что нового в v0.2.0-rc10
+## Что нового в v0.2.0-rc11
 
-Кандидат относительно `v1.17.1-0.1.4`: можно поставить и проверить. Стабильный «последний» на сайте пока не меняется. На заставке только номер версии; в телефоне и в «о версии» — `termin36-v0.2.0-rc10`.
+Кандидат относительно `v1.17.1-0.1.4`: можно поставить и проверить. Стабильный «последний» на сайте пока не меняется. На заставке только номер версии; в телефоне и в «о версии» — `termin36-v0.2.0-rc11`.
+
+### Консоль в приложении Termin36
+
+В **мобильном приложении Termin36** (сборка для прошивки Мешкартель, [meshcoretel.ru](https://meshcoretel.ru/ru)) у подключённого Companion есть экран **Консоль**: команды платы (`help`, `set`, `clock sync`, `set link`, Wi‑Fi и остальное из `help`) по Bluetooth, Wi‑Fi или USB — тот же канал Link. Это не чат с контактом **Console** на экране устройства.
+
+### Сборка
+
+Починена сборка companion для ThinkNode M5/M7, Ebyte EoRa-S3 и GAT562 Mesh Watch13 (см. [CHANGELOG](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc11/CHANGELOG.md)).
 
 ### Питание
 
