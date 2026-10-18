@@ -997,7 +997,7 @@ def on_notification_received(data):
 
 `CMD_CONSOLE` (0x42) runs a line on the companion's local CLI and returns the text in `PACKET_CONSOLE` (0x1D). This is a host link to the device itself. It does not send a mesh packet, and it is not the `Console` contact.
 
-The Termin36 mobile app (MeshCoreTel build) exposes this as a **Console** screen over the active Link (BLE, Wi‑Fi, or USB). User-facing notes: [companion_console_prompt.md](companion_console_prompt.md) (Russian).
+A companion client may expose this as a **Console** screen over the active Link (BLE, Wi‑Fi, or USB). Notes: [companion_console_prompt.md](companion_console_prompt.md) (Russian).
 
 The output buffer is 2048 bytes and is not the offline message queue. A new execute clears anything not yet read.
 
