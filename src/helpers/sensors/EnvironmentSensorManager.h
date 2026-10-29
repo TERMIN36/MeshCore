@@ -26,6 +26,7 @@ protected:
   bool     gps_force_window = false;
   uint32_t gps_update_interval_sec = 1;
   uint32_t gps_power_interval_sec = 0; // 0 = stay powered while GPS is enabled
+  bool     gps_beacon_sync = false;
   unsigned long gps_window_deadline = 0;
 
   #if ENV_INCLUDE_GPS
@@ -59,6 +60,7 @@ public:
   const char* getSettingValue(int i) const override;
   bool setSettingValue(const char* name, const char* value) override;
   bool gpsHoldsCpu() const override;
+  bool gpsSupportsEco() const override;
   void noteGpsDeadline(uint32_t ms_until) override;
   uint32_t millisUntilGpsWake() const override;
 };

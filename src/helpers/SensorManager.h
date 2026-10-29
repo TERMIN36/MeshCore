@@ -30,6 +30,7 @@ public:
   virtual LocationProvider* getLocationProvider() { return NULL; }
   // True while the GPS receiver is drawing power and the CPU must stay awake.
   virtual bool gpsHoldsCpu() const { return false; }
+  virtual bool gpsSupportsEco() const { return false; }
   // Ask for a window early enough to have a fix by this deadline.
   virtual void noteGpsDeadline(uint32_t ms_until) { (void)ms_until; }
   // Milliseconds until the next GPS power-on. A large value means no deadline.

@@ -427,13 +427,15 @@ class HomeScreen : public UIScreen {
   // Messages is every board that has a display.
   enum SetupItem : uint8_t {
     SETUP_SAVER = 0,
-    SETUP_SCREEN = 1,
-    SETUP_MESSAGES = 2,
-    SETUP_ITEM_COUNT = 3
+    SETUP_SAVER_EXIT = 1,
+    SETUP_SCREEN = 2,
+    SETUP_MESSAGES = 3,
+    SETUP_ITEM_COUNT = 4
   };
 
   bool setupItemOn(uint8_t item) const {
     if (item == SETUP_SAVER) return _task->isEink();
+    if (item == SETUP_SAVER_EXIT) return _task->isEink();
     if (item == SETUP_SCREEN) return _task->canChooseRefresh();
     if (item == SETUP_MESSAGES) return _task->displayPresent();
     return false;
@@ -483,6 +485,10 @@ class HomeScreen : public UIScreen {
       uint8_t mode = _node_prefs->clock_saver;
       if (mode >= SAVER_COUNT) mode = SAVER_OFF;
       _node_prefs->clock_saver = (uint8_t)((mode + 1) % SAVER_COUNT);
+    } else if (item == SETUP_SAVER_EXIT) {
+      uint8_t mode = _node_prefs->saver_exit_hold;
+      if (mode >= SAVER_EXIT_COUNT) mode = SAVER_EXIT_3S;
+      _node_prefs->saver_exit_hold = (uint8_t)((mode + 1) % SAVER_EXIT_COUNT);
     } else if (item == SETUP_SCREEN) {
       uint8_t mode = _node_prefs->eink_refresh;
       if (mode >= EINK_REFRESH_COUNT) mode = 0;
@@ -951,6 +957,14 @@ public:
       display.setColor(gps_state ? UIColor::primary_txt : UIColor::warning_txt);
       display.drawTextRightAlign(display.width() - 1, y, module);
       y += 12;
+      if (_task->gpsSupportsEco() && _node_prefs) {
+        display.setColor(UIColor::secondary_txt);
+        display.drawTextLeftAlign(0, y, "power");
+        display.setColor(UIColor::primary_txt);
+        const char* pm = (_node_prefs->gps_power_mode == GPS_PWR_BEACON) ? "beacon" : "always";
+        display.drawTextRightAlign(display.width() - 1, y, pm);
+        y += 12;
+      }
       if (nmea == NULL) {
         display.setColor(UIColor::secondary_txt);
         display.drawTextLeftAlign(0, y, "Can't access GPS");
@@ -986,7 +1000,11 @@ public:
       }
       if (display.height() - 11 >= y) {
         display.setColor(UIColor::secondary_txt);
-        display.drawTextCentered(display.width() / 2, display.height() - 11, "toggle: " PRESS_LABEL);
+        if (_task->gpsSupportsEco()) {
+          display.drawTextCentered(display.width() / 2, display.height() - 11, "on:Enter pwr:Sel");
+        } else {
+          display.drawTextCentered(display.width() / 2, display.height() - 11, "toggle: " PRESS_LABEL);
+        }
       }
     } else if (_page == HomePage::BEACON) {
       char mode[20];
@@ -1114,9 +1132,14 @@ public:
       if (saver == SAVER_CLOCK) saver_name = "clock";
       else if (saver == SAVER_BATT) saver_name = "batt";
       sprintf(tmp, "%u", (unsigned)mode + 1);
+      uint8_t wake = _node_prefs ? _node_prefs->saver_exit_hold : SAVER_EXIT_3S;
+      if (wake >= SAVER_EXIT_COUNT) wake = SAVER_EXIT_3S;
+      const char* wake_name = "3s";
+      if (wake == SAVER_EXIT_NOW) wake_name = "now";
+      else if (wake == SAVER_EXIT_1S) wake_name = "1s";
       bool show_now = !_node_prefs || _node_prefs->show_msg_now;
-      const char* labels[SETUP_ITEM_COUNT] = { "Saver", "ScreenMode", "Messages" };
-      const char* values[SETUP_ITEM_COUNT] = { saver_name, tmp, show_now ? "show" : "don't show" };
+      const char* labels[SETUP_ITEM_COUNT] = { "Saver", "Wake", "ScreenMode", "Messages" };
+      const char* values[SETUP_ITEM_COUNT] = { saver_name, wake_name, tmp, show_now ? "on" : "off" };
       display.setTextSize(1);
       int shown = 0;
       int last_y = 22;
@@ -1192,6 +1215,12 @@ public:
         _task->cycleRadioProfile();
         return true;
       }
+#if ENV_INCLUDE_GPS == 1
+      if (_page == HomePage::GPS && _task->gpsSupportsEco()) {
+        _task->cycleGpsPowerMode();
+        return true;
+      }
+#endif
       if (_page == HomePage::SETUP && _setup_edit) {
         changeSetupValue();
         return true;
@@ -1808,7 +1837,14 @@ class ClockScreen : public UIScreen {
   NodePrefs* _prefs;
   unsigned long _held_since;
 
-  static const unsigned long HOLD_EXIT_MS = 3000;
+  unsigned long holdExitMs() const {
+    if (!_prefs) return 3000;
+    uint8_t mode = _prefs->saver_exit_hold;
+    if (mode >= SAVER_EXIT_COUNT) mode = SAVER_EXIT_3S;
+    if (mode == SAVER_EXIT_NOW) return 0;
+    if (mode == SAVER_EXIT_1S) return 1000;
+    return 3000;
+  }
 
   static void formatTime(uint32_t t, int16_t tz_mins, char* buf) {
     if (t < 1000000000UL) {
@@ -1826,13 +1862,15 @@ public:
     : _task(task), _rtc(rtc), _preview(preview), _prefs(prefs), _held_since(0) {}
 
   void poll() override {
+    unsigned long hold_ms = holdExitMs();
+    if (hold_ms == 0) return;
     if (!_task->isButtonPressed()) {
       _held_since = 0;
       return;
     }
     unsigned long now = millis();
     if (_held_since == 0) _held_since = now;
-    if ((unsigned long)(now - _held_since) < HOLD_EXIT_MS) {
+    if ((unsigned long)(now - _held_since) < hold_ms) {
       _task->setIdleWakeHint(50);
       return;
     }
@@ -1917,8 +1955,15 @@ public:
     return wait;
   }
 
-  // A tap stays on the saver. Leaving is the 3 s hold tracked in poll().
-  bool handleInput(char) override { return false; }
+  // SAVER_EXIT_NOW: any press leaves. Otherwise poll() waits for 1 s or 3 s hold.
+  bool handleInput(char c) override {
+    if (c == 0) return false;
+    if (_prefs && _prefs->saver_exit_hold == SAVER_EXIT_NOW) {
+      _task->gotoHomeScreen();
+      return true;
+    }
+    return false;
+  }
 };
 
 bool UITask::reopenMsgPreview() {
@@ -2420,6 +2465,21 @@ bool UITask::getGPSState() {
   return false;
 }
 
+bool UITask::gpsSupportsEco() const {
+  return _sensors != NULL && _sensors->gpsSupportsEco();
+}
+
+void UITask::cycleGpsPowerMode() {
+  if (!_node_prefs || !gpsSupportsEco()) return;
+  _node_prefs->gps_power_mode = (_node_prefs->gps_power_mode == GPS_PWR_BEACON)
+    ? GPS_PWR_ALWAYS : GPS_PWR_BEACON;
+  the_mesh.applyGpsPrefs();
+  the_mesh.savePrefs();
+  notify(UIEventType::ack);
+  showAlert(_node_prefs->gps_power_mode == GPS_PWR_BEACON ? "GPS: beacon" : "GPS: always", 900);
+  _next_refresh = 0;
+}
+
 void UITask::toggleGPS() {
     if (_sensors != NULL) {
     // toggle GPS on/off
@@ -2435,8 +2495,10 @@ void UITask::toggleGPS() {
           _node_prefs->gps_enabled = 1;
           notify(UIEventType::ack);
         }
+        the_mesh.applyGpsPrefs();
         the_mesh.savePrefs();
-        if (_node_prefs->gps_enabled && _node_prefs->mcu_sleep && _node_prefs->gps_interval == 0) {
+        if (_node_prefs->gps_enabled && _node_prefs->mcu_sleep && _node_prefs->gps_interval == 0 &&
+            _node_prefs->gps_power_mode != GPS_PWR_BEACON) {
           showAlert("GPS needs CPU on", 1200);
         } else {
           showAlert(_node_prefs->gps_enabled ? "GPS: Enabled" : "GPS: Disabled", 800);

@@ -116,6 +116,7 @@ public :
     }
 
     void syncTime() override { nmea.clear(); LocationProvider::syncTime(); }
+    void invalidateFix() override { nmea.clear(); time_valid = 0; }
     long getLatitude() override { return nmea.getLatitude(); }
     long getLongitude() override { return nmea.getLongitude(); }
     long getAltitude() override { 

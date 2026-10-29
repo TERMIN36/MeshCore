@@ -4,7 +4,16 @@ GitHub Actions is set up to automatically build and release firmware.
 
 ## Combined release (`v*` tags)
 
-Push a tag like `v0.2.0` or `v0.2.0-rc11`. The Release workflow builds companion, repeater and room-server, then publishes **three zip bundles** (one per role) to avoid GitHub rate limits from hundreds of individual assets:
+Push a tag like `v0.2.0` or `v0.2.0-rc12`. The Release workflow builds companion, repeater and room-server, then publishes **three zip bundles** (one per role) to avoid GitHub rate limits from hundreds of individual assets:
+
+**Device-facing version string** (max 20 characters, see `build.sh`):
+
+| Git tag | `FIRMWARE_VERSION` in firmware |
+|--------|----------------------------------|
+| `v0.2.0` (stable) | `termin36-v0.2.0` |
+| `v0.2.0-rc12`, `-beta`, `-alpha` | `t36-v0.2.0-rc12` |
+
+The splash shows the same device-facing string (without commit hash): `t36-v0.2.0-rc12` or `termin36-v0.2.0`.
 
 - `companion-<tag>.zip`
 - `repeater-<tag>.zip`

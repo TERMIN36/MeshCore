@@ -686,6 +686,8 @@ Byte 80: Client repeat enabled/preferred (firmware v9+)
 Byte 81: Path hash mode (firmware v10+)
 ```
 
+A version shorter than 20 bytes ends with a null; the rest of the field is null padding. A version of exactly 20 characters fills the field and has no null inside it. Read the fixed slice and strip trailing nulls.
+
 **Parsing Pseudocode**:
 ```python
 def parse_device_info(data):

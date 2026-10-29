@@ -10,6 +10,9 @@
 #define ADVERT_LOC_NONE       0
 #define ADVERT_LOC_SHARE      1
 
+#define GPS_PWR_ALWAYS        0
+#define GPS_PWR_BEACON        1
+
 #define BEACON_OFF            0
 #define BEACON_ADVERT_LOCAL   1
 #define BEACON_ADVERT_FLOOD   2
@@ -30,6 +33,12 @@
 #define SAVER_CLOCK           1
 #define SAVER_BATT            2
 #define SAVER_COUNT           3
+
+// Wake from the e-ink saver (Setup -> Wake).
+#define SAVER_EXIT_NOW        0
+#define SAVER_EXIT_1S         1
+#define SAVER_EXIT_3S         2
+#define SAVER_EXIT_COUNT      3
 
 class NodePrefs : public ConfigSerializer {  // persisted to file
 public:
@@ -57,6 +66,7 @@ public:
   uint8_t  vibe_quiet = 0;
   uint8_t  gps_enabled = 0;      // GPS enabled flag (0=disabled, 1=enabled)
   uint32_t gps_interval = 0;     // GPS read interval in seconds
+  uint8_t  gps_power_mode = GPS_PWR_ALWAYS;  // GPS_PWR_ALWAYS or GPS_PWR_BEACON
   uint8_t  beacon_mode = BEACON_OFF;
   uint8_t  beacon_chan = 0;      // group channel index when beacon_mode == BEACON_GROUP
   uint8_t  beacon_group_mins = 30;
@@ -75,6 +85,7 @@ public:
   int16_t tz_offset_mins = 0;  // local time = UTC + this many minutes
   uint8_t ui_lang = UI_LANG_RU;  // weekday line on the e-ink clock
   uint8_t clock_saver = SAVER_CLOCK;  // SAVER_OFF, SAVER_CLOCK, or SAVER_BATT
+  uint8_t saver_exit_hold = SAVER_EXIT_3S;  // SAVER_EXIT_NOW, SAVER_EXIT_1S, or SAVER_EXIT_3S
   uint8_t show_msg_now = 1;      // 1 = open the message as it arrives
   uint8_t tx_led = 1;            // 1 = blink the board LED while transmitting
   uint8_t eink_refresh = EINK_REFRESH_SHORT;
@@ -125,6 +136,7 @@ private:
     void structure() override {
       def("en", _parent->gps_enabled); // boolean
       def("int", _parent->gps_interval);   // interval in seconds
+      def("pm", _parent->gps_power_mode);
       def("adv_loc", _parent->advert_loc_policy);
       def("bcn", _parent->beacon_mode);
       def("bcn_ch", _parent->beacon_chan);
@@ -171,6 +183,7 @@ private:
       def("tz", _parent->tz_offset_mins);  // minutes east of UTC
       def("lang", _parent->ui_lang);       // 0 = ru, 1 = en
       def("clk", _parent->clock_saver);   // SAVER_OFF, SAVER_CLOCK, or SAVER_BATT
+      def("svrx", _parent->saver_exit_hold); // SAVER_EXIT_NOW, SAVER_EXIT_1S, or SAVER_EXIT_3S
       def("msgnow", _parent->show_msg_now); // 1 = open the message as it arrives
       def("eref", _parent->eink_refresh); // e-ink refresh choice, see EINK_REFRESH_*
       def("tvalid", _parent->time_valid);

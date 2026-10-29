@@ -1,18 +1,22 @@
-Как пользоваться устройством: [README](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc11/README.md).
+Как пользоваться устройством: [README](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc12/README.md).
 
-Что изменилось в этой и прошлых версиях, с картинками экранов: [CHANGELOG](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc11/CHANGELOG.md).
+Что изменилось в этой и прошлых версиях, с картинками экранов: [CHANGELOG](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc12/CHANGELOG.md).
 
-## Что нового в v0.2.0-rc11
+## Что нового в v0.2.0-rc12
 
-Кандидат относительно `v1.17.1-0.1.4`: можно поставить и проверить. Стабильный «последний» на сайте пока не меняется. На заставке только номер версии; в телефоне и в «о версии» — `termin36-v0.2.0-rc11`.
+Кандидат относительно `v1.17.1-0.1.4`: можно поставить и проверить. На заставке и в «о версии» — `t36-v0.2.0-rc12`.
+
+### GPS: режим beacon
+
+На экране GPS (Companion) — **power** `always` / `beacon`. В режиме **beacon** GPS включается только перед передачей маяка.
+
+### Калибровка батареи
+
+CLI `get/set adc.multiplier` на репитере, комнатном сервере и датчике (0.0 = множитель платы, иначе 0.0–10.0). Подробно: [CHANGELOG](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc12/CHANGELOG.md#v020-rc12).
 
 ### Консоль в мобильном клиенте
 
-У подключённого Companion в клиенте на телефоне может быть экран **Консоль**: команды платы (`help`, `set`, `clock sync`, `set link`, Wi‑Fi и остальное из `help`) по Bluetooth, Wi‑Fi или USB — тот же канал Link. Это не чат с контактом **Console** на экране устройства.
-
-### Сборка
-
-Починена сборка companion для ThinkNode M5/M7, Ebyte EoRa-S3 и GAT562 Mesh Watch13 (см. [CHANGELOG](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc11/CHANGELOG.md)).
+Экран **Консоль** в companion-клиенте — команды по Link без эфира. Список: [companion_console_prompt.md](https://github.com/TERMIN36/MeshCore/blob/v0.2.0-rc12/docs/companion_console_prompt.md).
 
 ### Питание
 

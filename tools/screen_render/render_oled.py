@@ -634,13 +634,14 @@ def scr_radio(d, profile="Normal", freq=869.525, bw=250.0, sf=11, cr=5, lna=Fals
     d.drawTextRightAlign(d.width() - 1, 53, "3x: profile")
 
 
-def scr_setup(d, row=0, saver="clock", mode=1, show=True, editing=False):
+def scr_setup(d, row=0, saver="clock", mode=1, show=True, editing=False, wake_exit=2):
     home_header(d, "SETUP", gps_on=False)
-    rows_l = ("Saver", "ScreenMode", "Messages")
-    rows_r = (saver, str(mode + 1), "show" if show else "don't show")
+    wake = ("now", "1s", "3s")[wake_exit if 0 <= wake_exit <= 2 else 2]
+    rows_l = ("Saver", "Wake", "ScreenMode", "Messages")
+    rows_r = (saver, wake, str(mode + 1), "on" if show else "off")
     d.setTextSize(1)
     w = d.width()
-    for i in range(3):
+    for i in range(4):
         y = 22 + i * 14
         d.setColor(WHITE)
         if editing and i == row:
@@ -863,15 +864,16 @@ EINK_SCREENS = [s for s in SCREENS if s[0][:2] not in ("13", "14", "15", "16")] 
     ("22_setup", "Настройки: заставка и экран", lambda d: scr_setup(d)),
 ]
 
-# Current e-ink settings page: Saver / ScreenMode / Messages.
+# Current e-ink settings page: Saver / Wake / ScreenMode / Messages.
 # Older Clock / ScreenMode shots stay in docs/screens as 21_setup.png and setup.png.
 SETUP_SHOTS = [
     ("22_setup", "long press", {}),
     ("22_setup_clock", "edit Saver", {"editing": True}),
     ("22_setup_batt", "Saver batt", {"saver": "batt", "editing": True}),
     ("22_setup_off", "Saver off", {"saver": "off", "editing": True}),
-    ("22_setup_1", "ScreenMode 1", {"row": 1, "mode": 0, "editing": True}),
-    ("22_setup_hide", "Messages don't show", {"row": 2, "show": False, "editing": True}),
+    ("22_setup_wake", "Wake 1s", {"row": 1, "wake_exit": 1, "editing": True}),
+    ("22_setup_1", "ScreenMode 1", {"row": 2, "mode": 0, "editing": True}),
+    ("22_setup_hide", "Messages off", {"row": 3, "show": False, "editing": True}),
 ]
 
 COMPARE = [

@@ -55,7 +55,7 @@ void UITask::begin(DisplayDriver* display, SensorManager* sensors, NodePrefs* no
     _display->turnOn();
   }
 
-  // Splash shows the version number only (no termin36- prefix; brand is separate).
+  // Splash: same device-facing version string as in the phone (hash stripped).
   firmwareVersionForSplash(_version_info, sizeof(_version_info), FIRMWARE_VERSION);
 
 #ifdef PIN_BUZZER

@@ -33,7 +33,7 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
   _node_prefs = node_prefs;
   _display->turnOn();
 
-  // Splash shows the version number only (no termin36- prefix; brand is separate).
+  // Splash: same device-facing version string as in the phone (hash stripped).
   firmwareVersionForSplash(_version_info, sizeof(_version_info), firmware_version);
 }
 

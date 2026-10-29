@@ -426,7 +426,13 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Default:** `0.0` (value defined by board)
 
-**Note:** Returns "Error: unsupported by this board" if hardware doesn't support it
+**Roles:** Repeater, room server, and sensor firmware (CommonCLI). Companion’s phone **Console** screen and on-device Console chat use a smaller command set and do **not** include `adc.multiplier` yet.
+
+**Where to run:** USB serial, repeater web panel console, [config.meshcore.io](https://config.meshcore.io), or the **Console** contact on a repeater (not companion).
+
+**Calibration:** Compare the on-screen or web-panel battery millivolts with a multimeter on the cell. Adjust proportionally: `new_multiplier ≈ current_multiplier × (true_mV / displayed_mV)`. Repeat until close enough. Setting `0.0` restores the board default from the variant build (`ADC_MULTIPLIER` in PlatformIO).
+
+**Note:** Returns "Error: unsupported" if the board does not use a runtime divider multiplier (some nRF52 variants use a fixed scale in millivolts instead).
 
 ---
 

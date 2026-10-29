@@ -728,6 +728,12 @@ bool EnvironmentSensorManager::setSettingValue(const char* name, const char* val
     else if (gps_active) powerGps(true);
     return true;
   }
+  if (strcmp(name, "gps_beacon") == 0) {
+    gps_beacon_sync = (value[0] == '1');
+    if (gps_active && gpsUsesWindows()) gps_force_window = true;
+    else if (gps_active && !gpsUsesWindows()) powerGps(true);
+    return true;
+  }
   #endif
   return false;  // not supported
 }
@@ -866,7 +872,8 @@ bool EnvironmentSensorManager::gpsIsAwake(uint8_t ioPin){
 #endif
 
 bool EnvironmentSensorManager::gpsUsesWindows() const {
-  if (!gps_active || gps_power_interval_sec == 0) return false;
+  if (!gps_active) return false;
+  if (gps_power_interval_sec == 0 && !gps_beacon_sync) return false;
 #ifdef PERSISTANT_GPS
   return false;
 #elif defined(RAK_WISBLOCK_GPS)
@@ -892,6 +899,7 @@ void EnvironmentSensorManager::powerGps(bool on) {
 #endif
   } else {
     _location->stop();
+    _location->invalidateFix();
 #ifndef PIN_GPS_EN
     MESH_DEBUG_PRINTLN("Stop GPS is N/A on this board. Actual GPS state unchanged");
 #endif
@@ -919,7 +927,11 @@ void EnvironmentSensorManager::serviceGpsWindow() {
     }
     powerGps(false);
     gps_window_on = false;
-    gps_window_deadline = now + gps_power_interval_sec * 1000UL;
+    if (gps_beacon_sync && gps_power_interval_sec == 0) {
+      gps_window_deadline = 0xFFFFFFFFUL;
+    } else {
+      gps_window_deadline = now + gps_power_interval_sec * 1000UL;
+    }
   }
 }
 
@@ -1006,10 +1018,37 @@ bool EnvironmentSensorManager::gpsHoldsCpu() const {
 void EnvironmentSensorManager::noteGpsDeadline(uint32_t ms_until) {
 #if ENV_INCLUDE_GPS
   if (!gpsUsesWindows() || gps_powered || gps_window_on) return;
-  if (_location && _location->isValid()) return;
-  if (ms_until <= GPS_ON_WINDOW_MS) gps_force_window = true;
+  if (!gps_beacon_sync && _location && _location->isValid()) return;
+  if (ms_until == 0) return;
+  uint32_t now = millis();
+  uint32_t wake_in = ms_until > GPS_ON_WINDOW_MS ? (ms_until - GPS_ON_WINDOW_MS) : 0;
+  uint32_t wake_at = now + wake_in;
+  if (gps_beacon_sync) {
+    if (wake_in == 0) {
+      gps_force_window = true;
+    } else if (gps_window_deadline == 0xFFFFFFFFUL || (long)(wake_at - gps_window_deadline) < 0) {
+      gps_window_deadline = wake_at;
+    }
+  } else if (ms_until <= GPS_ON_WINDOW_MS) {
+    gps_force_window = true;
+  }
 #else
   (void)ms_until;
+#endif
+}
+
+bool EnvironmentSensorManager::gpsSupportsEco() const {
+#if ENV_INCLUDE_GPS
+  if (!gps_detected) return false;
+#ifdef PERSISTANT_GPS
+  return false;
+#elif defined(RAK_WISBLOCK_GPS)
+  return gpsResetPin != 0;
+#else
+  return _location && _location->canPowerOff();
+#endif
+#else
+  return false;
 #endif
 }
 
@@ -1018,6 +1057,7 @@ uint32_t EnvironmentSensorManager::millisUntilGpsWake() const {
   if (!gpsUsesWindows() || gps_powered || gps_force_window) {
     return gps_force_window ? 0 : 0xFFFFFFFFu;
   }
+  if (gps_window_deadline == 0xFFFFFFFFUL) return 0xFFFFFFFFu;
   long left = (long)(gps_window_deadline - millis());
   if (left < 0) return 0;
   return (uint32_t)left;

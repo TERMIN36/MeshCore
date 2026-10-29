@@ -12,6 +12,7 @@ protected:
 
 public:
     virtual void syncTime() { _time_sync_needed = true; }
+    virtual void invalidateFix() {}
     bool consumeClockSet() {
       bool v = _clock_set;
       _clock_set = false;

@@ -116,6 +116,8 @@ public:
   void toggleBuzzer();
   bool getGPSState();
   void toggleGPS();
+  bool gpsSupportsEco() const;
+  void cycleGpsPowerMode();
   bool canControlFemLna() const { return _board && _board->canControlLoRaFemLna(); }
   bool isFemLnaEnabled() const { return _board && _board->isLoRaFemLnaEnabled(); }
   void toggleFemLna();
@@ -125,7 +127,10 @@ public:
   bool canSelectMcuSleep() const { return _board && _board->canSelectMcuSleep(); }
   bool gpsBlocksCpuSleep() const {
 #if ENV_INCLUDE_GPS == 1
-    return _node_prefs && _node_prefs->gps_enabled != 0;
+    if (!_node_prefs || _node_prefs->gps_enabled == 0) return false;
+    if (_node_prefs->gps_interval > 0) return false;
+    if (_node_prefs->gps_power_mode == GPS_PWR_BEACON) return false;
+    return true;
 #else
     return false;
 #endif

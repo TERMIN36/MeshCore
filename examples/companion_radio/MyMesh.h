@@ -199,7 +199,11 @@ public:
       char interval_str[12];  // Max: 24 hours = 86400 seconds (5 digits + null)
       sprintf(interval_str, "%u", _prefs.gps_interval);
       sensors.setSettingValue("gps_interval", interval_str);
+    } else {
+      sensors.setSettingValue("gps_interval", "0");
     }
+    sensors.setSettingValue("gps_beacon",
+      (_prefs.gps_power_mode == GPS_PWR_BEACON && _prefs.beacon_mode != BEACON_OFF) ? "1" : "0");
     sensors.setSettingValue("gps", _prefs.gps_enabled ? "1" : "0");
   }
 #endif
@@ -232,8 +236,14 @@ private:
   void fillConsoleContact(ContactInfo& contact) const;
   static bool isConsoleKey(const uint8_t* key, int len);
   friend class ConsoleReplyPrint;
+  friend class ConsoleBufPrint;
   size_t consoleReplyTextMax() const;
   bool enqueueConsoleReplyPart(const char* text, size_t len);
+  void handleConsoleCmd(size_t len);
+  void resetConsoleBuf();
+  void writeConsoleChunk();
+  size_t consoleBufWrite(uint8_t c);
+  void flushLinkBeforeReboot();
   void checkSerialInterface();
   bool isValidClientRepeatFreq(uint32_t f) const;
 
@@ -259,6 +269,10 @@ private:
   bool _console_push_msg;
   uint32_t _console_ack;
   unsigned long _console_ack_at;
+  char _console_out[2048];
+  uint16_t _console_out_len;
+  uint16_t _console_out_pos;
+  bool _console_out_trunc;
   bool _cli_rescue;
   bool send_unscoped;   // force un-scoped flood (instead of using send_scope)
   char cli_command[80];

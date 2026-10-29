@@ -15,6 +15,7 @@ cmake-*
 .ccls
 compile_commands.json
 .venv/
+.venv-pio/
 venv/
 platformio.local.ini
 __pycache__/

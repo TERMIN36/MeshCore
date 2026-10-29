@@ -56,6 +56,13 @@ public:
   }
 };
 
+class ConsoleBufPrint : public Print {
+  MyMesh* _mesh;
+public:
+  explicit ConsoleBufPrint(MyMesh* mesh) : _mesh(mesh) {}
+  size_t write(uint8_t c) override { return _mesh->consoleBufWrite(c); }
+};
+
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
 #define CMD_SEND_CHANNEL_TXT_MSG      3
@@ -115,6 +122,10 @@ public:
 #define CMD_SET_DEFAULT_FLOOD_SCOPE   63
 #define CMD_GET_DEFAULT_FLOOD_SCOPE   64
 #define CMD_SEND_RAW_PACKET           65
+#define CMD_CONSOLE                   66
+#define CONSOLE_OP_EXEC               1
+#define CONSOLE_OP_READ               2
+#define CONSOLE_CMD_MAX               160
 
 // Stats sub-types for CMD_GET_STATS
 #define STATS_TYPE_CORE               0
@@ -150,6 +161,10 @@ public:
 #define RESP_ALLOWED_REPEAT_FREQ      26
 #define RESP_CODE_CHANNEL_DATA_RECV   27
 #define RESP_CODE_DEFAULT_FLOOD_SCOPE 28
+#define RESP_CODE_CONSOLE             29
+#define CONSOLE_FLAG_MORE             0x01
+#define CONSOLE_FLAG_TRUNCATED        0x02
+#define CONSOLE_OUT_CAP               2048
 
 #define MAX_CHANNEL_DATA_LENGTH       (MAX_FRAME_SIZE - 9)
 
@@ -347,9 +362,12 @@ uint32_t MyMesh::millisUntilIdleWork() const {
 #if ENV_INCLUDE_GPS == 1
   uint32_t gps_wake = sensors.millisUntilGpsWake();
   if (gps_wake < wait) wait = gps_wake;
-  if (_prefs.gps_interval > 0 && _prefs.beacon_mode != BEACON_OFF && _beacon_next != 0) {
+  if (_prefs.beacon_mode != BEACON_OFF && _beacon_next != 0 &&
+      (_prefs.gps_interval > 0 || _prefs.gps_power_mode == GPS_PWR_BEACON)) {
     LocationProvider* loc = sensors.getLocationProvider();
-    if (!(loc && loc->isValid())) {
+    bool need_wake = (_prefs.gps_power_mode == GPS_PWR_BEACON) ||
+                     !(loc && loc->isValid());
+    if (need_wake) {
       long until_beacon = (long)(_beacon_next - now);
       if (until_beacon <= (long)GPS_ON_WINDOW_MS) wait = 0;
       else {
@@ -1088,6 +1106,9 @@ MyMesh::MyMesh(mesh::Radio &radio, mesh::RNG &rng, mesh::RTCClock &rtc, SimpleMe
   _console_push_msg = false;
   _console_ack = 0;
   _console_ack_at = 0;
+  _console_out_len = 0;
+  _console_out_pos = 0;
+  _console_out_trunc = false;
   _cli_rescue = false;
   offline_queue_len = 0;
   app_target_ver = 0;
@@ -1184,6 +1205,7 @@ void MyMesh::begin(bool has_display) {
   _prefs.tx_led = _prefs.tx_led ? 1 : 0;
   mesh::MainBoard::setTxLedEnabled(_prefs.tx_led != 0);
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
+  _prefs.gps_power_mode = constrain(_prefs.gps_power_mode, GPS_PWR_ALWAYS, GPS_PWR_BEACON);
   _prefs.beacon_mode = constrain(_prefs.beacon_mode, BEACON_OFF, BEACON_CHAT);
   if (_prefs.beacon_group_mins < 5 || _prefs.beacon_group_mins > 180) _prefs.beacon_group_mins = 30;
   if (_prefs.beacon_chat_mins < 5 || _prefs.beacon_chat_mins > 180) _prefs.beacon_chat_mins = 30;
@@ -1282,7 +1304,7 @@ void MyMesh::handleCmdFrame(size_t len) {
     i += 12;
     StrHelper::strzcpy((char *)&out_frame[i], board.getManufacturerName(), 40);
     i += 40;
-    StrHelper::strzcpy((char *)&out_frame[i], FIRMWARE_VERSION, 20);
+    firmwareVersionForDeviceInfo((char *)&out_frame[i], 20, FIRMWARE_VERSION);
     i += 20;
     out_frame[i++] = _prefs.isRepeatEn() ? 1 : 0;   // v9+
     out_frame[i++] = _prefs.path_hash_mode;  // v10+
@@ -2141,6 +2163,9 @@ void MyMesh::handleCmdFrame(size_t len) {
           uint32_t interval_seconds = atoi(np);
           _prefs.gps_interval = constrain(interval_seconds, 0, 86400);
           savePrefs();
+        } else if (strcmp(sp, "gps_beacon") == 0) {
+          _prefs.gps_power_mode = (np[0] == '1') ? GPS_PWR_BEACON : GPS_PWR_ALWAYS;
+          savePrefs();
         }
         #endif
         writeOKFrame();
@@ -2302,6 +2327,9 @@ void MyMesh::handleCmdFrame(size_t len) {
       memcpy(&out_frame[i], &r->upper_freq, 4); i += 4;
     }
     _serial->writeFrame(out_frame, i);
+  } else if (cmd_frame[0] == CMD_CONSOLE) {
+    if (len < 2) writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+    else handleConsoleCmd(len);
   } else if (cmd_frame[0] == CMD_SEND_RAW_PACKET && len >= 4) {
     auto pkt = obtainNewPacket();
     if (pkt) {
@@ -2403,6 +2431,94 @@ bool MyMesh::enqueueConsoleReplyPart(const char* text, size_t len) {
   memcpy(&out_frame[i], text, len);
   i += (int)len;
   return addToOfflineQueue(out_frame, i, false) != 0;
+}
+
+void MyMesh::resetConsoleBuf() {
+  _console_out_len = 0;
+  _console_out_pos = 0;
+  _console_out_trunc = false;
+}
+
+size_t MyMesh::consoleBufWrite(uint8_t c) {
+  if (_console_out_len >= sizeof(_console_out)) {
+    _console_out_trunc = true;
+    return 1;
+  }
+  _console_out[_console_out_len++] = (char)c;
+  return 1;
+}
+
+void MyMesh::writeConsoleChunk() {
+  if (_console_out_pos >= _console_out_len) {
+    out_frame[0] = RESP_CODE_CONSOLE;
+    out_frame[1] = 0;
+    _serial->writeFrame(out_frame, 2);
+    return;
+  }
+  size_t room = MAX_FRAME_SIZE - 2;
+  size_t remain = (size_t)_console_out_len - (size_t)_console_out_pos;
+  size_t n = remain > room ? room : remain;
+  uint8_t flags = 0;
+  if (n < remain) flags |= CONSOLE_FLAG_MORE;
+  if (_console_out_trunc) flags |= CONSOLE_FLAG_TRUNCATED;
+  out_frame[0] = RESP_CODE_CONSOLE;
+  out_frame[1] = flags;
+  memcpy(&out_frame[2], _console_out + _console_out_pos, n);
+  _console_out_pos += (uint16_t)n;
+  _serial->writeFrame(out_frame, 2 + n);
+}
+
+void MyMesh::flushLinkBeforeReboot() {
+  if (_serial == NULL) return;
+  unsigned long start = millis();
+  uint8_t sink[MAX_FRAME_SIZE + 1];
+  while ((unsigned long)(millis() - start) < 250) {
+    _serial->loop();
+    _serial->checkRecvFrame(sink);
+    delay(20);
+  }
+}
+
+void MyMesh::handleConsoleCmd(size_t len) {
+  uint8_t op = cmd_frame[1];
+  if (op == CONSOLE_OP_READ) {
+    writeConsoleChunk();
+    return;
+  }
+  if (op != CONSOLE_OP_EXEC) {
+    writeErrFrame(ERR_CODE_ILLEGAL_ARG);
+    return;
+  }
+
+  size_t tlen = len - 2;
+  if (tlen > CONSOLE_CMD_MAX) {
+    resetConsoleBuf();
+    ConsoleBufPrint printer(this);
+    printer.print("  Error: command too long\n");
+    writeConsoleChunk();
+    return;
+  }
+
+  char command[CONSOLE_CMD_MAX + 1];
+  memcpy(command, &cmd_frame[2], tlen);
+  command[tlen] = 0;
+  while (tlen > 0 && (command[tlen - 1] == '\r' || command[tlen - 1] == '\n')) {
+    command[--tlen] = 0;
+  }
+
+  resetConsoleBuf();
+  if (strcmp(command, "reboot") == 0) {
+    ConsoleBufPrint printer(this);
+    printer.print("  > rebooting\n");
+    writeConsoleChunk();
+    flushLinkBeforeReboot();
+    board.reboot();
+    return;
+  }
+
+  ConsoleBufPrint printer(this);
+  runCLICommand(command, printer);
+  writeConsoleChunk();
 }
 
 void MyMesh::queueConsoleReply(const char* text) {
@@ -2687,6 +2803,50 @@ void MyMesh::runCLICommand(char* command, Print& out) {
           snprintf(line, sizeof(line), "  > tx.led is now %s\n", _prefs.tx_led ? "on" : "off");
           out.print(line);
         }
+      } else if (memcmp(config, "radio.fem.rxgain", 16) == 0 &&
+                 (config[16] == 0 || config[16] == ' ')) {
+        const char* arg = (config[16] == ' ') ? &config[17] : "";
+        while (*arg == ' ') arg++;
+        if (!board.canControlLoRaFemLna()) {
+          out.print("  Error: unsupported\n");
+        } else if (*arg == 0) {
+          snprintf(line, sizeof(line), "  > %s\n", _prefs.radio_fem_rxgain ? "on" : "off");
+          out.print(line);
+        } else if (strcmp(arg, "on") == 0 || strcmp(arg, "off") == 0) {
+          bool on = strcmp(arg, "on") == 0;
+          if (board.setLoRaFemLnaEnabled(on)) {
+            _prefs.radio_fem_rxgain = on ? 1 : 0;
+            savePrefs();
+            snprintf(line, sizeof(line), "  > %s\n", on ? "on" : "off");
+            out.print(line);
+          } else {
+            out.print("  Error: failed to apply LoRa FEM RX gain\n");
+          }
+        } else {
+          out.print("  Error: state must be on or off\n");
+        }
+      } else if (memcmp(config, "radio.fem.txgain", 16) == 0 &&
+                 (config[16] == 0 || config[16] == ' ')) {
+        const char* arg = (config[16] == ' ') ? &config[17] : "";
+        while (*arg == ' ') arg++;
+        if (!board.canControlLoRaFemPaGain()) {
+          out.print("  Error: unsupported\n");
+        } else if (*arg == 0) {
+          snprintf(line, sizeof(line), "  > %s\n", _prefs.radio_fem_txgain ? "on" : "off");
+          out.print(line);
+        } else if (strcmp(arg, "on") == 0 || strcmp(arg, "off") == 0) {
+          bool on = strcmp(arg, "on") == 0;
+          if (board.setLoRaFemPaGainEnabled(on)) {
+            _prefs.radio_fem_txgain = on ? 1 : 0;
+            savePrefs();
+            snprintf(line, sizeof(line), "  > %s\n", on ? "on" : "off");
+            out.print(line);
+          } else {
+            out.print("  Error: failed to apply LoRa FEM TX gain\n");
+          }
+        } else {
+          out.print("  Error: state must be on or off\n");
+        }
       } else if (memcmp(config, "lang", 4) == 0 && (config[4] == 0 || config[4] == ' ')) {
         const char* arg = (config[4] == ' ') ? &config[5] : "";
         while (*arg == ' ') arg++;
@@ -2921,18 +3081,14 @@ void MyMesh::runCLICommand(char* command, Print& out) {
         file = _store->openRead(_store->getSecondaryFS(), path);
       }
       if(file){
-
-        // get file content
-        int file_size = file.available();
-        uint8_t buffer[file_size];
-        file.read(buffer, file_size);
-
-        // print hex
-        mesh::Utils::printHex(out, buffer, file_size);
+        uint8_t chunk[32];
+        while (file.available()) {
+          int n = file.read(chunk, sizeof(chunk));
+          if (n <= 0) break;
+          mesh::Utils::printHex(out, chunk, (size_t)n);
+        }
         out.print("\n");
-
         file.close();
-
       }
 
     } else if (memcmp(command, "rm ", 3) == 0) {
@@ -2969,6 +3125,7 @@ void MyMesh::runCLICommand(char* command, Print& out) {
       }
 
     } else if (strcmp(command, "reboot") == 0) {
+      out.print("  > rebooting\n");
       board.reboot();  // doesn't return
     } else {
       out.print("  Error: unknown command\n");
@@ -3204,10 +3361,11 @@ void MyMesh::loop() {
 #endif
 
 #if ENV_INCLUDE_GPS == 1
-  if (_prefs.gps_interval > 0 && _prefs.beacon_mode != BEACON_OFF && _beacon_next != 0) {
-    LocationProvider* loc = sensors.getLocationProvider();
-    if (!(loc && loc->isValid())) {
-      long until_beacon = (long)(_beacon_next - _ms->getMillis());
+  if (_prefs.beacon_mode != BEACON_OFF && _beacon_next != 0 &&
+      (_prefs.gps_interval > 0 || _prefs.gps_power_mode == GPS_PWR_BEACON)) {
+    long until_beacon = (long)(_beacon_next - _ms->getMillis());
+    if (_prefs.gps_power_mode == GPS_PWR_BEACON ||
+        !(sensors.getLocationProvider() && sensors.getLocationProvider()->isValid())) {
       sensors.noteGpsDeadline(until_beacon > 0 ? (uint32_t)until_beacon : 0);
     }
   }
@@ -3305,7 +3463,11 @@ uint32_t MyMesh::beaconIntervalMs() const {
 
 bool MyMesh::beaconHasFix() const {
   LocationProvider* loc = sensors.getLocationProvider();
-  return loc != NULL && loc->isValid();
+  if (loc != NULL && loc->isValid()) return true;
+  if (_prefs.gps_power_mode == GPS_PWR_BEACON || _prefs.gps_interval > 0) {
+    return sensors.node_lat != 0.0 || sensors.node_lon != 0.0;
+  }
+  return false;
 }
 
 void MyMesh::formatBeacon(char* mode, size_t mode_sz, char* target, size_t target_sz, char* pos, size_t pos_sz, char* sent, size_t sent_sz) {
@@ -3384,6 +3546,7 @@ bool MyMesh::stopBeacon() {
   _prefs.beacon_mode = BEACON_OFF;
   _beacon_next = 0;
   savePrefs();
+  applyGpsPrefs();
   return true;
 }
 
@@ -3416,6 +3579,7 @@ void MyMesh::cycleBeacon() {
     if (was_off) _beacon_next = futureMillis(BEACON_FIRST_MS);
   }
   savePrefs();
+  applyGpsPrefs();
 }
 
 bool MyMesh::cycleBeaconInterval() {

@@ -44,7 +44,7 @@ Environment Variables:
   DISPLAY_ENVS_ONLY=0: Include boards without a display. Local bulk builds skip them.
                    GitHub release workflows set this to 0. Default keeps only envs whose
                    DISPLAY_CLASS is set and is not NullDisplayDriver.
-  FIRMWARE_VERSION: Version to embed. Defaults to the version in src/helpers/FirmwareVersion.h.
+  FIRMWARE_VERSION: Version to embed (max 20 characters for device info). Release tags: stable `v0.2.0` → `termin36-v0.2.0`; candidates `v0.2.0-rc12` (or -beta/-alpha) → `t36-v0.2.0-rc12`.
 
 Examples:
 Build without debug logging:
@@ -185,6 +185,12 @@ build_firmware() {
   # FIRMWARE_VERSION from the environment (release tag), otherwise from src/helpers/FirmwareVersion.h
   if [ -z "$FIRMWARE_VERSION" ]; then
     FIRMWARE_VERSION=$(get_source_version)
+  fi
+
+  # PACKET_DEVICE_INFO Version is 20 bytes. The hash is appended below and is not sent.
+  if [ "${#FIRMWARE_VERSION}" -gt 20 ]; then
+    echo "FIRMWARE_VERSION is ${#FIRMWARE_VERSION} characters; the device-info field holds 20" >&2
+    exit 1
   fi
 
   # set firmware version string
