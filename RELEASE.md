@@ -4,7 +4,7 @@ GitHub Actions is set up to automatically build and release firmware.
 
 ## Combined release (`v*` tags)
 
-Push a tag like `v0.2.0` or `v0.2.0-rc12`. The Release workflow builds companion, repeater and room-server, then publishes **three zip bundles** (one per role) to avoid GitHub rate limits from hundreds of individual assets:
+Push a tag like `v0.2.0` or `v0.2.0-rc12`, **or** push the matching branch `release/0.2.0-rc12`. Both run the Release workflow (firmware build). GitHub Release assets are published **only** on tag push (`v*`), not on branch push alone.
 
 **Device-facing version string** (max 20 characters, see `build.sh`):
 

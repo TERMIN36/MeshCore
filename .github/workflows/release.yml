@@ -8,6 +8,8 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - 'release/**'
 
 concurrency:
   group: release-${{ github.ref }}
@@ -29,24 +31,28 @@ jobs:
         with:
           pm_frameworks: false
 
-      - name: Check Tag Matches Source Version
-        if: startsWith(github.ref, 'refs/tags/v')
+      - name: Check version and set device-facing FIRMWARE_VERSION
+        id: device_version
         run: |
+          set -euo pipefail
+          REF="${{ github.ref }}"
+          NAME="${{ github.ref_name }}"
+          if [[ "$REF" == refs/tags/v* ]]; then
+            TAG="$NAME"
+          elif [[ "$NAME" == release/* ]]; then
+            TAG="v${NAME#release/}"
+          else
+            echo "::error::Release workflow expects tag v* or branch release/* (got $REF)"
+            exit 1
+          fi
           SOURCE_VERSION=$(/usr/bin/env bash build.sh get-version)
-          TAG="${{ github.ref_name }}"
           case "$TAG" in
             "$SOURCE_VERSION"|"$SOURCE_VERSION"-rc*|"$SOURCE_VERSION"-beta*|"$SOURCE_VERSION"-alpha*) ;;
             *)
-              echo "::error::Tag $TAG does not match $SOURCE_VERSION from src/helpers/FirmwareVersion.h"
+              echo "::error::Version $TAG does not match $SOURCE_VERSION from src/helpers/FirmwareVersion.h"
               exit 1
               ;;
           esac
-
-      - name: Device-facing FIRMWARE_VERSION from tag
-        id: device_version
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: |
-          TAG="${{ github.ref_name }}"
           case "$TAG" in
             *-rc*|*-beta*|*-alpha*) FV="t36-${TAG}" ;;
             *) FV="termin36-${TAG}" ;;
@@ -56,6 +62,7 @@ jobs:
             exit 1
           fi
           echo "version=${FV}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag: ${TAG}"
           echo "FIRMWARE_VERSION=${FV}"
 
   companion:
