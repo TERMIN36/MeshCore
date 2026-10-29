@@ -426,13 +426,27 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Default:** `0.0` (value defined by board)
 
-**Roles:** Repeater, room server, and sensor firmware (CommonCLI). Companion’s phone **Console** screen and on-device Console chat use a smaller command set and do **not** include `adc.multiplier` yet.
+**Roles:** Repeater, room server, and sensor firmware (CommonCLI), and Companion (`runCLICommand` — phone **Console** screen and on-device **Console** chat).
 
-**Where to run:** USB serial, repeater web panel console, [config.meshcore.io](https://config.meshcore.io), or the **Console** contact on a repeater (not companion).
+**Where to run:** USB serial, repeater web panel console, [config.meshcore.io](https://config.meshcore.io), or the **Console** contact on a repeater; on Companion — **Console** chat, phone **Console** over Link, or USB CLI Rescue.
 
-**Calibration:** Compare the on-screen or web-panel battery millivolts with a multimeter on the cell. Adjust proportionally: `new_multiplier ≈ current_multiplier × (true_mV / displayed_mV)`. Repeat until close enough. Setting `0.0` restores the board default from the variant build (`ADC_MULTIPLIER` in PlatformIO).
+**Calibration:** Compare battery millivolts on the display (Companion **Power** page, repeater screen, or web panel) with a multimeter on the cell. Adjust proportionally: `new_multiplier ≈ current_multiplier × (true_mV / displayed_mV)`. Repeat until close enough. Setting `0.0` restores the board default from the variant build (`ADC_MULTIPLIER` in PlatformIO).
 
 **Note:** Returns "Error: unsupported" if the board does not use a runtime divider multiplier (some nRF52 variants use a fixed scale in millivolts instead).
+
+---
+
+#### Calibrate the battery reading from a multimeter
+**Usage:** `cal adc <millivolts>`
+
+**Parameters:**
+- `millivolts`: cell voltage measured with a multimeter (**500–5000** mV)
+
+**Roles:** Same as `adc.multiplier` above (repeater, room server, sensor, companion).
+
+**Behavior:** Reads the current on-screen millivolts, then sets `adc.multiplier` to `current × (true_mV / displayed_mV)` (clamped to **0.001–10.0**), saves prefs, and reports the new multiplier and reading. Fails if the displayed reading is below **500 mV** (USB / empty ADC) or the board does not support a runtime multiplier.
+
+**When to use:** Prefer this over manual `set adc.multiplier` when you have a multimeter reading. Use `set adc.multiplier 0.0` to restore the board default.
 
 ---
 

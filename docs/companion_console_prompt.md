@@ -93,12 +93,15 @@
 - `clock.node` — список узлов часов
 - `clock.node remove <index>`
 - `clock pull`
+- `get adc.multiplier`
+- `cal adc <mV>` — калибровка по показанию мультиметра (500–5000 mV)
 - `set pin N` — PIN BLE, шесть цифр
 - `set tz ±H` или `set tz ±H:MM`, диапазон UTC−14…UTC+14. Без аргумента показывает текущий пояс
 - `set time YYYY-MM-DD HH:MM` или с секундами. Без аргумента показывает местное время
 - `set clock.node off` или `set clock.node <pubkey hex>`
 - `set lang ru` или `set lang en`
 - `set tx.led on` или `set tx.led off`
+- `set adc.multiplier <число>` — калибровка заряда; без аргумента показывает текущий множитель (как `set tx.led`)
 - `set link ble|wifi|usb|off`
 - `set wifi.ssid <имя>`
 - `set wifi.password <пароль>`, очистка: `set wifi.password -`
@@ -108,6 +111,8 @@
 - `rebuild` — стирает файловую систему и собирает заново
 - `erase`
 - `reboot`
+
+**Калибровка заряда:** сравните милливольты на странице **Power** с мультиметром на ячейке. Проще всего: `cal adc 4000` (подставьте своё значение в mV). Или вручную: `get adc.multiplier`, затем `set adc.multiplier <число>`. **0.0** снова берёт заводской множитель платы; иначе **0.0–10.0**. Новый множитель ≈ `текущий × (истинное_мВ / показанное_мВ)` — см. [cli_commands.md](cli_commands.md). На части nRF52 команда отвечает `Error: unsupported`.
 
 `rebuild` и `erase` необратимы. Перед отправкой спроси подтверждение. Остальные строки уходят сразу.
 

@@ -312,6 +312,31 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       } else {
         strcpy(reply, "ERR: no direct path yet");
       }
+    } else if (memcmp(command, "cal adc ", 8) == 0) {
+      const char* arg = &command[8];
+      while (*arg == ' ') arg++;
+      int true_mv = atoi(arg);
+      if (true_mv < 500 || true_mv > 5000) {
+        strcpy(reply, "Error: mV must be 500-5000");
+      } else if (_board->getAdcMultiplier() == 0.0f) {
+        strcpy(reply, "Error: unsupported");
+      } else {
+        uint16_t shown = _board->getBattMilliVolts();
+        if (shown < 500) {
+          strcpy(reply, "Error: battery reading too low");
+        } else {
+          float new_mult;
+          if (!_board->calibrateAdcMultiplierFromTrueMv((uint16_t)true_mv, new_mult)) {
+            strcpy(reply, "Error: calibration failed");
+          } else {
+            _prefs->adc_multiplier = new_mult;
+            savePrefs();
+            uint16_t now_mv = _board->getBattMilliVolts();
+            sprintf(reply, "OK - multiplier set to %.3f (true %d mV, was %u mV, now %u mV)",
+                    new_mult, true_mv, (unsigned)shown, (unsigned)now_mv);
+          }
+        }
+      }
     } else if (strcmp(command, "ntp sync") == 0) {
       if (_callbacks->syncNtp()) strcpy(reply, "OK - waiting for server");
       else strcpy(reply, "ERR: ntp unavailable");

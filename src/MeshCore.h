@@ -74,6 +74,20 @@ public:
     return true;
   }
   virtual float getAdcMultiplier() const { return _has_adc_mult ? _adc_mult : 0.0f; }
+  // true_millivolts: multimeter reading on the cell. Updates runtime multiplier only.
+  bool calibrateAdcMultiplierFromTrueMv(uint16_t true_millivolts, float& new_multiplier_out) {
+    if (!_has_adc_mult || getAdcMultiplier() == 0.0f) return false;
+    if (true_millivolts < 500 || true_millivolts > 5000) return false;
+    uint16_t shown = getBattMilliVolts();
+    if (shown < 500) return false;
+    float cur = getAdcMultiplier();
+    float new_mult = cur * ((float)true_millivolts / (float)shown);
+    if (new_mult < 0.001f) new_mult = 0.001f;
+    if (new_mult > 10.0f) new_mult = 10.0f;
+    if (!setAdcMultiplier(new_mult)) return false;
+    new_multiplier_out = getAdcMultiplier();
+    return true;
+  }
   virtual const char* getManufacturerName() const = 0;
   virtual void onBeforeTransmit() { }
   virtual void onAfterTransmit() { }

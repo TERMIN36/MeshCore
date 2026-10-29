@@ -94,6 +94,7 @@ public:
   uint8_t link_mode = 0;         // LINK_MODE_BLE, LINK_MODE_WIFI, LINK_MODE_OFF, or LINK_MODE_USB
   char wifi_ssid[33] = {};
   char wifi_wpass[64] = {};
+  float adc_multiplier = 0;  // 0.0 = board default from variant build
 
 private:
   class RadioPrefs : public ConfigSerializer {  // COPIED from CommonCLI (for now)
@@ -190,6 +191,7 @@ private:
       def("link", _parent->link_mode);
       def("ssid", _parent->wifi_ssid, sizeof(_parent->wifi_ssid));
       def("wpass", _parent->wifi_wpass, sizeof(_parent->wifi_wpass));
+      def("adc_mult", _parent->adc_multiplier);
       for (int i = 0; i < CLOCK_NODE_MAX; i++) {
         char key[8];
         clockNodePrefKey(key, sizeof(key), i);

@@ -1204,6 +1204,8 @@ void MyMesh::begin(bool has_display) {
   _prefs.gps_enabled = constrain(_prefs.gps_enabled, 0, 1);  // Ensure boolean 0 or 1
   _prefs.tx_led = _prefs.tx_led ? 1 : 0;
   mesh::MainBoard::setTxLedEnabled(_prefs.tx_led != 0);
+  _prefs.adc_multiplier = constrain(_prefs.adc_multiplier, 0.0f, 10.0f);
+  board.setAdcMultiplier(_prefs.adc_multiplier);
   _prefs.gps_interval = constrain(_prefs.gps_interval, 0, 86400);  // Max 24 hours
   _prefs.gps_power_mode = constrain(_prefs.gps_power_mode, GPS_PWR_ALWAYS, GPS_PWR_BEACON);
   _prefs.beacon_mode = constrain(_prefs.beacon_mode, BEACON_OFF, BEACON_CHAT);
@@ -2661,7 +2663,7 @@ static void formatLocalDateTime(uint32_t utc, int16_t tz_mins, char* buf, size_t
 void MyMesh::runCLICommand(char* command, Print& out) {
     char line[96];
     if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
-      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, set tx.led on|off, set link ble|wifi|usb|off, set wifi.ssid, set wifi.password, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
+      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, get adc.multiplier, cal adc, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, set tx.led on|off, set adc.multiplier, set link ble|wifi|usb|off, set wifi.ssid, set wifi.password, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
     } else if (strcmp(command, "ver") == 0) {
       snprintf(line, sizeof(line), "%s %s\n", FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
       out.print(line);
@@ -2710,6 +2712,41 @@ void MyMesh::runCLICommand(char* command, Print& out) {
     } else if (strcmp(command, "clock") == 0) {
       snprintf(line, sizeof(line), "%u\n", (unsigned)getRTCClock()->getCurrentTime());
       out.print(line);
+    } else if (memcmp(command, "get adc.multiplier", 18) == 0 && (command[18] == 0 || command[18] == ' ')) {
+      float adc_mult = board.getAdcMultiplier();
+      if (adc_mult == 0.0f) {
+        out.print("  Error: unsupported\n");
+      } else {
+        snprintf(line, sizeof(line), "  > %.3f\n", adc_mult);
+        out.print(line);
+      }
+    } else if (memcmp(command, "cal adc ", 8) == 0) {
+      const char* arg = &command[8];
+      while (*arg == ' ') arg++;
+      int true_mv = atoi(arg);
+      if (true_mv < 500 || true_mv > 5000) {
+        out.print("  Error: mV must be 500-5000\n");
+      } else if (board.getAdcMultiplier() == 0.0f) {
+        out.print("  Error: unsupported\n");
+      } else {
+        uint16_t shown = board.getBattMilliVolts();
+        if (shown < 500) {
+          out.print("  Error: battery reading too low\n");
+        } else {
+          float new_mult;
+          if (!board.calibrateAdcMultiplierFromTrueMv((uint16_t)true_mv, new_mult)) {
+            out.print("  Error: calibration failed\n");
+          } else {
+            _prefs.adc_multiplier = new_mult;
+            savePrefs();
+            uint16_t now_mv = board.getBattMilliVolts();
+            snprintf(line, sizeof(line),
+                     "  > multiplier set to %.3f (true %d mV, was %u mV, now %u mV)\n",
+                     new_mult, true_mv, (unsigned)shown, (unsigned)now_mv);
+            out.print(line);
+          }
+        }
+      }
     } else if (memcmp(command, "set ", 4) == 0) {
       const char* config = &command[4];
       if (memcmp(config, "clock.node", 10) == 0 && (config[10] == 0 || config[10] == ' ')) {
@@ -2802,6 +2839,32 @@ void MyMesh::runCLICommand(char* command, Print& out) {
           savePrefs();
           snprintf(line, sizeof(line), "  > tx.led is now %s\n", _prefs.tx_led ? "on" : "off");
           out.print(line);
+        }
+      } else if (memcmp(config, "adc.multiplier", 14) == 0 && (config[14] == 0 || config[14] == ' ')) {
+        const char* arg = (config[14] == ' ') ? &config[15] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          float adc_mult = board.getAdcMultiplier();
+          if (adc_mult == 0.0f) {
+            out.print("  Error: unsupported\n");
+          } else {
+            snprintf(line, sizeof(line), "  > %.3f\n", adc_mult);
+            out.print(line);
+          }
+        } else {
+          _prefs.adc_multiplier = constrain(atof(arg), 0.0f, 10.0f);
+          if (board.setAdcMultiplier(_prefs.adc_multiplier)) {
+            savePrefs();
+            if (_prefs.adc_multiplier == 0.0f) {
+              out.print("  > using default board multiplier\n");
+            } else {
+              snprintf(line, sizeof(line), "  > multiplier set to %.3f\n", _prefs.adc_multiplier);
+              out.print(line);
+            }
+          } else {
+            _prefs.adc_multiplier = 0.0f;
+            out.print("  Error: unsupported\n");
+          }
         }
       } else if (memcmp(config, "radio.fem.rxgain", 16) == 0 &&
                  (config[16] == 0 || config[16] == ' ')) {
