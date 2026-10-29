@@ -2473,7 +2473,9 @@ void UITask::cycleGpsPowerMode() {
   if (!_node_prefs || !gpsSupportsEco()) return;
   _node_prefs->gps_power_mode = (_node_prefs->gps_power_mode == GPS_PWR_BEACON)
     ? GPS_PWR_ALWAYS : GPS_PWR_BEACON;
+#if ENV_INCLUDE_GPS == 1
   the_mesh.applyGpsPrefs();
+#endif
   the_mesh.savePrefs();
   notify(UIEventType::ack);
   showAlert(_node_prefs->gps_power_mode == GPS_PWR_BEACON ? "GPS: beacon" : "GPS: always", 900);
@@ -2495,7 +2497,9 @@ void UITask::toggleGPS() {
           _node_prefs->gps_enabled = 1;
           notify(UIEventType::ack);
         }
+#if ENV_INCLUDE_GPS == 1
         the_mesh.applyGpsPrefs();
+#endif
         the_mesh.savePrefs();
         if (_node_prefs->gps_enabled && _node_prefs->mcu_sleep && _node_prefs->gps_interval == 0 &&
             _node_prefs->gps_power_mode != GPS_PWR_BEACON) {
