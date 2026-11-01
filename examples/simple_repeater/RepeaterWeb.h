@@ -55,6 +55,11 @@ struct RepeaterPageInfo {
   uint8_t wifi_ps_active;
   uint8_t wifi_up;
   int8_t wifi_rssi;
+  uint8_t batt_shutdown_en;
+  uint16_t batt_shutdown_mv;
+  uint16_t batt_shutdown_default_mv;
+  float adc_multiplier;       // active multiplier (same as get adc.multiplier)
+  uint8_t adc_multiplier_factory;  // 1 when prefs store 0 = board default
   char ntp_server[64];
   char mqtt[24];
   char tel[24];
@@ -190,6 +195,16 @@ struct RepeaterNodeForm {
   uint16_t ant_bearing;
   uint16_t advert_mins;
   uint8_t flood_hours;
+};
+
+// Posted from the Power section: Wi‑Fi sleep, ADC cal, low-batt shutdown.
+struct RepeaterPowerForm {
+  uint8_t wifi_ps;
+  uint8_t batt_shutdown_en;
+  uint16_t batt_shutdown_mv;
+  float adc_multiplier;
+  uint8_t set_adc;   // 1 when adc_mult was posted
+  uint16_t cal_mv;   // 0 = no multimeter calibration this submit
 };
 
 enum : uint8_t {

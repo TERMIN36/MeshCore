@@ -2,6 +2,8 @@
 
 #include "MyMesh.h"
 #include <helpers/RadioProfiles.h>
+#include <helpers/BatteryScale.h>
+#include <helpers/BattShutdown.h>
 #include "NtpClock.h"
 
 #include <stdarg.h>
@@ -97,8 +99,9 @@ static char radio_note[120];
 static char node_note[120];
 static char power_note[120];
 static char region_note[120];
-static std::atomic<uint8_t> power_job{0xFF};
-static std::atomic<uint8_t> power_hold{0xFF};
+static std::atomic<RepeaterPowerForm*> power_job{nullptr};
+static std::atomic<uint8_t> power_hold{0};
+static RepeaterPowerForm power_hold_form;
 static std::atomic<RepeaterRadioForm*> radio_job{nullptr};
 static std::atomic<RepeaterNodeForm*> node_job{nullptr};
 static std::atomic<RepeaterRegionForm*> region_job{nullptr};
@@ -480,20 +483,71 @@ static void serviceNodeJob() {
 }
 
 static void servicePowerJob() {
-  uint8_t mode = power_job.exchange(0xFF, std::memory_order_acq_rel);
-  if (mode > WIFI_POWER_LIGHT) return;
+  RepeaterPowerForm* job = power_job.exchange(nullptr, std::memory_order_acq_rel);
+  if (!job) return;
   NodePrefs* prefs = the_mesh.getNodePrefs();
   bool station = prefs && prefs->wifi_enabled && prefs->wifi_ssid[0];
-  if (prefs) prefs->wifi_ps = mode;
-  the_mesh.savePrefs();
-  uint8_t active = the_mesh.applyWifiPowerMode();
-  if (!station) setPowerNote("Сохранено. Включится вместе с Wi‑Fi.");
-  else if (mode == WIFI_POWER_LIGHT && active != WIFI_POWER_LIGHT) {
-    setPowerNote("Сон процессора недоступен в этой сборке. Включён сон модема.");
-  } else if (mode == WIFI_POWER_LIGHT) setPowerNote("Сон модема и процессора включены.");
-  else if (mode == WIFI_POWER_MODEM) setPowerNote("Сон модема включён. Процессор остаётся на рабочей частоте.");
-  else setPowerNote("Энергосбережение выключено.");
-  if (power_job.load(std::memory_order_acquire) == 0xFF) power_hold.store(0xFF, std::memory_order_release);
+  char note[160];
+  note[0] = 0;
+
+  if (job->cal_mv != 0) {
+    uint16_t cal_min = boardCalAdcMinMv();
+    uint16_t cal_max = boardCalAdcMaxMv();
+    if (job->cal_mv < cal_min || job->cal_mv > cal_max) {
+      snprintf(note, sizeof(note), "Калибровка: мВ должны быть %u–%u", (unsigned)cal_min, (unsigned)cal_max);
+    } else if (board.getAdcMultiplier() == 0.0f) {
+      snprintf(note, sizeof(note), "Калибровка АЦП не поддерживается на этой плате");
+    } else {
+      uint16_t shown = board.getBattMilliVolts();
+      if (shown < cal_min) {
+        snprintf(note, sizeof(note), "Калибровка: показание батареи слишком низкое");
+      } else {
+        float new_mult = 0;
+        if (!board.calibrateAdcMultiplierFromTrueMv(job->cal_mv, new_mult)) {
+          snprintf(note, sizeof(note), "Калибровка не удалась");
+        } else if (prefs) {
+          prefs->adc_multiplier = new_mult;
+          the_mesh.savePrefs();
+          uint16_t now_mv = board.getBattMilliVolts();
+          snprintf(note, sizeof(note), "Калибровка: ×%.3f (было %u мВ, сейчас %u мВ)",
+                   new_mult, (unsigned)shown, (unsigned)now_mv);
+        }
+      }
+    }
+  } else if (prefs) {
+    if (job->wifi_ps <= WIFI_POWER_LIGHT) prefs->wifi_ps = job->wifi_ps;
+    prefs->batt_shutdown_en = job->batt_shutdown_en ? 1 : 0;
+    prefs->batt_shutdown_mv = job->batt_shutdown_mv;
+    if (job->set_adc) {
+      prefs->adc_multiplier = constrain(job->adc_multiplier, 0.0f, 10.0f);
+      if (!board.setAdcMultiplier(prefs->adc_multiplier)) {
+        prefs->adc_multiplier = 0.0f;
+        snprintf(note, sizeof(note), "Множитель АЦП не поддерживается");
+      }
+    }
+    the_mesh.savePrefs();
+    uint8_t active = the_mesh.applyWifiPowerMode();
+    if (!note[0]) {
+      if (!station) snprintf(note, sizeof(note), "Сохранено. Wi‑Fi режим — вместе с сетью.");
+      else if (job->wifi_ps == WIFI_POWER_LIGHT && active != WIFI_POWER_LIGHT) {
+        snprintf(note, sizeof(note), "Сон процессора недоступен. Включён сон модема. Батарея: %s.",
+                 prefs->batt_shutdown_en ? "автовыкл" : "без автовыкл");
+      } else if (job->wifi_ps == WIFI_POWER_LIGHT) {
+        snprintf(note, sizeof(note), "Сон модема и процессора. Батарея: %s.",
+                 prefs->batt_shutdown_en ? "автовыкл" : "без автовыкл");
+      } else if (job->wifi_ps == WIFI_POWER_MODEM) {
+        snprintf(note, sizeof(note), "Сон модема. Батарея: %s.",
+                 prefs->batt_shutdown_en ? "автовыкл" : "без автовыкл");
+      } else {
+        snprintf(note, sizeof(note), "Энергосбережение Wi‑Fi выкл. Батарея: %s.",
+                 prefs->batt_shutdown_en ? "автовыкл" : "без автовыкл");
+      }
+    }
+  }
+
+  setPowerNote(note[0] ? note : "Сохранено");
+  free(job);
+  if (!power_job.load(std::memory_order_acquire)) power_hold.store(0, std::memory_order_release);
   last_snapshot_ms = 0;
 }
 
@@ -806,7 +860,21 @@ static bool renderLive(const RepeaterPageInfo& info, char*& cursor, size_t& left
   if (info.wifi_ps == WIFI_POWER_LIGHT && info.wifi_ps_active == WIFI_POWER_MODEM) power = "сон модема, процессор не спит";
   else if (info.wifi_ps == WIFI_POWER_MODEM) power = "сон модема";
   else if (info.wifi_ps == WIFI_POWER_LIGHT) power = "сон модема и процессора";
-  row(cursor, left, "Питание", power);
+  row(cursor, left, "Питание Wi‑Fi", power);
+  if (info.batt_shutdown_en) {
+    uint16_t thr = info.batt_shutdown_mv ? info.batt_shutdown_mv : info.batt_shutdown_default_mv;
+    rowFmt(cursor, left, "Автовыкл. батареи", "≤ %u мВ", (unsigned)thr);
+  } else {
+    row(cursor, left, "Автовыкл. батареи", "выкл");
+  }
+  if (info.adc_multiplier > 0.0f) {
+    if (info.adc_multiplier_factory)
+      rowFmt(cursor, left, "АЦП множитель", "заводской ×%.3f", info.adc_multiplier);
+    else
+      rowFmt(cursor, left, "АЦП множитель", "%.3f", info.adc_multiplier);
+  } else {
+    row(cursor, left, "АЦП множитель", "н/п");
+  }
   row(cursor, left, "Адрес", info.ip);
   row(cursor, left, "MQTT", info.mqtt);
   row(cursor, left, "Хост", info.mqtt_host[0] ? info.mqtt_host : "—");
@@ -1081,21 +1149,53 @@ static void renderNodeForm(const RepeaterPageInfo& info, char*& cursor, size_t& 
 
 static void renderPowerForm(const RepeaterPageInfo& info, char*& cursor, size_t& left) {
   uint8_t held = power_hold.load(std::memory_order_acquire);
-  uint8_t mode = held <= WIFI_POWER_LIGHT ? held : info.wifi_ps;
+  const RepeaterPowerForm& held_form = power_hold_form;
+  uint8_t mode = (held && held_form.wifi_ps <= WIFI_POWER_LIGHT) ? held_form.wifi_ps : info.wifi_ps;
   if (mode > WIFI_POWER_LIGHT) mode = WIFI_POWER_NONE;
+  uint8_t batt_en = held ? held_form.batt_shutdown_en : info.batt_shutdown_en;
+  uint16_t batt_mv = held ? held_form.batt_shutdown_mv : info.batt_shutdown_mv;
+  float adc_mult = held && held_form.set_adc ? held_form.adc_multiplier : info.adc_multiplier;
+  char num[32];
+
   appendRaw(cursor, left,
             "<section id=\"power\"><h2>Питание</h2>"
-            "<p class=\"sub\">Без энергосбережения радио Wi‑Fi включено постоянно. "
-            "Сон модема гасит его между маяками точки доступа и оставляет процессор на рабочей частоте. "
-            "Сон модема и процессора дополнительно усыпляет CPU между пакетами, если это позволяет сборка. "
-            "Иначе остаётся сон модема. MQTT не отключается. Если брокер начнёт отваливаться, вернитесь к первому режиму.</p>"
+            "<p class=\"sub\">Wi‑Fi: без энергосбережения радио включено постоянно; сон модема гасит его между маяками; "
+            "сон процессора усыпляет CPU, если сборка позволяет. MQTT не отключается.</p>"
             "<form class=\"setup\" method=\"post\" action=\"/power\" autocomplete=\"off\">");
-  selectOpen(cursor, left, "Режим", "mode");
+  selectOpen(cursor, left, "Режим Wi‑Fi", "mode");
   selectOption(cursor, left, "0", "Без энергосбережения", mode == WIFI_POWER_NONE);
   selectOption(cursor, left, "1", "Сон модема Wi‑Fi", mode == WIFI_POWER_MODEM);
   selectOption(cursor, left, "2", "Сон модема и процессора", mode == WIFI_POWER_LIGHT);
   selectClose(cursor, left);
-  appendRaw(cursor, left, "<button type=\"submit\">Сохранить питание</button></form>");
+
+  appendRaw(cursor, left,
+            "<p class=\"sub span2\">Калибровка заряда: сравните напряжение на экране с мультиметром "
+            "(для 2S — на пакете). В поле — активный множитель; 0 при сохранении сбрасывает на заводской. «Калибровать» — по мВ мультиметра.</p>");
+  if (info.batt_mv) {
+    snprintf(num, sizeof(num), "%.2f В", info.batt_mv / 1000.0f);
+    textField(cursor, left, "Сейчас", "batt_now", num, "readonly", false);
+  }
+  if (adc_mult > 0.0f) snprintf(num, sizeof(num), "%.3f", adc_mult);
+  else snprintf(num, sizeof(num), "0");
+  textField(cursor, left, "Множитель АЦП", "adc_mult", num, "inputmode=\"decimal\" placeholder=\"0 = заводской\"", false);
+  textField(cursor, left, "Мультиметр, мВ", "cal_mv", "", "inputmode=\"numeric\" maxlength=\"5\"", false);
+  appendRaw(cursor, left,
+            "<button class=\"span2\" type=\"submit\" name=\"action\" value=\"cal\">Калибровать по мультиметру</button>");
+
+  appendRaw(cursor, left,
+            "<p class=\"sub span2\">Автовыключение: deep sleep при разряде. По умолчанию выкл. "
+            "Порог 0 — заводской для платы");
+  snprintf(num, sizeof(num), " (%u мВ)", (unsigned)info.batt_shutdown_default_mv);
+  appendRaw(cursor, left, num);
+  appendRaw(cursor, left, ").</p>");
+  selectOpen(cursor, left, "Автовыкл. батареи", "batt_en");
+  selectOption(cursor, left, "0", "Выкл", !batt_en);
+  selectOption(cursor, left, "1", "Вкл", batt_en);
+  selectClose(cursor, left);
+  snprintf(num, sizeof(num), "%u", (unsigned)batt_mv);
+  textField(cursor, left, "Порог, мВ", "batt_off_mv", num, "inputmode=\"numeric\" maxlength=\"5\"", false);
+
+  appendRaw(cursor, left, "<button class=\"span2\" type=\"submit\" name=\"action\" value=\"save\">Сохранить питание</button></form>");
   noteLine(cursor, left, "power-note", power_note);
   appendRaw(cursor, left, "</section>");
 }
@@ -2460,15 +2560,61 @@ static void handleTel(AsyncWebServerRequest* request) {
 
 static void handlePower(AsyncWebServerRequest* request) {
   if (!allowed(request)) return;
-  long mode = -1;
-  if (!readLong(request, "mode", mode) || mode < WIFI_POWER_NONE || mode > WIFI_POWER_LIGHT) {
-    setPowerNote("Неизвестный режим");
+  if (power_job.load(std::memory_order_acquire)) {
+    setPowerNote("Занято, повторите");
     request->redirect("/?at=power");
     return;
   }
-  power_hold.store((uint8_t)mode, std::memory_order_release);
-  power_job.store((uint8_t)mode, std::memory_order_release);
-  setPowerNote("Сохраняем…");
+  RepeaterPowerForm* job = (RepeaterPowerForm*)malloc(sizeof(RepeaterPowerForm));
+  if (!job) {
+    setPowerNote("Нет памяти");
+    request->redirect("/?at=power");
+    return;
+  }
+  memset(job, 0, sizeof(*job));
+  long mode = WIFI_POWER_NONE;
+  readLong(request, "mode", mode);
+  if (mode < WIFI_POWER_NONE || mode > WIFI_POWER_LIGHT) mode = WIFI_POWER_NONE;
+  job->wifi_ps = (uint8_t)mode;
+
+  long batt_en = 0;
+  readLong(request, "batt_en", batt_en);
+  job->batt_shutdown_en = batt_en ? 1 : 0;
+  long batt_mv = 0;
+  readLong(request, "batt_off_mv", batt_mv);
+  if (batt_mv < 0) batt_mv = 0;
+  if (batt_mv > 15000) batt_mv = 15000;
+  job->batt_shutdown_mv = (uint16_t)batt_mv;
+
+  if (request->hasParam("adc_mult", true)) {
+    job->set_adc = 1;
+    job->adc_multiplier = (float)atof(request->getParam("adc_mult", true)->value().c_str());
+  }
+
+  const char* action = "save";
+  if (request->hasParam("action", true)) action = request->getParam("action", true)->value().c_str();
+  if (strcmp(action, "cal") == 0) {
+    long cal_mv = 0;
+    readLong(request, "cal_mv", cal_mv);
+    if (cal_mv > 0 && cal_mv <= 15000) job->cal_mv = (uint16_t)cal_mv;
+    else {
+      free(job);
+      setPowerNote("Укажите мВ мультиметра для калибровки");
+      request->redirect("/?at=power");
+      return;
+    }
+  }
+
+  power_hold_form = *job;
+  power_hold.store(1, std::memory_order_release);
+  RepeaterPowerForm* expected = nullptr;
+  if (!power_job.compare_exchange_strong(expected, job)) {
+    free(job);
+    power_hold.store(0, std::memory_order_release);
+    setPowerNote("Занято, повторите");
+  } else {
+    setPowerNote(job->cal_mv ? "Калибруем…" : "Сохраняем…");
+  }
   request->redirect("/?at=power");
 }
 

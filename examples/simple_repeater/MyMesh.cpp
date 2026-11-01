@@ -1,5 +1,6 @@
 #include "MyMesh.h"
 #include <helpers/RadioProfiles.h>
+#include <helpers/BattShutdown.h>
 #include <RTClib.h>
 #include <algorithm>
 #include <stdlib.h>
@@ -2504,6 +2505,11 @@ void MyMesh::fillRepeaterPage(RepeaterPageInfo& info) {
   strncpy(info.ssid, _prefs.wifi_ssid, sizeof(info.ssid) - 1);
   info.wifi_ps = _prefs.wifi_ps;
   info.wifi_ps_active = _wifi.powerMode();
+  info.batt_shutdown_en = _prefs.batt_shutdown_en ? 1 : 0;
+  info.batt_shutdown_mv = _prefs.batt_shutdown_mv;
+  info.batt_shutdown_default_mv = boardDefaultBattShutdownMv();
+  info.adc_multiplier = board.getAdcMultiplier();
+  info.adc_multiplier_factory = (_prefs.adc_multiplier == 0.0f) ? 1 : 0;
   info.wifi_up = copyWifiAddress(info.ip, sizeof(info.ip)) ? 1 : 0;
   int8_t wifi_rssi = 0;
   if (_wifi.copyRssi(wifi_rssi)) info.wifi_rssi = wifi_rssi;

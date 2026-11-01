@@ -1,5 +1,6 @@
 #include "UITask.h"
 #include <Arduino.h>
+#include <helpers/BatteryScale.h>
 #include <helpers/ui/BatteryLevel.h>
 #include <helpers/TxtDataHelpers.h>
 #include "../MyMesh.h"
@@ -16,7 +17,7 @@
 #if defined(PIN_STATUS_LED_R) && defined(PIN_STATUS_LED_G) && defined(PIN_STATUS_LED_B)
 #define STATUS_LED_RGB 1
 #ifndef LOW_BATT_MILLIVOLTS
-#define LOW_BATT_MILLIVOLTS 3500
+#define LOW_BATT_MILLIVOLTS boardBattMinMv()
 #endif
 #endif
 
@@ -164,14 +165,8 @@ void UITask::newMsg(uint8_t path_len, const char* from_name, const char* text, i
 }
 
 void UITask::renderBatteryIndicator(uint16_t batteryMilliVolts) {
-#ifndef BATT_MIN_MILLIVOLTS
-  #define BATT_MIN_MILLIVOLTS 3000
-#endif
-#ifndef BATT_MAX_MILLIVOLTS
-  #define BATT_MAX_MILLIVOLTS 4200
-#endif
-  const int minMilliVolts = BATT_MIN_MILLIVOLTS;
-  const int maxMilliVolts = BATT_MAX_MILLIVOLTS;
+  const int minMilliVolts = (int)boardBattMinMv();
+  const int maxMilliVolts = (int)boardBattMaxMv();
   static BatteryLevelFilter batt_filter;
   int batteryPercentage;
   if (s_fresh_batt) {

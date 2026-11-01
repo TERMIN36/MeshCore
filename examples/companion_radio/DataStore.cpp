@@ -202,6 +202,8 @@ void DataStore::loadPrefs(NodePrefs& prefs) {
       //_fs->remove("/new_prefs"); // remove old
     }
   }
+  prefs.batt_shutdown_en = prefs.batt_shutdown_en ? 1 : 0;
+  if (prefs.batt_shutdown_mv > 15000) prefs.batt_shutdown_mv = 0;
 }
 
 void DataStore::loadPrefsInt(const char *filename, NodePrefs& _prefs) {

@@ -4,6 +4,33 @@
 
 ---
 
+## v0.2.0-rc14
+
+**Дата:** 1 ноября 2026  
+**Скачать:** [релиз на GitHub](https://github.com/TERMIN36/MeshCore/releases/tag/v0.2.0-rc14)
+
+Кандидат относительно `v1.17.1-0.1.4`: можно поставить и проверить. На заставке и в «о версии» — `t36-v0.2.0-rc14`.
+
+### Автовыключение по батарее (opt-in)
+
+**Важно для репитера / room / sensor:** deep sleep по низкому заряду больше не включён по умолчанию. Включение: `set batt.shutdown on`, порог `set batt.shutdown.mv` (`0` = заводской). Companion: по умолчанию **вкл.** только при `AUTO_SHUTDOWN_MILLIVOLTS` в сборке (Heltec и др.), иначе **выкл.** (T-Beam 1W). Prefs: `batt_off_en` / `batt_off_mv`. Веб-репитер: блок **Питание**.
+
+### Поддержка 2S (pack mV)
+
+Шкала UI и `cal adc` по `BATT_MIN`/`BATT_MAX` платы (T-Beam 1W: 6000–8400 mV). Пример: `cal adc 7400`. Верхний предел калибровки — до `BATT_MAX`, не только 5000 mV.
+
+### Веб-панель: Питание
+
+Wi‑Fi sleep, множитель АЦП, калибровка по мультиметру, автовыключение по батарее. В форме показывается **активный** множитель (как `get adc.multiplier`).
+
+### Справка CLI
+
+`help` / `?` — `batt.shutdown`, `batt.shutdown.mv`, `adc.multiplier`, `cal adc`.
+
+Подробнее: [README](README.md), [cli_commands.md](docs/cli_commands.md), [companion_console_prompt.md](docs/companion_console_prompt.md).
+
+---
+
 ## v0.2.0-rc13
 
 **Дата:** 30 октября 2026  
@@ -17,7 +44,7 @@ Companion: `get adc.multiplier` и `set adc.multiplier` в консоли (ча�
 
 ### Калибровка по мультиметру (`cal adc`)
 
-Команда **`cal adc <mV>`** (500–5000) на репитере, комнатном сервере, датчике и Companion: пересчитывает `adc.multiplier` по показанию мультиметра, сохраняет в настройках. См. [cli_commands.md](docs/cli_commands.md).
+Команда **`cal adc <mV>`** на репитере, комнатном сервере, датчике и Companion: пересчитывает `adc.multiplier` по показанию мультиметра, сохраняет в настройках. Диапазон зависит от платы (см. Unreleased / 2S). См. [cli_commands.md](docs/cli_commands.md).
 
 В остальном поведение как в `v0.2.0-rc12`.
 

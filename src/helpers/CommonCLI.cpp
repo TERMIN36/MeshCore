@@ -5,6 +5,8 @@
 #include "TxtDataHelpers.h"
 #include <RTClib.h>
 #include <helpers/ClockSource.h>
+#include <helpers/BatteryScale.h>
+#include <helpers/BattShutdown.h>
 
 #ifndef BRIDGE_MAX_BAUD
 #define BRIDGE_MAX_BAUD 115200
@@ -82,6 +84,8 @@ void CommonCLI::loadPrefs(FILESYSTEM* fs) {
   }
   _prefs->tx_led = _prefs->tx_led ? 1 : 0;
   mesh::MainBoard::setTxLedEnabled(_prefs->tx_led != 0);
+  _prefs->batt_shutdown_en = constrain(_prefs->batt_shutdown_en, 0, 1);
+  if (_prefs->batt_shutdown_mv > 15000) _prefs->batt_shutdown_mv = 0;
 }
 
 void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy prefs loader
@@ -164,6 +168,8 @@ void CommonCLI::loadPrefsInt(FILESYSTEM* fs, const char* filename) {  // Legacy 
     _prefs->bridge_channel = constrain(_prefs->bridge_channel, 0, 14);
 
     _prefs->powersaving_enabled = constrain(_prefs->powersaving_enabled, 0, 1);
+    _prefs->batt_shutdown_en = constrain(_prefs->batt_shutdown_en, 0, 1);
+    if (_prefs->batt_shutdown_mv > 15000) _prefs->batt_shutdown_mv = 0;
 
     _prefs->gps_enabled = constrain(_prefs->gps_enabled, 0, 1);
     _prefs->advert_loc_policy = constrain(_prefs->advert_loc_policy, 0, 2);
@@ -316,13 +322,15 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
       const char* arg = &command[8];
       while (*arg == ' ') arg++;
       int true_mv = atoi(arg);
-      if (true_mv < 500 || true_mv > 5000) {
-        strcpy(reply, "Error: mV must be 500-5000");
+      uint16_t cal_min = boardCalAdcMinMv();
+      uint16_t cal_max = boardCalAdcMaxMv();
+      if (true_mv < (int)cal_min || true_mv > (int)cal_max) {
+        sprintf(reply, "Error: mV must be %u-%u", (unsigned)cal_min, (unsigned)cal_max);
       } else if (_board->getAdcMultiplier() == 0.0f) {
         strcpy(reply, "Error: unsupported");
       } else {
         uint16_t shown = _board->getBattMilliVolts();
-        if (shown < 500) {
+        if (shown < cal_min) {
           strcpy(reply, "Error: battery reading too low");
         } else {
           float new_mult;
@@ -337,6 +345,8 @@ void CommonCLI::handleCommand(uint32_t sender_timestamp, char* command, char* re
           }
         }
       }
+    } else if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
+      strcpy(reply, "help, cal adc, get/set adc.multiplier, get/set batt.shutdown, get/set batt.shutdown.mv, powersaving");
     } else if (strcmp(command, "ntp sync") == 0) {
       if (_callbacks->syncNtp()) strcpy(reply, "OK - waiting for server");
       else strcpy(reply, "ERR: ntp unavailable");
@@ -980,6 +990,33 @@ void CommonCLI::handleSetCmd(uint32_t sender_timestamp, char* command, char* rep
       _prefs->adc_multiplier = 0.0f;
       strcpy(reply, "Error: unsupported");
     };
+  } else if (memcmp(config, "batt.shutdown.mv ", 17) == 0) {
+    long mv = atol(&config[17]);
+    if (mv < 0 || mv > 15000) {
+      strcpy(reply, "Error: mV must be 0-15000 (0=default)");
+    } else {
+      _prefs->batt_shutdown_mv = (uint16_t)mv;
+      savePrefs();
+      if (_prefs->batt_shutdown_mv == 0) {
+        sprintf(reply, "OK - default threshold %u mV", (unsigned)boardDefaultBattShutdownMv());
+      } else {
+        sprintf(reply, "OK - threshold %u mV", (unsigned)_prefs->batt_shutdown_mv);
+      }
+    }
+  } else if (memcmp(config, "batt.shutdown ", 14) == 0) {
+    const char* arg = &config[14];
+    while (*arg == ' ') arg++;
+    if (strcmp(arg, "on") == 0) {
+      _prefs->batt_shutdown_en = 1;
+      savePrefs();
+      strcpy(reply, "OK - batt.shutdown on");
+    } else if (strcmp(arg, "off") == 0) {
+      _prefs->batt_shutdown_en = 0;
+      savePrefs();
+      strcpy(reply, "OK - batt.shutdown off");
+    } else {
+      strcpy(reply, "Error: on or off");
+    }
   #if defined(USE_LR2021)
   } else if (memcmp(config, "extra.sf ", 9) == 0) {
     strcpy(tmp, &config[9]);
@@ -1396,6 +1433,15 @@ void CommonCLI::handleGetCmd(uint32_t sender_timestamp, char* command, char* rep
     } else {
       sprintf(reply, "> %.3f", adc_mult);
     }
+  } else if (memcmp(config, "batt.shutdown.mv", 16) == 0) {
+    uint16_t eff = effectiveBattShutdownMv(_prefs->batt_shutdown_mv);
+    if (_prefs->batt_shutdown_mv == 0) {
+      sprintf(reply, "> default (%u mV)", (unsigned)eff);
+    } else {
+      sprintf(reply, "> %u", (unsigned)_prefs->batt_shutdown_mv);
+    }
+  } else if (memcmp(config, "batt.shutdown", 13) == 0) {
+    strcpy(reply, _prefs->batt_shutdown_en ? "> on" : "> off");
   // Power management commands
   } else if (memcmp(config, "pwrmgt.support", 14) == 0) {
 #ifdef NRF52_POWER_MANAGEMENT

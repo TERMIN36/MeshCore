@@ -18,6 +18,15 @@ void TBeam1WBoard::begin() {
   // Initialize fan control (on by default - 1W PA can overheat)
   pinMode(FAN_CTRL_PIN, OUTPUT);
   digitalWrite(FAN_CTRL_PIN, HIGH);
+
+#if defined(BATTERY_PIN)
+  pinMode(BATTERY_PIN, INPUT);
+  adcAttachPin(BATTERY_PIN);
+#endif
+}
+
+bool TBeam1WBoard::isExternalPowered() {
+  return usbConsoleHostAttached();
 }
 
 void TBeam1WBoard::onBeforeTransmit() {

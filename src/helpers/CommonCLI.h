@@ -73,6 +73,9 @@ public:
   char bridge_secret[16]; // for XOR encryption of bridge packets (ESP-NOW only)
   // Power setting
   uint8_t powersaving_enabled = 0; // boolean
+  // Low-battery deep sleep (opt-in). mv 0 = board default (BATT_MIN / AUTO_SHUTDOWN).
+  uint8_t batt_shutdown_en = 0;
+  uint16_t batt_shutdown_mv = 0;
   // Gps settings
   uint8_t gps_enabled = 0;
   uint32_t gps_interval = 0; // in seconds
@@ -185,6 +188,8 @@ private:
     void structure() override {
       def("adc_mult", _parent->adc_multiplier);
       def("pwr_sav_en", _parent->powersaving_enabled);
+      def("batt_off_en", _parent->batt_shutdown_en);
+      def("batt_off_mv", _parent->batt_shutdown_mv);
     }
   public:
     PowerPrefs(NodePrefs* parent) : _parent(parent) { }

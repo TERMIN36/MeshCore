@@ -233,6 +233,11 @@ public:
 
   bool setAutoLightSleep(bool enable);
 
+  // USB Serial/JTAG or native CDC: host SOF keeps the console up; light sleep
+  // without this drops the COM port on Windows (T-Beam 1W, Heltec V4, etc.).
+  bool usbConsoleHostAttached() const;
+  void usbConsoleKeepCpuAwake(bool awake);
+
   // Block until timeout, or until LoRa DIO / the user button wakes the CPU.
   //  0  waited
   //  1  DIO is already high; the caller should service the radio

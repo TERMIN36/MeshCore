@@ -1,5 +1,6 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
+#include <helpers/BattShutdown.h>
 
 #include "MyMesh.h"
 
@@ -25,6 +26,7 @@ static char command[MAX_POST_TEXT_LEN+1];
 #ifdef ETHERNET_ENABLED
 static char ethernet_command[MAX_POST_TEXT_LEN+1];
 #endif
+static unsigned long next_batt_shutdown_check = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -147,6 +149,27 @@ void loop() {
     ethernet_command[0] = 0;
   }
 #endif
+
+  if ((long)(millis() - next_batt_shutdown_check) >= 0) {
+    next_batt_shutdown_check = millis() + 8000;
+    NodePrefs* prefs = the_mesh.getNodePrefs();
+    uint16_t milliVolts = board.getBattMilliVolts();
+    if (prefs && shouldAutoBattShutdown(prefs->batt_shutdown_en, prefs->batt_shutdown_mv, milliVolts)
+        && !board.isExternalPowered()) {
+      Serial.println("Low battery. Shutting down.");
+#ifdef DISPLAY_CLASS
+      display.turnOn();
+      display.startFrame();
+      display.setTextSize(1);
+      display.setColor(UIColor::warning_txt);
+      display.drawTextCentered(display.width() / 2, 20, "Low Battery.");
+      display.drawTextCentered(display.width() / 2, 36, "Shutting Down!");
+      display.endFrame();
+      if (!display.isEink()) delay(3000);
+#endif
+      board.powerOff();
+    }
+  }
 
   the_mesh.loop();
   sensors.loop();

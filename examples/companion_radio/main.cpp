@@ -4,9 +4,6 @@
 #if defined(ESP32) && defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
   #include <esp_pm.h>
 #endif
-#if defined(ESP32) && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
-  #include <HWCDC.h>
-#endif
 #include "MyMesh.h"
 #include "CompanionLink.h"
 
@@ -732,45 +729,6 @@ static void companionWifiCpuAwake() {}
 static void companionWifiLightSleep(uint32_t) {}
 #endif
 
-#if defined(ESP32)
-// Same rule as the repeater: a host on USB-Serial/JTAG loses the COM port
-// if the CPU light-sleeps. A charger does not send SOF, so that still sleeps.
-static bool usbHostAttached() {
-#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
-  static uint32_t attached_until = 0;
-  if (HWCDC::isPlugged()) {
-    attached_until = millis() + 2000;
-    if (attached_until == 0) attached_until = 1;
-    return true;
-  }
-  return attached_until != 0 && (int32_t)(millis() - attached_until) < 0;
-#else
-  return false;
-#endif
-}
-
-static void usbKeepCpuAwake(bool awake) {
-#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
-  static esp_pm_lock_handle_t lock = nullptr;
-  static bool held = false;
-  static bool unavailable = false;
-  if (unavailable || awake == held) return;
-  if (awake) {
-    if (!lock && esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb-cli", &lock) != ESP_OK) {
-      lock = nullptr;
-      unavailable = true;
-      return;
-    }
-    if (lock && esp_pm_lock_acquire(lock) == ESP_OK) held = true;
-  } else if (lock && esp_pm_lock_release(lock) == ESP_OK) {
-    held = false;
-  }
-#else
-  (void)awake;
-#endif
-}
-#endif
-
 void loop() {
   the_mesh.loop();
   interface_manager.loop();
@@ -790,8 +748,8 @@ void loop() {
     // Screen-off is the idle state. Stay awake while the panel is on, GPS is
     // holding the CPU, or a USB host is attached. A clean firmware saves
     // Eco max (CPU sleep, RX boost off); an existing prefs file keeps its mode.
-    bool usb_up = usbHostAttached();
-    usbKeepCpuAwake(usb_up);
+    bool usb_up = board.usbConsoleHostAttached();
+    board.usbConsoleKeepCpuAwake(usb_up);
 #if defined(BLE_PIN_CODE)
     if (bluetooth_interface.isEnabled()) companionBleModemOn();
 #endif

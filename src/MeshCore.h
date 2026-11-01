@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <math.h>
+#include <helpers/BatteryScale.h>
 
 #define MAX_HASH_SIZE        8
 #define PUB_KEY_SIZE        32
@@ -74,12 +75,12 @@ public:
     return true;
   }
   virtual float getAdcMultiplier() const { return _has_adc_mult ? _adc_mult : 0.0f; }
-  // true_millivolts: multimeter reading on the cell. Updates runtime multiplier only.
+  // true_millivolts: multimeter on the same node the board reports (cell or 2S pack).
   bool calibrateAdcMultiplierFromTrueMv(uint16_t true_millivolts, float& new_multiplier_out) {
     if (!_has_adc_mult || getAdcMultiplier() == 0.0f) return false;
-    if (true_millivolts < 500 || true_millivolts > 5000) return false;
+    if (true_millivolts < boardCalAdcMinMv() || true_millivolts > boardCalAdcMaxMv()) return false;
     uint16_t shown = getBattMilliVolts();
-    if (shown < 500) return false;
+    if (shown < boardCalAdcMinMv()) return false;
     float cur = getAdcMultiplier();
     float new_mult = cur * ((float)true_millivolts / (float)shown);
     if (new_mult < 0.001f) new_mult = 0.001f;

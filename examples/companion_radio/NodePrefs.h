@@ -95,6 +95,13 @@ public:
   char wifi_ssid[33] = {};
   char wifi_wpass[64] = {};
   float adc_multiplier = 0;  // 0.0 = board default from variant build
+  // Low-battery deep sleep. Default on only when the build historically had AUTO_SHUTDOWN.
+#if defined(AUTO_SHUTDOWN_MILLIVOLTS)
+  uint8_t batt_shutdown_en = 1;
+#else
+  uint8_t batt_shutdown_en = 0;
+#endif
+  uint16_t batt_shutdown_mv = 0;  // 0 = board default
 
 private:
   class RadioPrefs : public ConfigSerializer {  // COPIED from CommonCLI (for now)
@@ -192,6 +199,8 @@ private:
       def("ssid", _parent->wifi_ssid, sizeof(_parent->wifi_ssid));
       def("wpass", _parent->wifi_wpass, sizeof(_parent->wifi_wpass));
       def("adc_mult", _parent->adc_multiplier);
+      def("batt_off_en", _parent->batt_shutdown_en);
+      def("batt_off_mv", _parent->batt_shutdown_mv);
       for (int i = 0; i < CLOCK_NODE_MAX; i++) {
         char key[8];
         clockNodePrefKey(key, sizeof(key), i);

@@ -39,6 +39,7 @@ public:
   void onBeforeTransmit() override;
   void onAfterTransmit() override;
   uint16_t getBattMilliVolts() override;
+  bool isExternalPowered() override;
   const char* getManufacturerName() const override;
   void powerOff() override;
 

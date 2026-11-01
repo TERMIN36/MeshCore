@@ -1,11 +1,6 @@
 #include <Arduino.h>   // needed for PlatformIO
 #include <Mesh.h>
-#if defined(ESP32) && defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE
-  #include <esp_pm.h>
-#endif
-#if defined(ESP32) && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
-  #include <HWCDC.h>
-#endif
+#include <helpers/BattShutdown.h>
 
 #include "MyMesh.h"
 
@@ -41,14 +36,6 @@ static unsigned long userBtnDownAt = 0;
 #define USER_BTN_HOLD_OFF_MILLIS 1500
 #endif
 
-#ifndef AUTO_SHUTDOWN_MILLIVOLTS
-#define AUTO_SHUTDOWN_MILLIVOLTS 3000
-#endif
-// Readings at or below this are treated as a missing battery or a bad ADC
-// (for example while powered from mains), not as a drained cell.
-#ifndef AUTO_SHUTDOWN_MIN_MILLIVOLTS
-#define AUTO_SHUTDOWN_MIN_MILLIVOLTS 500
-#endif
 static unsigned long next_batt_shutdown_check = 0;
 
 void setup() {
@@ -138,49 +125,6 @@ void setup() {
   board.onBootComplete();
 }
 
-#if defined(ESP32)
-// Heltec V4 Serial is the USB-Serial/JTAG block. Light sleep stops its clock,
-// Windows drops the COM port, and the browser's writer is gone before the
-// first command. SOF means a host is on the bus; a charger with no data
-// does not send SOF, so screen-off sleep still happens there.
-static bool usbHostAttached() {
-#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
-  static uint32_t attached_until = 0;
-  if (HWCDC::isPlugged()) {
-    attached_until = millis() + 2000;
-    if (attached_until == 0) attached_until = 1;
-    return true;
-  }
-  return attached_until != 0 && (int32_t)(millis() - attached_until) < 0;
-#else
-  return false;
-#endif
-}
-
-// Automatic light sleep is entered from the idle task, not only from
-// waitAutoLightSleep. This lock does not change the CPU clock.
-static void usbKeepCpuAwake(bool awake) {
-#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE && ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
-  static esp_pm_lock_handle_t lock = nullptr;
-  static bool held = false;
-  static bool unavailable = false;
-  if (unavailable || awake == held) return;
-  if (awake) {
-    if (!lock && esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb-cli", &lock) != ESP_OK) {
-      lock = nullptr;
-      unavailable = true;
-      return;
-    }
-    if (lock && esp_pm_lock_acquire(lock) == ESP_OK) held = true;
-  } else if (lock && esp_pm_lock_release(lock) == ESP_OK) {
-    held = false;
-  }
-#else
-  (void)awake;
-#endif
-}
-#endif
-
 void loop() {
 #ifdef DISPLAY_CLASS
   ui_task.pollButton();
@@ -248,9 +192,11 @@ void loop() {
 #endif
 
   if ((long)(millis() - next_batt_shutdown_check) >= 0) {
-    uint16_t milliVolts = board.getBattMilliVolts();
     next_batt_shutdown_check = millis() + 8000;
-    if (milliVolts > AUTO_SHUTDOWN_MIN_MILLIVOLTS && milliVolts < AUTO_SHUTDOWN_MILLIVOLTS && !board.isExternalPowered()) {
+    NodePrefs* prefs = the_mesh.getNodePrefs();
+    uint16_t milliVolts = board.getBattMilliVolts();
+    if (prefs && shouldAutoBattShutdown(prefs->batt_shutdown_en, prefs->batt_shutdown_mv, milliVolts)
+        && !board.isExternalPowered()) {
       Serial.println("Low battery. Shutting down.");
 #ifdef DISPLAY_CLASS
       display.turnOn();
@@ -282,8 +228,8 @@ void loop() {
   // Otherwise keep the short pause: a level check on the next pass catches
   // a packet the sleep missed. A host on native USB, or a CLI line already
   // started, must not enter that sleep: the port disappears mid-connect.
-  bool usb_up = usbHostAttached();
-  usbKeepCpuAwake(usb_up);
+  bool usb_up = board.usbConsoleHostAttached();
+  board.usbConsoleKeepCpuAwake(usb_up);
   bool cli_busy = command[0] != 0 || Serial.available();
   if (usb_up && !cli_busy) {
     delay(10);

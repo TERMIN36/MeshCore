@@ -180,7 +180,7 @@ build_firmware() {
   COMMIT_HASH=$(git rev-parse --short HEAD)
 
   # set firmware build date
-  FIRMWARE_BUILD_DATE=$(date '+%d-%b-%Y')
+  FIRMWARE_BUILD_DATE=$(date '+%d-%m-%Y')
 
   # FIRMWARE_VERSION from the environment (release tag), otherwise from src/helpers/FirmwareVersion.h
   if [ -z "$FIRMWARE_VERSION" ]; then

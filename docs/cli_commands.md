@@ -430,7 +430,7 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 
 **Where to run:** USB serial, repeater web panel console, [config.meshcore.io](https://config.meshcore.io), or the **Console** contact on a repeater; on Companion — **Console** chat, phone **Console** over Link, or USB CLI Rescue.
 
-**Calibration:** Compare battery millivolts on the display (Companion **Power** page, repeater screen, or web panel) with a multimeter on the cell. Adjust proportionally: `new_multiplier ≈ current_multiplier × (true_mV / displayed_mV)`. Repeat until close enough. Setting `0.0` restores the board default from the variant build (`ADC_MULTIPLIER` in PlatformIO).
+**Calibration:** Compare battery millivolts on the display (Companion **Power** page, repeater screen, or web panel) with a multimeter on the same node the board senses (1S cell, or **2S pack** when the UI shows pack mV — e.g. T-Beam 1W). Adjust proportionally: `new_multiplier ≈ current_multiplier × (true_mV / displayed_mV)`. Repeat until close enough. Setting `0.0` restores the board default from the variant build (`ADC_MULTIPLIER` in PlatformIO).
 
 **Note:** Returns "Error: unsupported" if the board does not use a runtime divider multiplier (some nRF52 variants use a fixed scale in millivolts instead).
 
@@ -440,13 +440,43 @@ This document provides an overview of CLI commands that can be sent to MeshCore 
 **Usage:** `cal adc <millivolts>`
 
 **Parameters:**
-- `millivolts`: cell voltage measured with a multimeter (**500–5000** mV)
+- `millivolts`: multimeter reading in mV. Allowed range is **500** … `boardCalAdcMaxMv()` (at least **5000**; on 2S boards up to **`BATT_MAX`**, e.g. **8400** on T-Beam 1W). Examples: `cal adc 4000` (1S), `cal adc 7400` (2S pack).
 
-**Roles:** Same as `adc.multiplier` above (repeater, room server, sensor, companion).
+**Roles:** Same as `adc.multiplier` above (repeater, room server, sensor, companion). On ESP32 repeater web panel: **Питание** → «Калибровать по мультиметру».
 
 **Behavior:** Reads the current on-screen millivolts, then sets `adc.multiplier` to `current × (true_mV / displayed_mV)` (clamped to **0.001–10.0**), saves prefs, and reports the new multiplier and reading. Fails if the displayed reading is below **500 mV** (USB / empty ADC) or the board does not support a runtime multiplier.
 
 **When to use:** Prefer this over manual `set adc.multiplier` when you have a multimeter reading. Use `set adc.multiplier 0.0` to restore the board default.
+
+---
+
+#### Low-battery auto shutdown
+**Usage:**
+- `get batt.shutdown` / `set batt.shutdown on|off`
+- `get batt.shutdown.mv` / `set batt.shutdown.mv <mV|0>`
+
+**Parameters:**
+- `on` / `off`: enable or disable deep sleep when battery is below the threshold
+- `mV`: custom threshold in millivolts; **`0`** = board default (`AUTO_SHUTDOWN_MILLIVOLTS` if defined, else `BATT_MIN_MILLIVOLTS`, else 3000)
+
+**Defaults:**
+- Repeater / room server / sensor: **`off`** (opt-in; previously always on for ESP32 repeater)
+- Companion: **`on`** only if the build defines `AUTO_SHUTDOWN_MILLIVOLTS` (e.g. Heltec); otherwise **`off`** (e.g. T-Beam 1W)
+
+**Guards:** readings ≤ 500 mV are ignored; with `BATT_MIN` defined, readings below half of that floor are treated as floating ADC (typical USB-only) and do not shut down. External power (`isExternalPowered`) also skips shutdown.
+
+**Roles:** Repeater, room server, sensor (CommonCLI), Companion CLI. Repeater web: **Питание**. JSON prefs keys: `batt_off_en`, `batt_off_mv`.
+
+**Help:** `help` / `?` lists these commands on CommonCLI and Companion.
+
+---
+
+#### List common CLI commands
+**Usage:** `help` or `?`
+
+**Roles:** Repeater, room server, sensor (CommonCLI); Companion console.
+
+**Note:** Short list including `cal adc`, `adc.multiplier`, `batt.shutdown`, `batt.shutdown.mv`, and (CommonCLI) `powersaving`.
 
 ---
 

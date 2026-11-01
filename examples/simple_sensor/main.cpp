@@ -1,4 +1,5 @@
 #include "SensorMesh.h"
+#include <helpers/BattShutdown.h>
 
 #ifdef DISPLAY_CLASS
   #include "UITask.h"
@@ -51,6 +52,7 @@ void halt() {
 }
 
 static char command[160];
+static unsigned long next_batt_shutdown_check = 0;
 
 void setup() {
   Serial.begin(115200);
@@ -143,6 +145,27 @@ void loop() {
     }
 
     command[0] = 0;  // reset command buffer
+  }
+
+  if ((long)(millis() - next_batt_shutdown_check) >= 0) {
+    next_batt_shutdown_check = millis() + 8000;
+    NodePrefs* prefs = the_mesh.getNodePrefs();
+    uint16_t milliVolts = board.getBattMilliVolts();
+    if (prefs && shouldAutoBattShutdown(prefs->batt_shutdown_en, prefs->batt_shutdown_mv, milliVolts)
+        && !board.isExternalPowered()) {
+      Serial.println("Low battery. Shutting down.");
+#ifdef DISPLAY_CLASS
+      display.turnOn();
+      display.startFrame();
+      display.setTextSize(1);
+      display.setColor(UIColor::warning_txt);
+      display.drawTextCentered(display.width() / 2, 20, "Low Battery.");
+      display.drawTextCentered(display.width() / 2, 36, "Shutting Down!");
+      display.endFrame();
+      if (!display.isEink()) delay(3000);
+#endif
+      board.powerOff();
+    }
   }
 
   the_mesh.loop();

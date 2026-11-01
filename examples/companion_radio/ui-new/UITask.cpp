@@ -1,6 +1,8 @@
 #include "UITask.h"
 #include "../CompanionLink.h"
 #include <helpers/RadioProfiles.h>
+#include <helpers/BatteryScale.h>
+#include <helpers/BattShutdown.h>
 #include <helpers/ui/BatteryLevel.h>
 #include <helpers/ui/ClockFont.h>
 #include <math.h>
@@ -351,14 +353,8 @@ class HomeScreen : public UIScreen {
 
   void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
     // Convert millivolts to percentage
-#ifndef BATT_MIN_MILLIVOLTS
-  #define BATT_MIN_MILLIVOLTS 3000
-#endif
-#ifndef BATT_MAX_MILLIVOLTS
-  #define BATT_MAX_MILLIVOLTS 4200
-#endif
-    const int minMilliVolts = BATT_MIN_MILLIVOLTS;
-    const int maxMilliVolts = BATT_MAX_MILLIVOLTS;
+    const int minMilliVolts = (int)boardBattMinMv();
+    const int maxMilliVolts = (int)boardBattMaxMv();
     static BatteryLevelFilter batt_filter;
     int batteryPercentage;
     if (s_fresh_batt) {
@@ -1819,14 +1815,8 @@ static void drawShutdownCharge(DisplayDriver& display, int pct) {
 }
 
 static int shutdownChargePercent(UITask* task) {
-#ifndef BATT_MIN_MILLIVOLTS
-  #define BATT_MIN_MILLIVOLTS 3000
-#endif
-#ifndef BATT_MAX_MILLIVOLTS
-  #define BATT_MAX_MILLIVOLTS 4200
-#endif
   BatteryLevelFilter filter;
-  int level = filter.latch(medianBattMilliVolts(task), BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS);
+  int level = filter.latch(medianBattMilliVolts(task), (int)boardBattMinMv(), (int)boardBattMaxMv());
   return level * 100 / BatteryLevelFilter::LEVELS;
 }
 
@@ -2388,26 +2378,23 @@ void UITask::loop() {
   vibration.loop();
 #endif
 
-#ifdef AUTO_SHUTDOWN_MILLIVOLTS
-  if (millis() > next_batt_chck) {
-    uint16_t milliVolts = getBattMilliVolts();
-    if (milliVolts > 0 && milliVolts < AUTO_SHUTDOWN_MILLIVOLTS) {
-      if(!board.isExternalPowered()) {
-        if (_display != NULL) {
-          _display->startFrame();
-          _display->setTextSize(2);
-          _display->setColor(UIColor::warning_txt);
-          _display->drawTextCentered(_display->width() / 2, 20, "Low Battery.");
-          _display->drawTextCentered(_display->width() / 2, 40, "Shutting Down!");
-          _display->endFrame();
-          if (_display->isEink() == false) { delay(3000); }
-        }
-        shutdown();
-      }
-    }
+  if (_node_prefs && millis() > next_batt_chck) {
     next_batt_chck = millis() + 8000;
+    uint16_t milliVolts = getBattMilliVolts();
+    if (shouldAutoBattShutdown(_node_prefs->batt_shutdown_en, _node_prefs->batt_shutdown_mv, milliVolts)
+        && !board.isExternalPowered()) {
+      if (_display != NULL) {
+        _display->startFrame();
+        _display->setTextSize(2);
+        _display->setColor(UIColor::warning_txt);
+        _display->drawTextCentered(_display->width() / 2, 20, "Low Battery.");
+        _display->drawTextCentered(_display->width() / 2, 40, "Shutting Down!");
+        _display->endFrame();
+        if (_display->isEink() == false) { delay(3000); }
+      }
+      shutdown();
+    }
   }
-#endif
 }
 
 char UITask::checkDisplayOn(char c) {

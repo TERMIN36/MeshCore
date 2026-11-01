@@ -1,6 +1,8 @@
 #include "MyMesh.h"
 #include "CompanionLink.h"
 #include <helpers/RadioProfiles.h>
+#include <helpers/BatteryScale.h>
+#include <helpers/BattShutdown.h>
 
 #include <Arduino.h> // needed for PlatformIO
 #include <Mesh.h>
@@ -2663,7 +2665,7 @@ static void formatLocalDateTime(uint32_t utc, int16_t tz_mins, char* buf, size_t
 void MyMesh::runCLICommand(char* command, Print& out) {
     char line[96];
     if (strcmp(command, "help") == 0 || strcmp(command, "?") == 0) {
-      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, get adc.multiplier, cal adc, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, set tx.led on|off, set adc.multiplier, set link ble|wifi|usb|off, set wifi.ssid, set wifi.password, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
+      out.print("help, ver, clock, clock.node, clock.node remove <index>, clock pull, get adc.multiplier, get batt.shutdown, get batt.shutdown.mv, cal adc, set pin N, set tz ±H[:MM], set time YYYY-MM-DD HH:MM[:SS], set clock.node off|<pubkey>, set lang ru|en, set tx.led on|off, set adc.multiplier, set batt.shutdown on|off, set batt.shutdown.mv, set link ble|wifi|usb|off, set wifi.ssid, set wifi.password, ls [path], cat UserData/..|ExtraFS/.., rm path, rebuild, erase, reboot\n");
     } else if (strcmp(command, "ver") == 0) {
       snprintf(line, sizeof(line), "%s %s\n", FIRMWARE_VERSION, FIRMWARE_BUILD_DATE);
       out.print(line);
@@ -2720,17 +2722,30 @@ void MyMesh::runCLICommand(char* command, Print& out) {
         snprintf(line, sizeof(line), "  > %.3f\n", adc_mult);
         out.print(line);
       }
+    } else if (memcmp(command, "get batt.shutdown.mv", 20) == 0 && (command[20] == 0 || command[20] == ' ')) {
+      uint16_t eff = effectiveBattShutdownMv(_prefs.batt_shutdown_mv);
+      if (_prefs.batt_shutdown_mv == 0) {
+        snprintf(line, sizeof(line), "  > default (%u mV)\n", (unsigned)eff);
+      } else {
+        snprintf(line, sizeof(line), "  > %u\n", (unsigned)_prefs.batt_shutdown_mv);
+      }
+      out.print(line);
+    } else if (memcmp(command, "get batt.shutdown", 17) == 0 && (command[17] == 0 || command[17] == ' ')) {
+      out.print(_prefs.batt_shutdown_en ? "  > on\n" : "  > off\n");
     } else if (memcmp(command, "cal adc ", 8) == 0) {
       const char* arg = &command[8];
       while (*arg == ' ') arg++;
       int true_mv = atoi(arg);
-      if (true_mv < 500 || true_mv > 5000) {
-        out.print("  Error: mV must be 500-5000\n");
+      uint16_t cal_min = boardCalAdcMinMv();
+      uint16_t cal_max = boardCalAdcMaxMv();
+      if (true_mv < (int)cal_min || true_mv > (int)cal_max) {
+        snprintf(line, sizeof(line), "  Error: mV must be %u-%u\n", (unsigned)cal_min, (unsigned)cal_max);
+        out.print(line);
       } else if (board.getAdcMultiplier() == 0.0f) {
         out.print("  Error: unsupported\n");
       } else {
         uint16_t shown = board.getBattMilliVolts();
-        if (shown < 500) {
+        if (shown < cal_min) {
           out.print("  Error: battery reading too low\n");
         } else {
           float new_mult;
@@ -2865,6 +2880,45 @@ void MyMesh::runCLICommand(char* command, Print& out) {
             _prefs.adc_multiplier = 0.0f;
             out.print("  Error: unsupported\n");
           }
+        }
+      } else if (memcmp(config, "batt.shutdown.mv", 16) == 0 && (config[16] == 0 || config[16] == ' ')) {
+        const char* arg = (config[16] == ' ') ? &config[17] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          uint16_t eff = effectiveBattShutdownMv(_prefs.batt_shutdown_mv);
+          if (_prefs.batt_shutdown_mv == 0) {
+            snprintf(line, sizeof(line), "  > default (%u mV)\n", (unsigned)eff);
+          } else {
+            snprintf(line, sizeof(line), "  > %u\n", (unsigned)_prefs.batt_shutdown_mv);
+          }
+          out.print(line);
+        } else {
+          long mv = atol(arg);
+          if (mv < 0 || mv > 15000) {
+            out.print("  Error: mV must be 0-15000 (0=default)\n");
+          } else {
+            _prefs.batt_shutdown_mv = (uint16_t)mv;
+            savePrefs();
+            if (_prefs.batt_shutdown_mv == 0) {
+              snprintf(line, sizeof(line), "  > default threshold %u mV\n",
+                       (unsigned)boardDefaultBattShutdownMv());
+            } else {
+              snprintf(line, sizeof(line), "  > threshold %u mV\n", (unsigned)_prefs.batt_shutdown_mv);
+            }
+            out.print(line);
+          }
+        }
+      } else if (memcmp(config, "batt.shutdown", 13) == 0 && (config[13] == 0 || config[13] == ' ')) {
+        const char* arg = (config[13] == ' ') ? &config[14] : "";
+        while (*arg == ' ') arg++;
+        if (*arg == 0) {
+          out.print(_prefs.batt_shutdown_en ? "  > on\n" : "  > off\n");
+        } else if (strcmp(arg, "on") != 0 && strcmp(arg, "off") != 0) {
+          out.print("  Error: on or off\n");
+        } else {
+          _prefs.batt_shutdown_en = strcmp(arg, "on") == 0;
+          savePrefs();
+          out.print(_prefs.batt_shutdown_en ? "  > batt.shutdown on\n" : "  > batt.shutdown off\n");
         }
       } else if (memcmp(config, "radio.fem.rxgain", 16) == 0 &&
                  (config[16] == 0 || config[16] == ' ')) {

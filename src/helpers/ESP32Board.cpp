@@ -7,9 +7,10 @@
 #include <driver/gpio.h>
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
 #include "hal/usb_serial_jtag_ll.h"
-#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT && defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE
-#include <HWCDC.h>
 #endif
+#if (defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S3)) && defined(ARDUINO_USB_CDC_ON_BOOT) && \
+    ARDUINO_USB_CDC_ON_BOOT
+#include <HWCDC.h>
 #endif
 
 static volatile TaskHandle_t s_wait_task = nullptr;
@@ -30,7 +31,7 @@ struct C3UsbIdleMask {
   bool held;
   C3UsbIdleMask() : ena(0), held(false) {
 #if defined(CONFIG_IDF_TARGET_ESP32C3)
-#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT && defined(ARDUINO_USB_MODE) && ARDUINO_USB_MODE
+#if defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
     if (HWCDC::isPlugged()) return;
 #endif
     ena = usb_serial_jtag_ll_get_intr_ena_status();
@@ -148,6 +149,43 @@ int64_t ESP32Board::runLightSleep(uint32_t timeout_ms, gpio_num_t dio) {
     }
   }
   return esp_timer_get_time() - t0;
+}
+
+bool ESP32Board::usbConsoleHostAttached() const {
+#if (defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S3)) && defined(ARDUINO_USB_CDC_ON_BOOT) && \
+    ARDUINO_USB_CDC_ON_BOOT
+  static uint32_t attached_until = 0;
+  if (HWCDC::isPlugged()) {
+    attached_until = millis() + 2000;
+    if (attached_until == 0) attached_until = 1;
+    return true;
+  }
+  return attached_until != 0 && (int32_t)(millis() - attached_until) < 0;
+#else
+  return false;
+#endif
+}
+
+void ESP32Board::usbConsoleKeepCpuAwake(bool awake) {
+#if defined(CONFIG_PM_ENABLE) && CONFIG_PM_ENABLE && (defined(CONFIG_IDF_TARGET_ESP32C3) || defined(CONFIG_IDF_TARGET_ESP32S3)) && \
+    defined(ARDUINO_USB_CDC_ON_BOOT) && ARDUINO_USB_CDC_ON_BOOT
+  static esp_pm_lock_handle_t lock = nullptr;
+  static bool held = false;
+  static bool unavailable = false;
+  if (unavailable || awake == held) return;
+  if (awake) {
+    if (!lock && esp_pm_lock_create(ESP_PM_NO_LIGHT_SLEEP, 0, "usb-cli", &lock) != ESP_OK) {
+      lock = nullptr;
+      unavailable = true;
+      return;
+    }
+    if (lock && esp_pm_lock_acquire(lock) == ESP_OK) held = true;
+  } else if (lock && esp_pm_lock_release(lock) == ESP_OK) {
+    held = false;
+  }
+#else
+  (void)awake;
+#endif
 }
 
 bool ESP32Board::setAutoLightSleep(bool enable) {

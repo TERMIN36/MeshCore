@@ -4,6 +4,7 @@
 #include <helpers/RadioProfiles.h>
 #include <Arduino.h>
 #include <helpers/CommonCLI.h>
+#include <helpers/BatteryScale.h>
 #include <helpers/ui/BatteryLevel.h>
 
 extern MyMesh the_mesh;
@@ -50,15 +51,9 @@ void UITask::begin(NodePrefs* node_prefs, const char* build_date, const char* fi
 }
 
 void UITask::renderBatteryIndicator() {
-#ifndef BATT_MIN_MILLIVOLTS
-#define BATT_MIN_MILLIVOLTS 3000
-#endif
-#ifndef BATT_MAX_MILLIVOLTS
-#define BATT_MAX_MILLIVOLTS 4200
-#endif
   uint16_t batteryMilliVolts = _board->getBattMilliVolts();
   static BatteryLevelFilter batt_filter;
-  int batteryPercentage = batt_filter.push(batteryMilliVolts, BATT_MIN_MILLIVOLTS, BATT_MAX_MILLIVOLTS)
+  int batteryPercentage = batt_filter.push(batteryMilliVolts, (int)boardBattMinMv(), (int)boardBattMaxMv())
                           * 100 / BatteryLevelFilter::LEVELS;
 
   int iconWidth = 24;
